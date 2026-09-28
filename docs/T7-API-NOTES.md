@@ -35,6 +35,14 @@
 - 事件循环收尾：`let mut app = DemoApp::default(); let event_loop = EventLoop::builder().build()?; event_loop.run_app(&mut app)?;`（app 先声明，避免 E0597）。
 - 引擎侧：`engine.frame((w,h), scale, now)` → `style_engine_vello::render(&frame.paint)` → `Scene`；字体经 `engine.add_font(bytes)` 注入（仓库不携带字体资产，文本叶宽高 0 可接受）。
 
+## T5b 关键测绘（parley 0.11 → vello 0.10 字形通路）
+
+- **字体数据直通**：parley `Run::font() -> &FontData`（run.rs:45），`FontData` 即 vello 重导出的 `linebender_resource_handle::FontData`（vello lib.rs:132）——sink 侧排版出的 run 可把字体引用直接交给 vello 绘制，无需二次注册。
+- parley `Glyph { id: u32, x: f32, y: f32 }`（glyph.rs:7-10）；`run.glyphs()` / `line.glyphs()`（line.rs:226，绝对坐标待核）均返回 Clone 迭代器。
+- vello `DrawGlyphs::draw(style: impl Into<StyleRef>, glyphs: impl Iterator<Item = Glyph>)`（scene.rs:624）——颜色走 `.brush(...)` 设置器、位移走 `.transform(Affine)`（构造器 `DrawGlyphs::new(scene, font)` 参数形待一次编译验证）。
+- sink 方案（ADR 一致）：中立 DisplayList 不改；`style-engine-vello` 增加 `VelloTextSystem`（系统字体禁用、宿主推字体、与 core TextSystem 同构），`render_ops` 增带文本形态的重载；demo 把同一份字体字节同时推给 engine（测量）与 sink（绘制）。
+- 残留待验证：`DrawGlyphs::new` 形参、行基线 y 的取法（line.rs:179-180 疑为行内绝对坐标字段）。
+
 ## 剩余待查（已全部核实，demo 已按此落地）
 
 1. `InstanceDescriptor.display` = `Option<Box<dyn WgpuHasDisplayHandle>>` → `None`。
