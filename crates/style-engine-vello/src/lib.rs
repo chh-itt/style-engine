@@ -320,7 +320,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *height,
                 *radius,
             );
-            let brush = peniko_gradient(gradient, *radial, *width, *height, state);
+            let brush = peniko_gradient(gradient, *radial, *x, *y, *width, *height, state);
             // 椭圆修正（T4c）：rx≠ry 时对画刷施加以圆心为锚的 x 向缩放
             let brush_transform = radial.and_then(|gm| {
                 if gm.ry > 0.0 && (gm.rx - gm.ry).abs() > 0.01 {
@@ -467,6 +467,8 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
 fn peniko_gradient(
     g: &style_engine::css::property::Gradient,
     radial: Option<style_engine::paint::RadialGeom>,
+    x: f32,
+    y: f32,
     w: f32,
     h: f32,
     state: &RenderState,
@@ -479,19 +481,21 @@ fn peniko_gradient(
             let dir = Vec2::new(sin as f64, -(cos as f64));
             // 渐变线长度：|W·sinθ| + |H·cosθ|
             let line = ((w * sin.abs()) + (h * cos.abs())) as f64 / 2.0;
-            let cx = f64::from(w) / 2.0 + state.offset.x;
-            let cy = f64::from(h) / 2.0 + state.offset.y;
+            // 画刷与形状同处用户空间（形状坐标已叠盒原点+偏移）：中心须含盒原点
+            // （第四批⑤修复：此前漏加 (x,y)，非原点盒的线性渐变采样区错位）
+            let cx = f64::from(x) + f64::from(w) / 2.0 + state.offset.x;
+            let cy = f64::from(y) + f64::from(h) / 2.0 + state.offset.y;
             let start = Point::new(cx - dir.x * line, cy - dir.y * line);
             let end = Point::new(cx + dir.x * line, cy + dir.y * line);
             Gradient::new_linear(start, end)
         }
         style_engine::css::property::GradientKind::Radial(_) => {
-            // T4c：圆心/半径已在 paint 层解析为绝对值；缺失时退回盒心对角线近似
+            // T4c：圆心/半径已在 paint 层解析为绝对值（含盒原点）；缺失时退回盒心对角线近似
             let diag =
                 (((f64::from(w) / 2.0).powi(2) + (f64::from(h) / 2.0).powi(2)).sqrt()) as f32;
             let geom = radial.unwrap_or(style_engine::paint::RadialGeom {
-                cx: w * 0.5,
-                cy: h * 0.5,
+                cx: x + w * 0.5,
+                cy: y + h * 0.5,
                 rx: diag,
                 ry: diag,
             });
@@ -622,9 +626,31 @@ fn stroke_side(
     scene.stroke(&stroke, xform, s.color, None, path);
 }
 
+/// 方角（radius≈0）角部对角线二分（第四批⑤）：外角→内角对角线把角部方块
+/// 分给相邻两边（CSS 语义）；单边存在整块归该边；同色整块一次填充——消除
+/// 旧「全边长直线交叉」的半透明双重着色与「后画方」角色偏差。圆角仍走
+/// 角弧（归属不变）；不等宽圆角弧起点不随邻边带宽调整——近似记 FEATURES。
+fn fill_tri(scene: &mut Scene, xform: Affine, pts: [[f32; 2]; 3], color: AlphaColor<Srgb>) {
+    let mut path = BezPath::new();
+    path.move_to(Point::new(f64::from(pts[0][0]), f64::from(pts[0][1])));
+    for p in &pts[1..] {
+        path.line_to(Point::new(f64::from(p[0]), f64::from(p[1])));
+    }
+    path.close_path();
+    scene.fill(Fill::NonZero, xform, color, None, &path);
+}
+
+fn fill_quad(scene: &mut Scene, xform: Affine, sq: [f32; 4], color: AlphaColor<Srgb>) {
+    let [x0, y0, x1, y1] = sq;
+    fill_tri(scene, xform, [[x0, y0], [x1, y0], [x1, y1]], color);
+    fill_tri(scene, xform, [[x0, y0], [x1, y1], [x0, y1]], color);
+}
+
+/// 方角角部条目：(圆角判定, 拥有边, 相邻边, 方块, 拥有边三角, 相邻边三角)。
+type CornerSpec = (f32, usize, usize, [f32; 4], [[f32; 2]; 3], [[f32; 2]; 3]);
+
 /// 四边分画（T4b）：每边一条「角弧 + 直线」描边路径；角弧按顺时针归属
-/// （TL→top、TR→right、BR→bottom、BL→left）。简化偏差：多色相邻边的
-/// 角部覆盖取后画方，不做对角线混合。
+/// （TL→top、TR→right、BR→bottom、BL→left）。
 #[allow(clippy::too_many_arguments)]
 fn draw_border(
     scene: &mut Scene,
@@ -636,6 +662,7 @@ fn draw_border(
     sides: &[style_engine::paint::BorderSide; 4],
     xform: Affine,
 ) {
+    use style_engine::css::property::BorderStyle;
     let [tl, tr, br, bl] = radius;
     let (wt, wr, wb, wl) = (
         sides[0].width,
@@ -644,64 +671,133 @@ fn draw_border(
         sides[3].width,
     );
     let f = f64::from;
+    let on = |s: &style_engine::paint::BorderSide| s.style != BorderStyle::None && s.width > 0.0;
 
-    // top（TL 弧）
+    // 方角角部方块：(圆角判定, 拥有边, 相邻边, 方块, 拥有边三角, 相邻边三角)
+    let corners: [CornerSpec; 4] = [
+        (
+            tl,
+            0,
+            3,
+            [x, y, x + wl, y + wt],
+            [[x, y], [x + wl, y], [x + wl, y + wt]],
+            [[x, y], [x + wl, y + wt], [x, y + wt]],
+        ),
+        (
+            tr,
+            1,
+            0,
+            [x + w - wr, y, x + w, y + wt],
+            [[x + w, y], [x + w, y + wt], [x + w - wr, y + wt]],
+            [[x + w, y], [x + w - wr, y + wt], [x + w - wr, y]],
+        ),
+        (
+            br,
+            2,
+            1,
+            [x + w - wr, y + h - wb, x + w, y + h],
+            [
+                [x + w, y + h],
+                [x + w - wr, y + h],
+                [x + w - wr, y + h - wb],
+            ],
+            [
+                [x + w, y + h],
+                [x + w - wr, y + h - wb],
+                [x + w, y + h - wb],
+            ],
+        ),
+        (
+            bl,
+            3,
+            2,
+            [x, y + h - wb, x + wl, y + h],
+            [[x, y + h], [x, y + h - wb], [x + wl, y + h - wb]],
+            [[x, y + h], [x + wl, y + h - wb], [x + wl, y + h]],
+        ),
+    ];
+    for (r, owner, other, sq, tri_owner, tri_other) in corners {
+        if r > 0.0 {
+            continue;
+        }
+        let (o, t) = (&sides[owner], &sides[other]);
+        match (on(o), on(t)) {
+            (false, false) => {}
+            (true, false) => fill_quad(scene, xform, sq, o.color),
+            (false, true) => fill_quad(scene, xform, sq, t.color),
+            (true, true) if o.color == t.color => fill_quad(scene, xform, sq, o.color),
+            (true, true) => {
+                fill_tri(scene, xform, tri_owner, o.color);
+                fill_tri(scene, xform, tri_other, t.color);
+            }
+        }
+    }
+
+    // top（TL 弧 / TL 方块右缘起）
     let mut p = BezPath::new();
     if tl > 0.0 && wt > 0.0 {
         let rc = f((tl - wt / 2.0).max(0.5));
         p.move_to(Point::new(f(x + tl) - rc, f(y + tl)));
         quarter_arc(&mut p, f(x + tl), f(y + tl), rc, 180.0);
     } else {
-        p.move_to(Point::new(f(x), f(y + wt / 2.0)));
+        p.move_to(Point::new(f(x + wl), f(y + wt / 2.0)));
     }
     p.line_to(Point::new(
-        if tr > 0.0 { f(x + w - tr) } else { f(x + w) },
+        if tr > 0.0 {
+            f(x + w - tr)
+        } else {
+            f(x + w - wr)
+        },
         f(y + wt / 2.0),
     ));
     stroke_side(scene, &p, &sides[0], xform);
 
-    // right（TR 弧）
+    // right（TR 弧 / TR 方块下缘起）
     let mut p = BezPath::new();
     if tr > 0.0 && wr > 0.0 {
         let rc = f((tr - wr / 2.0).max(0.5));
         p.move_to(Point::new(f(x + w - tr), f(y + tr) - rc));
         quarter_arc(&mut p, f(x + w - tr), f(y + tr), rc, 270.0);
     } else {
-        p.move_to(Point::new(f(x + w - wr / 2.0), f(y)));
+        p.move_to(Point::new(f(x + w - wr / 2.0), f(y + wt)));
     }
     p.line_to(Point::new(
         f(x + w - wr / 2.0),
-        if br > 0.0 { f(y + h - br) } else { f(y + h) },
+        if br > 0.0 {
+            f(y + h - br)
+        } else {
+            f(y + h - wb)
+        },
     ));
     stroke_side(scene, &p, &sides[1], xform);
 
-    // bottom（BR 弧）
+    // bottom（BR 弧 / BR 方块左缘起）
     let mut p = BezPath::new();
     if br > 0.0 && wb > 0.0 {
         let rc = f((br - wb / 2.0).max(0.5));
         p.move_to(Point::new(f(x + w - br) + rc, f(y + h - br)));
         quarter_arc(&mut p, f(x + w - br), f(y + h - br), rc, 0.0);
     } else {
-        p.move_to(Point::new(f(x + w), f(y + h - wb / 2.0)));
+        p.move_to(Point::new(f(x + w - wr), f(y + h - wb / 2.0)));
     }
     p.line_to(Point::new(
-        if bl > 0.0 { f(x + bl) } else { f(x) },
+        if bl > 0.0 { f(x + bl) } else { f(x + wl) },
         f(y + h - wb / 2.0),
     ));
     stroke_side(scene, &p, &sides[2], xform);
 
-    // left（BL 弧）
+    // left（BL 弧 / BL 方块上缘起）
     let mut p = BezPath::new();
     if bl > 0.0 && wl > 0.0 {
         let rc = f((bl - wl / 2.0).max(0.5));
         p.move_to(Point::new(f(x + bl), f(y + h - bl) + rc));
         quarter_arc(&mut p, f(x + bl), f(y + h - bl), rc, 90.0);
     } else {
-        p.move_to(Point::new(f(x + wl / 2.0), f(y + h)));
+        p.move_to(Point::new(f(x + wl / 2.0), f(y + h - wb)));
     }
     p.line_to(Point::new(
         f(x + wl / 2.0),
-        if tl > 0.0 { f(y + tl) } else { f(y) },
+        if tl > 0.0 { f(y + tl) } else { f(y + wt) },
     ));
     stroke_side(scene, &p, &sides[3], xform);
 }

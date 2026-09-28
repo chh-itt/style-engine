@@ -850,6 +850,23 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // 偏心 circle farthest-corner（第四批⑤锁公式）：at 25% 25% →
+        // 圆心 (35, 32.5)；fx = max(25, 75) = 75、fy = max(12.5, 37.5) = 37.5，
+        // r = √(75² + 37.5²) ≈ 83.8526（最远角 = 右下）
+        let (tree, id, style) = setup(
+            "background-image: radial-gradient(circle farthest-corner at 25% 25%, red, blue)",
+            None,
+        );
+        let out = run(&tree, id, style, &HashMap::new());
+        match &out.ops[0] {
+            PaintOp::Gradient { radial, .. } => {
+                let g = radial.expect("radial geometry");
+                let r = (75.0f32 * 75.0 + 37.5 * 37.5).sqrt();
+                assert_eq!((g.cx, g.cy), (35.0, 32.5));
+                assert!((g.rx - r).abs() < 0.01 && (g.ry - r).abs() < 0.01);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

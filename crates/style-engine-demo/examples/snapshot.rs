@@ -29,6 +29,11 @@ div.tilt { box-sizing: border-box; width: 200px; height: 120px; margin: 30px; pa
   background-color: #b83280; border-radius: 10px; opacity: 0.85;
   transform: rotate(-8deg) translate(40px, 10px); }
 div.tcap { font-family: \"DejaVu Sans\"; font-size: 14px; color: #ffffff; white-space: normal; }
+div.edge { width: 160px; height: 90px; margin: 24px; background-color: #155e75;
+  border-style: solid; border-width: 14px;
+  border-top-color: rgba(250, 240, 137, 0.55); border-right-color: rgba(253, 186, 116, 0.55);
+  border-bottom-color: rgba(244, 114, 182, 0.55); border-left-color: rgba(110, 231, 183, 0.55); }
+div.ecap { font-family: \"DejaVu Sans\"; font-size: 12px; color: #f1f5f9; }
 ";
 
 fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
@@ -86,6 +91,10 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
     // 块级文字容器需无文字父壳承载尺寸（既有语义，记 FEATURES）。
     node(Some(100), 10, "tilt", None);
     node(Some(10), 11, "tcap", Some("Rotated card"));
+    // 第四批⑤目验：方角对角线角部（四色半透明边——旧实现角部双重着色 +
+    // 后画方独占，新实现 = 对角线二分、每角一次着色）
+    node(Some(100), 12, "edge", None);
+    node(Some(12), 13, "ecap", Some("corners"));
     // ADR-0007：滚动偏移归宿主——快照固定推进 20px 目验平移 + 裁剪
     let _ = engine.set_scroll_offset(5, 0.0, 20.0);
     let frame = engine.frame((W as f32, H as f32), 1.0, 0.0);
