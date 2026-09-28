@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod css;
 pub mod error;
 
 pub use error::{ContractError, ParseReport};
