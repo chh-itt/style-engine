@@ -48,3 +48,22 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - **独立特性票**，不搭车其他变更。实现必须引入 `unsafe`（指针所有权）、生命周期契约（calc 表达式必须活得比 TaffyTree 长——引擎侧由引擎池拥有、结构变更时回收），并走**独立的 unsafe review**（单独 PR，不与功能混提）。
 - **前置条件**：Numeric Channel（conformance harness 的数值对比通道）先就绪——calc 的正确性只能靠数值级验证（百分比基、嵌套 calc、边界 clamp），Pixel Channel 无法区分 0.5px 级语义差。
 - 替代现状：百分比基按 0 扁平化（FEATURES 布局映射注记）保留至直通落地。
+
+## parley 分词数据调研（2026-09，complex-scripts 已启用）
+
+背景：CJK 快照运行时警告 `ICU4X data error: No segmentation model for complex script: Chinese/Japanese`。本地取证（registry 源码：parley 0.11.1 / icu_segmenter 2.3.0 / icu_provider 2.3.1）结论：
+
+- **已启用** `complex-scripts`（上游 [parley#621](https://github.com/linebender/parley/pull/621)，随 0.11.x 发布）：LineSegmenter/WordSegmenter 切换 `new_dictionary()`。cjdict 已随 icu_segmenter_data 2.3.0 baked（≈1.9MiB 数据段，无 feature 门控），警告消除、CJ 获词典级**词**分段、SEA（泰/老/柬/缅）获词典级行断。
+- **警告来源是词分段非行分段**：行分段数据的 complex_property 为 SA，行规则将 CJ 映射为 ID，永不触达词典查询；词分段数据的 complex_property 含 CJ，遇 CJ run 即查询失败并告警（debug 构建下 icu4x 将 `log::warn!` 映射为 eprintln，release 无输出）。
+- **CJK 行断行仍是 UAX #14**：icu_segmenter 2.x 行分段器有意不加载 CJ 词典（`line.rs` 注释：UAX 14 rules handle CJK characters）——这是上游设计取舍，非缺陷；我们的快照目验（表意文字边界折行）与之一致。
+- **无 provider 注入口**：parley 硬编码 baked 数据（无 DataProvider 参数/re-export），`AnalysisDataSources` 为 pub(crate)。
+- **禁则（kinsoku）上游受限**：parley 唯一断行钩子 `LineBreakOverrideFn` 对非 ASCII 直接返回 None（`break_overrides.rs:135-139`）——CJK 禁则无法经此实现。若将来需要「CJ 词典级行断行」或「禁则」，循 [parley#623](https://github.com/linebender/parley/issues/623)（已按 #621 关闭）的措辞向上游提 issue（"an API to choose the segmenter variant" 或 override 解除 ASCII 限制）。
+
+## 字体资产与 LFS 评估（2026-09）
+
+现状：仓库内字体 ≈19.2MB（DejaVu Regular/Bold ≈1.4MB + Noto Sans SC 可变字体 ≈17.8MB），随用例增长只会更多（conformance 需与浏览器强制同字体，ADR-0003）。
+
+- **方案 A（推荐，建仓时执行）**：git-lfs 收 `*.ttf`/`*.otf`/`*.woff2`——仓库瘦身、CI 需 `git lfs install` + 缓存；LFS 配额是长期成本项，文本类 conformance 资产（golden PNG）同样适用此通道。
+- **方案 B（备选）**：fonttools 对 demo 展示字体做子集化（可压至 ~1–2MB），完整字体置于 conformance 资产外置通道——缺点是子集与全量双制品会漂移，且子集化后的度量须与全量一致（shaping 依赖 cmap/gpos 完整性），不建议在 conformance 路径使用。
+- **现阶段（建仓前）**：保持仓库内直存，不引入工具链成本；CI 化时再切换方案 A。
+- 硬规则不变：字体从不 fork——一律上游原文件 + 许可证随目录归档（LICENSE-DejaVu.txt / LICENSE-NotoSansSC.txt）。
