@@ -65,6 +65,9 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     taffy_root: Option<taffy::NodeId>,
     taffy_node: HashMap<NodeId, taffy::NodeId>,
     styles: HashMap<NodeId, ComputedStyle>,
+    /// 内置文本栈（feature = "text"；字体字节由宿主推送）。
+    #[cfg(feature = "text")]
+    text: crate::text::TextSystem,
 }
 
 impl<K: Copy + Eq + Hash + 'static> Default for StyleEngine<K> {
@@ -92,6 +95,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             scale: 1.0,
             now: 0.0,
             taffy: taffy::TaffyTree::new(),
+            #[cfg(feature = "text")]
+            text: crate::text::TextSystem::new(),
             taffy_root: None,
             taffy_node: HashMap::new(),
             styles: HashMap::new(),
@@ -397,6 +402,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_style = false;
     }
 
+    /// 宿主推入字体数据（feature = "text"）；字体变化影响文本测量，
+    /// 触发全树样式/布局失效。
+    #[cfg(feature = "text")]
+    pub fn add_font(&mut self, data: Vec<u8>) {
+        self.text.add_font(data);
+        self.dirty_style = true;
+        self.dirty_struct = true;
+    }
+
     fn restyle_node(&mut self, id: NodeId, parent_id: Option<NodeId>) {
         let parent_style = parent_id.and_then(|p| self.styles.get(&p).cloned());
         let cs = compute_node(
@@ -406,6 +420,22 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             &self.media,
             parent_style.as_ref(),
         );
+        // T5：未推送测量的文本叶 → 内置 parley 测量（无字体时宽高 0，不落表）
+        #[cfg(feature = "text")]
+        if !self.measures.contains_key(&id)
+            && self
+                .tree
+                .node(id)
+                .text
+                .as_ref()
+                .is_some_and(|t| !t.is_empty())
+        {
+            let text = self.tree.node(id).text.clone().unwrap_or_default();
+            let (w, h) = self.text.measure(&text, &cs);
+            if w > 0.0 || h > 0.0 {
+                self.measures.insert(id, (w, h));
+            }
+        }
         let mut ts = map_style(&cs, &self.media);
         if let Some((w, h)) = self.measures.get(&id) {
             ts.size = taffy::prelude::Size {

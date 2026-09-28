@@ -37,6 +37,9 @@ pub mod paint;
 pub mod selector;
 pub mod tree;
 
+#[cfg(feature = "text")]
+pub mod text;
+
 pub use cascade::{Candidate, CascadeOutput, CustomCandidate, MatchedRule, Origin};
 pub use computed::{ComputedStyle, compute_node};
 #[cfg(feature = "layout")]
@@ -44,3 +47,5 @@ pub use engine::{Frame, LayoutEntry, StyleEngine};
 
 pub use error::{ContractError, ParseReport};
 pub use paint::{DisplayList, PaintOp};
+#[cfg(feature = "text")]
+pub use text::TextSystem;
