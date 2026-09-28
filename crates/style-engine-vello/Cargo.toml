@@ -10,6 +10,7 @@ license.workspace = true
 style-engine = { path = "../style-engine", version = "0.1.0" }
 vello = { workspace = true }
 wgpu = { workspace = true }
+parley = { workspace = true }
 
 [lints]
 workspace = true

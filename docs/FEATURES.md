@@ -26,7 +26,7 @@ sticky / fixed（依赖滚动语义的完整所有权，滚动偏移已按 ADR-0
 - 阴影：无模糊半径、无 inset（vello 0.10 无内置高斯模糊）；`PaintOp::Shadow` 以偏移半透明矩形近似。
 - 边框：四边统一取上边 width/style/color（`PaintOp::Border` 单值）；dashed/dotted 以 dash pattern 近似，圆角描边随形状。
 - 渐变：radial = 正圆、半径取对角线/2（farthest-corner 近似）；stop 缺省位置按 CSS 语义均匀补位；插值色空间 sRGB。
-- 文本：`PaintOp::Text` 记录排版输入（text/color/size/family/weight/italic），vello sink 暂跳过字形（T5b 票据）；文本测量已内置（text.rs，parley 0.11，零副作用——禁用系统字体枚举、字体字节由宿主 `add_font` 推送、未推送测量的文本叶自动测量、无界宽度单行）。
+- 文本：`PaintOp::Text` 经 sink `VelloTextSystem`（parley 0.11 排版 + DrawGlyphs）落字形（零副作用——系统字体禁用、字体字节由宿主双推 engine 测量/sink 绘制；无界宽度单行）；文本测量亦内置（text.rs），未推送测量的文本叶自动测量。
 - opacity / 背景图片：属性未实现（BackgroundImage 仅 Gradient/None；Opacity 未映射）。
 - z-index：已解析物化，绘制仍按树序；stacking context 属 T1 票据。
 - 布局映射：display:inline 缺席（统一块化）；calc 含百分比时百分比基按 0 扁平化；vw/vh 已按视口解析。

@@ -23,6 +23,143 @@ pub fn render_ops(list: &DisplayList, scene: &mut Scene) {
     }
 }
 
+/// 带文本绘制形态：Text 基元经 sink 侧 parley 排版 + DrawGlyphs 落字形。
+pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut VelloTextSystem) {
+    let mut state = RenderState::default();
+    for op in &list.ops {
+        if let PaintOp::Text {
+            x,
+            y,
+            text: content,
+            color,
+            font_size,
+            font_family,
+            font_weight,
+            italic,
+        } = op
+        {
+            text.draw_text(
+                scene,
+                *x + state.offset.x as f32,
+                *y + state.offset.y as f32,
+                content,
+                *color,
+                *font_size,
+                font_family,
+                *font_weight,
+                *italic,
+            );
+            continue;
+        }
+        apply_op(op, scene, &mut state);
+    }
+}
+
+/// sink 侧文本系统（零副作用：系统字体禁用，字体由宿主推入）。
+pub struct VelloTextSystem {
+    font_cx: parley::FontContext,
+    layout_cx: parley::LayoutContext<()>,
+}
+
+impl Default for VelloTextSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VelloTextSystem {
+    pub fn new() -> Self {
+        Self {
+            font_cx: parley::FontContext {
+                collection: parley::fontique::Collection::new(
+                    parley::fontique::CollectionOptions {
+                        system_fonts: false,
+                        ..parley::fontique::CollectionOptions::default()
+                    },
+                ),
+                source_cache: parley::fontique::SourceCache::default(),
+            },
+            layout_cx: parley::LayoutContext::default(),
+        }
+    }
+
+    pub fn add_font(&mut self, data: Vec<u8>) {
+        self.font_cx
+            .collection
+            .register_fonts(parley::fontique::Blob::new(std::sync::Arc::new(data)), None);
+    }
+
+    /// 绘制单个 Text 基元（原点 = 内容盒左上；无字体时为无字形 no-op）。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text(
+        &mut self,
+        scene: &mut Scene,
+        x: f32,
+        y: f32,
+        content: &str,
+        color: AlphaColor<Srgb>,
+        font_size: f32,
+        font_family: &style_engine::css::property::FontFamilyList,
+        font_weight: f32,
+        italic: bool,
+    ) {
+        if content.is_empty() {
+            return;
+        }
+        let family: std::borrow::Cow<'static, str> = match font_family.0.iter().next() {
+            Some(style_engine::css::property::FamilyName::Named(s)) => s.clone().into(),
+            Some(style_engine::css::property::FamilyName::Serif) => "serif".into(),
+            Some(style_engine::css::property::FamilyName::SansSerif) => "sans-serif".into(),
+            Some(style_engine::css::property::FamilyName::Monospace) => "monospace".into(),
+            Some(style_engine::css::property::FamilyName::Cursive) => "cursive".into(),
+            Some(style_engine::css::property::FamilyName::Fantasy) => "fantasy".into(),
+            Some(style_engine::css::property::FamilyName::SystemUi) => "system-ui".into(),
+            None => "sans-serif".into(),
+        };
+        let mut builder = self
+            .layout_cx
+            .ranged_builder(&mut self.font_cx, content, 1.0, false);
+        builder.push_default(parley::style::StyleProperty::FontSize(font_size));
+        builder.push_default(parley::style::StyleProperty::FontWeight(
+            parley::fontique::FontWeight::new(font_weight),
+        ));
+        builder.push_default(parley::FontFamily::Source(family));
+        if italic {
+            builder.push_default(parley::style::StyleProperty::FontStyle(
+                parley::fontique::FontStyle::Italic,
+            ));
+        }
+        let mut layout = builder.build(content);
+        layout.break_all_lines(None);
+        for line in layout.lines() {
+            for item in line.items() {
+                let parley::layout::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                let run = glyph_run.run();
+                let font = run.font().clone();
+                let tx = x + glyph_run.offset();
+                let ty = y + glyph_run.baseline();
+                scene
+                    .draw_glyphs(&font)
+                    .transform(vello::kurbo::Affine::translate((
+                        f64::from(tx),
+                        f64::from(ty),
+                    )))
+                    .brush(color)
+                    .draw(
+                        Fill::NonZero,
+                        glyph_run.glyphs().map(|g| vello::Glyph {
+                            id: g.id,
+                            x: g.x,
+                            y: g.y,
+                        }),
+                    );
+            }
+        }
+    }
+}
+
 /// 构建独立场景。
 pub fn render(list: &DisplayList) -> Scene {
     let mut scene = Scene::new();

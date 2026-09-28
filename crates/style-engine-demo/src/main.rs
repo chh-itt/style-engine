@@ -33,6 +33,7 @@ struct DemoApp {
     window: Option<&'static dyn Window>,
     gpu: Option<GpuState>,
     engine: StyleEngine<u64>,
+    text: style_engine_vello::VelloTextSystem,
     now: f64,
 }
 
@@ -42,6 +43,7 @@ impl Default for DemoApp {
             window: None,
             gpu: None,
             engine: StyleEngine::new(),
+            text: style_engine_vello::VelloTextSystem::new(),
             now: 0.0,
         }
     }
@@ -94,7 +96,8 @@ impl DemoApp {
         let frame = self
             .engine
             .frame((w as f32, h as f32), window.scale_factor() as f32, self.now);
-        let scene = style_engine_vello::render(&frame.paint);
+        let mut scene = vello::Scene::new();
+        style_engine_vello::render_ops_with_text(&frame.paint, &mut scene, &mut self.text);
         let tex = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
