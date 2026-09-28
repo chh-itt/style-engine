@@ -11,7 +11,7 @@ use cssparser::{Parser, Token, match_ignore_ascii_case};
 use smallvec::SmallVec;
 
 /// T0 属性（FEATURES.md 语法层清单）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PropertyId {
     // 布局：显示与定位
     Display,

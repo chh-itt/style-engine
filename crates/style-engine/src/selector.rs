@@ -12,7 +12,7 @@ use selectors::context::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
     SelectorCaches,
 };
-use selectors::matching::{ElementSelectorFlags, matches_selector_list};
+use selectors::matching::{ElementSelectorFlags, matches_selector};
 use selectors::parser::{
     NonTSPseudoClass, ParseRelative, Parser as SelectorParserTrait,
     PseudoElement as PseudoElementTrait, SelectorImpl as SelectorImplTrait, SelectorList,
@@ -399,6 +399,15 @@ impl<'a> ElementTrait for TreeNode<'a> {
 
 /// 单节点选择器列表匹配。
 pub fn matches(tree: &StyleTree, id: crate::tree::NodeId, list: &StyleSelectorList) -> bool {
+    match_specificity(tree, id, list).is_some()
+}
+
+/// 匹配并返回命中选择器的特异性（级联排序键）；未命中 → None。
+pub fn match_specificity(
+    tree: &StyleTree,
+    id: crate::tree::NodeId,
+    list: &StyleSelectorList,
+) -> Option<u32> {
     let element = TreeNode::new(tree, id);
     let mut caches = SelectorCaches::default();
     let mut context = MatchingContext::new(
@@ -409,7 +418,10 @@ pub fn matches(tree: &StyleTree, id: crate::tree::NodeId, list: &StyleSelectorLi
         NeedsSelectorFlags::No,
         MatchingForInvalidation::No,
     );
-    matches_selector_list(list, &element, &mut context)
+    list.slice()
+        .iter()
+        .find(|s| matches_selector(s, 0, None, &element, &mut context))
+        .map(|s| s.specificity())
 }
 
 #[cfg(test)]

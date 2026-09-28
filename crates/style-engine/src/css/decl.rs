@@ -143,8 +143,21 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationBlockParser {
         let post_state = input.state(); // 值结束、!important 之前
         input.reset(&start_state);
 
-        // custom property：原样存 token（值可为任意 token 流）
+        // custom property：原样存 token（值可为任意 token 流）；
+        // 去除首尾空白 token（capture 从冒号后开始，会带前导空白）
         if name.starts_with("--") {
+            while buf
+                .first()
+                .is_some_and(|t| t.text.chars().all(|c| c.is_ascii_whitespace()))
+            {
+                buf.remove(0);
+            }
+            while buf
+                .last()
+                .is_some_and(|t| t.text.chars().all(|c| c.is_ascii_whitespace()))
+            {
+                buf.pop();
+            }
             self.block.custom.insert(name.to_string(), buf);
             // 尾部只允许可选 !important（MVP：标记忽略，偏差记录）
             input.reset(&post_state);
@@ -274,6 +287,12 @@ impl<'i> cssparser::RuleBodyItemParser<'i, (), ()> for DeclarationBlockParser {
     fn parse_qualified(&self) -> bool {
         false
     }
+}
+
+/// 便捷入口：解析 style 属性文本（内联声明；容错同块解析）。
+pub fn parse_inline_declarations(source: &str) -> (DeclarationBlock, ParseReport) {
+    let mut input = cssparser::Parser::new(source);
+    parse_declaration_block(&mut input)
 }
 
 /// 解析声明列表（内联 style 或规则体）。返回声明块 + 容错报告。

@@ -24,6 +24,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cascade;
+pub mod computed;
 pub mod css;
 pub mod error;
 pub mod selector;
