@@ -26,5 +26,7 @@
 
 pub mod css;
 pub mod error;
+pub mod selector;
+pub mod tree;
 
 pub use error::{ContractError, ParseReport};

@@ -2067,9 +2067,11 @@ name = "style-engine"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "cssparser 0.37.0",
  "cssparser 0.38.0",
  "parley",
  "peniko",
+ "precomputed-hash",
  "selectors",
  "slotmap",
  "smallvec",

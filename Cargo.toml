@@ -18,6 +18,11 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 # --- CSS 语法层（servo 系，ADR-0004） ---
 cssparser = "0.38.0"
+# selectors 0.40 与 cssparser 0.37 配对（0.38 起解析器改为单生命周期，
+# 两者无法共享类型）；cssparser-sel 仅服务 selector.rs 内部的解析/匹配，
+# 与解析层的 cssparser 0.38 不产生类型交集（见 docs/DEPENDENCIES.md）。
+cssparser-sel = { package = "cssparser", version = "0.37.0" }
+precomputed-hash = "0.1.1"
 selectors = "0.40.0"
 
 # --- linebender 绘制词汇表与渲染栈（ADR-0001/0002） ---

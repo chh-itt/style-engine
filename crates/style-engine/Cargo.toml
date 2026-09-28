@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 cssparser = { workspace = true }
+cssparser-sel = { workspace = true }
+precomputed-hash = { workspace = true }
 selectors = { workspace = true }
 peniko = { workspace = true }
 slotmap = { workspace = true }
