@@ -25,6 +25,10 @@ div.cjk { font-family: \"Noto Sans SC\"; font-size: 16px; color: #f1f5f9; white-
 div.scroll { width: 240px; height: 80px; overflow-y: scroll; background-color: #0e7490; }
 div.row { height: 40px; background-color: #22d3ee; }
 div.alt { background-color: #164e63; }
+div.tilt { box-sizing: border-box; width: 200px; height: 120px; margin: 30px; padding: 12px;
+  background-color: #b83280; border-radius: 10px; opacity: 0.85;
+  transform: rotate(-8deg) translate(40px, 10px); }
+div.tcap { font-family: \"DejaVu Sans\"; font-size: 14px; color: #ffffff; white-space: normal; }
 ";
 
 fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
@@ -53,7 +57,10 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
                 .is_ok()
         );
     };
-    node(None, 0, "card", None);
+    // 引擎契约：仅一个根。page 为透明单根容器（默认块、无样式），
+    // 顶层卡片/CJK/滚动/倾斜块均为其子节点。
+    node(None, 100, "page", None);
+    node(Some(100), 0, "card", None);
     node(Some(0), 1, "badge", None);
     node(Some(0), 2, "title", Some("Style Engine Render Check"));
     node(
@@ -63,16 +70,17 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
         Some("The quick brown fox jumps over the lazy dog 0123456789"),
     );
     node(Some(0), 4, "veil", None);
-    node(
-        Some(0),
-        9,
-        "cjk",
-        Some("样式引擎渲染检查：CJK 字体接入与断行。"),
-    );
-    node(Some(0), 5, "scroll", None);
+    node(Some(100), 9, "cjk", Some("样式引擎渲染检查：CJK 字体接入与断行。"));
+    node(Some(100), 5, "scroll", None);
     node(Some(5), 6, "row", None);
     node(Some(5), 7, "row alt", None);
     node(Some(5), 8, "row", None);
+    // ADR-0009 目验：transform 层对（rotate×translate 多函数折叠）+ 内嵌文字
+    // 随 run 变换旋转 + opacity 层嵌套（层栈序 transform→opacity）。
+    // 注：文字放子节点——文本叶的盒尺寸=文本实测（显式 width 不生效），
+    // 块级文字容器需无文字父壳承载尺寸（既有语义，记 FEATURES）。
+    node(Some(100), 10, "tilt", None);
+    node(Some(10), 11, "tcap", Some("Rotated card"));
     // ADR-0007：滚动偏移归宿主——快照固定推进 20px 目验平移 + 裁剪
     let _ = engine.set_scroll_offset(5, 0.0, 20.0);
     let frame = engine.frame((W as f32, H as f32), 1.0, 0.0);
