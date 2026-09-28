@@ -44,6 +44,9 @@ impl<K: Copy + PartialEq> Frame<K> {
     }
 }
 
+/// 非文本叶固有尺寸区间（T5d）：((min_w, min_h), (max_w, max_h))。
+pub(crate) type IntrinsicSize = ((f32, f32), (f32, f32));
+
 /// 样式引擎实例。K 为宿主节点键（Copy + Eq + Hash）。
 pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     tree: StyleTree,
@@ -77,6 +80,11 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     auto_text: std::collections::HashSet<NodeId>,
     /// 文本叶测量所用换行约束（T5c-2）：绘制与测量折行一致；缺席 = 无界。
     wrap_widths: HashMap<NodeId, Option<f32>>,
+    /// 文本叶最小内容尺寸（T5d，shrink-to-fit 下限；restyle 期随自动测量产出）。
+    #[cfg(feature = "text")]
+    min_measures: HashMap<NodeId, (f32, f32)>,
+    /// 宿主推送的非文本叶固有尺寸区间（T5d）：(min, max) 各轴。
+    intrinsics: HashMap<NodeId, IntrinsicSize>,
     /// 内置文本栈（feature = "text"；字体字节由宿主推送）。
     #[cfg(feature = "text")]
     text: crate::text::TextSystem,
@@ -117,6 +125,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             #[cfg(feature = "text")]
             auto_text: std::collections::HashSet::new(),
             wrap_widths: HashMap::new(),
+            #[cfg(feature = "text")]
+            min_measures: HashMap::new(),
+            intrinsics: HashMap::new(),
         }
     }
 
@@ -207,6 +218,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.parents.clear();
             self.wrap_widths.clear();
             #[cfg(feature = "text")]
+            self.min_measures.clear();
+            self.intrinsics.clear();
+            #[cfg(feature = "text")]
             self.auto_text.clear();
             self.scroll_offsets.clear();
             self.root_key = None;
@@ -232,6 +246,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.span_styles.remove(&d);
             self.parents.remove(&d);
             self.wrap_widths.remove(&d);
+            #[cfg(feature = "text")]
+            self.min_measures.remove(&d);
+            self.intrinsics.remove(&d);
             #[cfg(feature = "text")]
             self.auto_text.remove(&d);
             self.scroll_offsets.remove(&d);
@@ -342,6 +359,92 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
+    /// 推送非文本叶固有尺寸区间（T5d，shrink-to-fit 第三 pass 消费）：
+    /// (min_w, min_h) / (max_w, max_h) 各轴独立。definite 首选尺寸仍走
+    /// [`StyleEngine::set_leaf_measure`]；absolute 叶按包含块宽夹紧到区间内。
+    pub fn set_leaf_intrinsic(
+        &mut self,
+        key: K,
+        min_w: f32,
+        min_h: f32,
+        max_w: f32,
+        max_h: f32,
+    ) -> Result<(), crate::error::ContractError> {
+        let Some(&id) = self.key_to_node.get(&key) else {
+            return Err(crate::error::ContractError::UnknownNode);
+        };
+        self.intrinsics.insert(id, ((min_w, min_h), (max_w, max_h)));
+        Ok(())
+    }
+
+    /// 节点是否 position: absolute（T5d：不按父流宽换行，走 shrink-to-fit）。
+    fn is_absolute(&self, id: NodeId) -> bool {
+        matches!(
+            self.styles
+                .get(&id)
+                .and_then(|cs| cs.get(crate::css::property::PropertyId::Position)),
+            Some(crate::css::property::DeclValue::Position(
+                crate::css::property::Position::Absolute
+            ))
+        )
+    }
+
+    /// 节点是否定位元素（position != static，absolute 叶的包含块判定）。
+    fn is_positioned(&self, id: NodeId) -> bool {
+        matches!(
+            self.styles
+                .get(&id)
+                .and_then(|cs| cs.get(crate::css::property::PropertyId::Position)),
+            Some(crate::css::property::DeclValue::Position(
+                crate::css::property::Position::Relative | crate::css::property::Position::Absolute
+            ))
+        )
+    }
+
+    /// absolute 叶的可用宽（T5d）：最近 positioned 祖先的内容宽（border-box
+    /// − padding − 已生效 border，`used_h_inset`）；无 positioned 祖先 → 视口宽。
+    fn abs_avail_width(&self, id: NodeId) -> Option<f32> {
+        let mut cb = self.parents.get(&id).copied();
+        let mut cb_id: Option<NodeId> = None;
+        while let Some(p) = cb {
+            if self.is_positioned(p) {
+                cb_id = Some(p);
+                break;
+            }
+            cb = self.parents.get(&p).copied();
+        }
+        match cb_id {
+            Some(p) => {
+                let tid = *self.taffy_node.get(&p)?;
+                let pline = self.taffy.layout(tid).ok()?;
+                let cbcs = self.styles.get(&p)?;
+                let rctx = crate::css::value::ResolveCtx {
+                    em: cbcs.font_size_px(),
+                    rem: 16.0,
+                    viewport_w: self.media.viewport_w,
+                    viewport_h: self.media.viewport_h,
+                };
+                let inset: f32 = [
+                    (crate::css::property::PropertyId::PaddingLeft, None),
+                    (crate::css::property::PropertyId::PaddingRight, None),
+                    (
+                        crate::css::property::PropertyId::BorderLeftWidth,
+                        Some(crate::css::property::PropertyId::BorderLeftStyle),
+                    ),
+                    (
+                        crate::css::property::PropertyId::BorderRightWidth,
+                        Some(crate::css::property::PropertyId::BorderRightStyle),
+                    ),
+                ]
+                .iter()
+                .filter_map(|(pid, style_pid)| used_h_inset(cbcs, *pid, *style_pid, &rctx))
+                .sum();
+                Some((pline.size.width - inset).max(0.0))
+            }
+            None => Some(self.viewport.0),
+        }
+    }
+
     /// 推送节点滚动偏移（绘制消费；T4 生效）。
     pub fn set_scroll_offset(
         &mut self,
@@ -392,6 +495,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let mut remeasure: Vec<(NodeId, f32)> = Vec::new();
             for &id in self.measures.keys() {
                 if !self.auto_text.contains(&id) {
+                    continue;
+                }
+                // absolute 叶不按父流宽换行——shrink-to-fit 由第三 pass 夹紧（T5d）
+                if self.is_absolute(id) {
                     continue;
                 }
                 let Some(cs) = self.styles.get(&id) else {
@@ -464,6 +571,72 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         height: taffy::prelude::Dimension::length(h),
                     };
                     let _ = self.taffy.set_style(tid, ts);
+                }
+            }
+            // 第三 pass（T5d，shrink-to-fit，CSS 10.3.7）：absolute 叶按包含块
+            // 可用宽夹紧——width = clamp(min_content, avail, max_content)。
+            // cb = 最近 positioned 祖先（无 → 视口宽）；近似：可用宽未扣自身
+            // margin/静态位置。文本叶 max_content 取 pass1 无界测量（wrap pass
+            // 已跳过 absolute 叶，measures 仍是无界值）；LeafMeasure 叶用
+            // set_leaf_intrinsic 区间。
+            let mut shrink: Vec<(NodeId, f32)> = Vec::new();
+            for &id in self.measures.keys() {
+                if !self.is_absolute(id) || !self.tree.children(id).is_empty() {
+                    continue;
+                }
+                let (min_w, max_w) = if self.auto_text.contains(&id) {
+                    let Some(min) = self.min_measures.get(&id) else {
+                        continue;
+                    };
+                    let Some(m) = self.measures.get(&id) else {
+                        continue;
+                    };
+                    (min.0, m.0.max(min.0))
+                } else if let Some(((mnw, _), (mxw, _))) = self.intrinsics.get(&id) {
+                    (*mnw, *mxw)
+                } else {
+                    continue;
+                };
+                let Some(avail) = self.abs_avail_width(id) else {
+                    continue;
+                };
+                let width = avail.min(max_w).max(min_w);
+                shrink.push((id, width));
+            }
+            for (id, width) in shrink {
+                if self.auto_text.contains(&id) {
+                    let text = self.tree.node(id).text.clone().unwrap_or_default();
+                    let Some(cs) = self.styles.get(&id).cloned() else {
+                        continue;
+                    };
+                    let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
+                    let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                        owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
+                    let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, Some(width));
+                    if let Some(old) = self.measures.get(&id) {
+                        reflow |=
+                            (old.0 - w).abs() > f32::EPSILON || (old.1 - h).abs() > f32::EPSILON;
+                    }
+                    self.measures.insert(id, (w, h));
+                    self.wrap_widths.insert(id, Some(width));
+                } else {
+                    let h = self.measures.get(&id).map(|m| m.1).unwrap_or(0.0);
+                    if let Some(old) = self.measures.get(&id) {
+                        reflow |= (old.0 - width).abs() > f32::EPSILON;
+                    }
+                    self.measures.insert(id, (width, h));
+                }
+                if let Some(&tid) = self.taffy_node.get(&id) {
+                    if let Some(cs) = self.styles.get(&id) {
+                        let mut ts = map_style(cs, &self.media);
+                        ts.size = taffy::prelude::Size {
+                            width: taffy::prelude::Dimension::length(width),
+                            height: taffy::prelude::Dimension::length(
+                                self.measures.get(&id).map(|m| m.1).unwrap_or(0.0),
+                            ),
+                        };
+                        let _ = self.taffy.set_style(tid, ts);
+                    }
                 }
             }
             if reflow {
@@ -642,6 +815,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.span_styles.clear();
         self.parents.clear();
         self.wrap_widths.clear();
+        #[cfg(feature = "text")]
+        self.min_measures.clear();
         let root = self.tree.root();
         self.restyle_node(root, None);
         self.dirty_style = false;
@@ -712,6 +887,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, None);
             if w > 0.0 || h > 0.0 {
                 self.measures.insert(id, (w, h));
+                let min = self.text.measure_min_content(&text, &cs, &span_refs);
+                self.min_measures.insert(id, min);
                 self.auto_text.insert(id);
             }
         }
@@ -1104,6 +1281,145 @@ mod tests {
         let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
         let b = frame.find(Key(1)).unwrap();
         assert_eq!((b.x, b.y, b.width, b.height), (0.0, 0.0, 200.0, 40.0));
+    }
+
+    #[test]
+    fn min_content_is_widest_atom() {
+        // T5d：min-content = 0 宽强制断行后的最宽行（最宽不可断原子）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(
+            engine
+                .set_stylesheet("div { font-family: \"DejaVu Sans\"; font-size: 16px; }")
+                .is_clean()
+        );
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("div".into()),
+                        text: Some("hello world foo".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let id = *engine.key_to_node.get(&Key(1)).unwrap();
+        let cs = engine.styles.get(&id).cloned().unwrap();
+        let (min_w, _) = engine.min_measures.get(&id).copied().unwrap();
+        let (max_w, _) = engine.measures.get(&id).copied().unwrap();
+        assert!(max_w > min_w && min_w > 0.0);
+        // 三个原子中最宽者（"world" 的 w 宽于 "hello"/"foo"，逐个对照）
+        let mut widest = 0.0f32;
+        for word in ["hello", "world", "foo"] {
+            let (ww, _) = engine.text.measure(word, &cs);
+            widest = widest.max(ww);
+        }
+        assert!((min_w - widest).abs() < 0.5);
+    }
+
+    #[test]
+    fn absolute_text_shrinks_to_fit() {
+        // T5d 第三 pass：absolute 文本叶 = clamp(min_content, cb 内容宽, max_content)。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div { font-family: \"DejaVu Sans\"; font-size: 16px; } div.host { position: relative; width: 300px; height: 200px; } div.tip { position: absolute; top: 10px; left: 20px; }"
+            )
+            .is_clean());
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, text: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: if parent.is_some() {
+                        std::iter::once("tip".to_string()).collect()
+                    } else {
+                        std::iter::once("host".to_string()).collect()
+                    },
+                    text: Some(text.into()),
+                    ..Default::default()
+                },
+            )
+        };
+        // 长文本：被 300−0(insets) 夹紧 → 宽 < 无界宽
+        assert!(mk(&mut engine, Key(1), None, "host").is_ok());
+        assert!(
+            mk(
+                &mut engine,
+                Key(2),
+                Some(Key(1)),
+                "the quick brown fox jumps over the lazy dog again and again"
+            )
+            .is_ok()
+        );
+        // 短文本：max-content ≤ 可用宽 → 保持固有宽（不拉伸）
+        assert!(mk(&mut engine, Key(3), Some(Key(1)), "short").is_ok());
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let id2 = *engine.key_to_node.get(&Key(2)).unwrap();
+        let id3 = *engine.key_to_node.get(&Key(3)).unwrap();
+        let (w2, _) = engine.measures.get(&id2).copied().unwrap();
+        let (w3, _) = engine.measures.get(&id3).copied().unwrap();
+        assert!(w2 <= 300.0 && w2 > 0.0);
+        // 短文本未拉伸到可用宽（300），仍是自身 max-content
+        let short_max = {
+            let cs = engine.styles.get(&id3).cloned().unwrap();
+            let (mw, _) = engine.text.measure("short", &cs);
+            mw
+        };
+        assert!((w3 - short_max).abs() < 0.5);
+        // wrap_widths 同步（绘制折行一致）
+        assert_eq!(engine.wrap_widths.get(&id2), Some(&Some(w2)));
+    }
+
+    #[test]
+    fn leaf_intrinsic_clamps_absolute() {
+        // T5d：LeafMeasure 叶固有区间在 absolute 语境下夹紧宽度。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.host { position: relative; width: 300px; height: 200px; } div.wide-host { position: relative; width: 1000px; height: 200px; } div.chip { position: absolute; top: 0; left: 0; }"
+            )
+            .is_clean());
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: if class.is_empty() {
+                        Default::default()
+                    } else {
+                        std::iter::once(class.to_string()).collect()
+                    },
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "host").is_ok());
+        assert!(mk(&mut engine, Key(3), Some(Key(2)), "chip").is_ok());
+        assert!(mk(&mut engine, Key(4), Some(Key(1)), "wide-host").is_ok());
+        assert!(mk(&mut engine, Key(5), Some(Key(4)), "chip").is_ok());
+        for k in [Key(3), Key(5)] {
+            assert!(engine.set_leaf_measure(k, 500.0, 20.0).is_ok());
+            assert!(
+                engine
+                    .set_leaf_intrinsic(k, 80.0, 20.0, 500.0, 20.0)
+                    .is_ok()
+            );
+        }
+        let frame = engine.frame((1200.0, 600.0), 1.0, 0.0);
+        // 300 宽宿主：500 被夹到 300；1000 宽宿主：保持 500
+        let b3 = frame.find(Key(3)).unwrap();
+        assert_eq!(b3.width, 300.0);
+        let b5 = frame.find(Key(5)).unwrap();
+        assert_eq!(b5.width, 500.0);
     }
 
     #[test]

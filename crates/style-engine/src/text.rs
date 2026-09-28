@@ -61,7 +61,7 @@ impl TextSystem {
 
     /// 富文本测量（T5c）：spans 为 (字节起点, 字节终点, 覆盖样式)；
     /// max_advance 为 Some 时按包含块宽换行（white-space: normal 由 parley 吸收）。
-    /// 区间按 UTF-8 字节偏移解释。
+    /// 区间按 UTF-8 字节偏移解释。无界调用（None）即 max-content。
     pub fn measure_rich(
         &mut self,
         text: &str,
@@ -72,6 +72,35 @@ impl TextSystem {
         if text.is_empty() {
             return (0.0, 0.0);
         }
+        let mut layout = self.build_layout(text, style, spans);
+        layout.break_all_lines(max_advance);
+        (layout.width(), layout.height())
+    }
+
+    /// 最小内容宽（shrink-to-fit 下限，T5d）：max_advance = 0 强制在一切
+    /// 可断点断行，最宽行 = 最宽不可断原子。parley 0.11 无 min-content
+    /// API，此为既定候选设计的实现（见 FEATURES 布局映射注记）。
+    pub fn measure_min_content(
+        &mut self,
+        text: &str,
+        style: &ComputedStyle,
+        spans: &[(u32, u32, &ComputedStyle)],
+    ) -> (f32, f32) {
+        if text.is_empty() {
+            return (0.0, 0.0);
+        }
+        let mut layout = self.build_layout(text, style, spans);
+        layout.break_all_lines(Some(0.0));
+        (layout.width(), layout.height())
+    }
+
+    /// 公共排版构造：按基样式 + span 覆盖样式建立 ranged layout（不断行）。
+    fn build_layout(
+        &mut self,
+        text: &str,
+        style: &ComputedStyle,
+        spans: &[(u32, u32, &ComputedStyle)],
+    ) -> parley::Layout<MeasureBrush> {
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, false);
@@ -98,9 +127,7 @@ impl TextSystem {
                 builder.push(StyleProperty::FontStyle(ParleyFontStyle::Italic), range);
             }
         }
-        let mut layout = builder.build(text);
-        layout.break_all_lines(max_advance);
-        (layout.width(), layout.height())
+        builder.build(text)
     }
 }
 
