@@ -121,7 +121,7 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::LineHeight => DeclValue::LineHeight(LineHeight::Normal),
         P::TextAlign => DeclValue::TextAlign(TextAlign::Start),
         P::WhiteSpace => DeclValue::WhiteSpace(WhiteSpace::Normal),
-        P::LetterSpacing => DeclValue::Len(LengthPercentage::Px(0.0)),
+        P::LetterSpacing => DeclValue::LenAuto(None), // normal：与解析产物同型（盘点修复）
     }
 }
 
@@ -370,6 +370,42 @@ impl ComputedStyle {
         match self.values.get(&PropertyId::TextAlign) {
             Some(DeclValue::TextAlign(a)) => *a,
             _ => TextAlign::Start,
+        }
+    }
+
+    /// 行高解析为 px（None = normal，消费侧走排版器默认字体度量 ≈ CSS normal）。
+    /// 百分比基 = 本元素字号（CSS line-height 语义）；盘点修复：此前该属性
+    /// 已解析入库但无任何消费者（无效声明）。
+    pub(crate) fn resolved_line_height_px(&self, env: &MediaEnv) -> Option<f32> {
+        let fs = self.font_size_px();
+        let ctx = ResolveCtx {
+            em: fs,
+            rem: 16.0,
+            viewport_w: env.viewport_w,
+            viewport_h: env.viewport_h,
+        };
+        match self.line_height() {
+            LineHeight::Normal => None,
+            LineHeight::Number(n) => Some(n * fs),
+            LineHeight::Len(lp) => lp.resolve(&ctx, fs),
+        }
+    }
+
+    /// 字距解析为 px（letter-spacing 百分比基 = 字号）。
+    /// 解析产物为 LenAuto（normal → None）；initial 曾为 Len(Px(0.0))，
+    /// 与解析类型不一致——盘点修复为同型 LenAuto(None)。
+    pub(crate) fn resolved_letter_spacing_px(&self, env: &MediaEnv) -> f32 {
+        let fs = self.font_size_px();
+        let ctx = ResolveCtx {
+            em: fs,
+            rem: 16.0,
+            viewport_w: env.viewport_w,
+            viewport_h: env.viewport_h,
+        };
+        match self.get(PropertyId::LetterSpacing) {
+            Some(DeclValue::Len(lp)) => lp.resolve(&ctx, fs).unwrap_or(0.0),
+            Some(DeclValue::LenAuto(Some(lp))) => lp.resolve(&ctx, fs).unwrap_or(0.0),
+            _ => 0.0,
         }
     }
 

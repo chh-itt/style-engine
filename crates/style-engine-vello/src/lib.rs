@@ -38,6 +38,8 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             font_weight,
             italic,
             max_advance,
+            line_height,
+            letter_spacing,
         } = op
         {
             text.draw_text(
@@ -52,6 +54,8 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
                 *font_weight,
                 *italic,
                 *max_advance,
+                *line_height,
+                *letter_spacing,
             );
             continue;
         }
@@ -122,6 +126,8 @@ impl VelloTextSystem {
         font_weight: f32,
         italic: bool,
         max_advance: Option<f32>,
+        line_height: Option<f32>,
+        letter_spacing: f32,
     ) {
         if content.is_empty() {
             return;
@@ -138,6 +144,15 @@ impl VelloTextSystem {
             builder.push_default(parley::style::StyleProperty::FontStyle(
                 parley::fontique::FontStyle::Italic,
             ));
+        }
+        // 行高/字距（盘点修复）：与测量侧同源（PaintOp 携带解析值），保证折行一致
+        if let Some(lh) = line_height {
+            builder.push_default(parley::style::StyleProperty::LineHeight(
+                parley::style::LineHeight::Absolute(lh),
+            ));
+        }
+        if letter_spacing != 0.0 {
+            builder.push_default(parley::style::StyleProperty::LetterSpacing(letter_spacing));
         }
         // span 覆盖样式（T5c）：字节区间 [start, end)
         for s in spans {

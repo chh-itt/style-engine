@@ -558,7 +558,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
                 let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                     owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
-                let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, Some(avail));
+                let (w, h) =
+                    self.text
+                        .measure_rich(&text, &cs, &span_refs, Some(avail), &self.media);
                 if let Some(old) = self.measures.get(&id) {
                     reflow |= (old.0 - w).abs() > f32::EPSILON || (old.1 - h).abs() > f32::EPSILON;
                 }
@@ -641,7 +643,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
                     let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                         owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
-                    let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, Some(width));
+                    let (w, h) =
+                        self.text
+                            .measure_rich(&text, &cs, &span_refs, Some(width), &self.media);
                     if let Some(old) = self.measures.get(&id) {
                         reflow |=
                             (old.0 - w).abs() > f32::EPSILON || (old.1 - h).abs() > f32::EPSILON;
@@ -913,10 +917,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
             let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                 owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
-            let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, None);
+            let (w, h) = self
+                .text
+                .measure_rich(&text, &cs, &span_refs, None, &self.media);
             if w > 0.0 || h > 0.0 {
                 self.measures.insert(id, (w, h));
-                let min = self.text.measure_min_content(&text, &cs, &span_refs);
+                let min = self
+                    .text
+                    .measure_min_content(&text, &cs, &span_refs, &self.media);
                 self.min_measures.insert(id, min);
                 self.auto_text.insert(id);
             }
@@ -1349,7 +1357,7 @@ mod tests {
         // 三个原子中最宽者（"world" 的 w 宽于 "hello"/"foo"，逐个对照）
         let mut widest = 0.0f32;
         for word in ["hello", "world", "foo"] {
-            let (ww, _) = engine.text.measure(word, &cs);
+            let (ww, _) = engine.text.measure(word, &cs, &MediaEnv::default());
             widest = widest.max(ww);
         }
         assert!((min_w - widest).abs() < 0.5);
@@ -1403,7 +1411,7 @@ mod tests {
         // 短文本未拉伸到可用宽（300），仍是自身 max-content
         let short_max = {
             let cs = engine.styles.get(&id3).cloned().unwrap();
-            let (mw, _) = engine.text.measure("short", &cs);
+            let (mw, _) = engine.text.measure("short", &cs, &MediaEnv::default());
             mw
         };
         assert!((w3 - short_max).abs() < 0.5);
@@ -1533,14 +1541,16 @@ mod tests {
             .copied()
             .expect("CJK 文本叶应有 min-content");
         let cs = engine.styles.get(&id1).cloned().unwrap();
-        let (single, _) = engine.text.measure("样", &cs);
+        let (single, _) = engine.text.measure("样", &cs, &MediaEnv::default());
         assert!(
             (min.0 - single).abs() < 0.6,
             "min={} 单字宽={}",
             min.0,
             single
         );
-        let (max, _) = engine.text.measure("样式引擎渲染检查", &cs);
+        let (max, _) = engine
+            .text
+            .measure("样式引擎渲染检查", &cs, &MediaEnv::default());
         assert!(max > single + 1.0);
     }
 
@@ -1580,6 +1590,86 @@ mod tests {
         let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
         let b2 = frame.find(Key(2)).unwrap();
         assert_eq!(b2.width, 800.0);
+    }
+
+    #[test]
+    fn line_height_resolves_into_layout() {
+        // 盘点修复回归：line-height 此前已解析入库但无任何消费者（无效声明）。
+        // 绝对行高单行 = 盒高（parley Absolute 行盒语义）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.host { width: 300px; } div.t { font-family: \"DejaVu Sans\"; font-size: 16px; line-height: 40px; }"
+            )
+            .is_clean());
+        let node = |classes: &str, text: Option<&str>| StyleNode {
+            name: Some("div".into()),
+            classes: if classes.is_empty() {
+                Default::default()
+            } else {
+                std::iter::once(classes.to_string()).collect()
+            },
+            text: text.map(String::from),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node("host", None)).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("t", Some("Hello World")))
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b2 = frame.find(Key(2)).unwrap();
+        assert!(
+            (b2.height - 40.0).abs() < 0.6,
+            "line-height: 40px 单行盒高应≈40，实际 {}",
+            b2.height
+        );
+    }
+
+    #[test]
+    fn letter_spacing_widens_measures() {
+        // 盘点修复回归：letter-spacing 此前完全无消费者（连访问器都没有）。
+        // "Hello World Test" 16 字符 ≥2 字符间隙 → 字距 4px 至少拉开 2 间隙。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet("div { font-family: \"DejaVu Sans\"; font-size: 16px; } div.s { letter-spacing: 4px; }")
+            .is_clean());
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: if classes.is_empty() {
+                Default::default()
+            } else {
+                std::iter::once(classes.to_string()).collect()
+            },
+            text: Some("Hello World Test".into()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node("")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("s")).is_ok());
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let id1 = *engine.key_to_node.get(&Key(1)).unwrap();
+        let id2 = *engine.key_to_node.get(&Key(2)).unwrap();
+        let cs1 = engine.styles.get(&id1).cloned().unwrap();
+        let cs2 = engine.styles.get(&id2).cloned().unwrap();
+        let env = MediaEnv::default();
+        let (w0, _) = engine.text.measure("Hello World Test", &cs1, &env);
+        let (w4, _) = engine.text.measure("Hello World Test", &cs2, &env);
+        assert!(
+            w4 - w0 > 8.0,
+            "letter-spacing: 4px 应显著加宽测量（Δ={}）",
+            w4 - w0
+        );
+        // min-content 同步生效：最宽原子被拉开
+        let (m0, _) = engine
+            .text
+            .measure_min_content("Hello World Test", &cs1, &[], &env);
+        let (m4, _) = engine
+            .text
+            .measure_min_content("Hello World Test", &cs2, &[], &env);
+        assert!(m4 > m0 + 4.0, "字距应作用于 min-content（Δ={}）", m4 - m0);
     }
 
     #[test]

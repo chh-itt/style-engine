@@ -6,6 +6,7 @@
 //! （white-space 换行语义属后续票据）。
 
 use crate::computed::ComputedStyle;
+use crate::css::stylesheet::MediaEnv;
 use parley::fontique::{
     Blob, Collection, CollectionOptions, FontStyle as ParleyFontStyle, FontWeight,
 };
@@ -55,8 +56,8 @@ impl TextSystem {
     }
 
     /// 无界宽度测量（单行）。无可用字体时宽高趋 0。
-    pub fn measure(&mut self, text: &str, style: &ComputedStyle) -> (f32, f32) {
-        self.measure_rich(text, style, &[], None)
+    pub fn measure(&mut self, text: &str, style: &ComputedStyle, env: &MediaEnv) -> (f32, f32) {
+        self.measure_rich(text, style, &[], None, env)
     }
 
     /// 富文本测量（T5c）：spans 为 (字节起点, 字节终点, 覆盖样式)；
@@ -68,11 +69,12 @@ impl TextSystem {
         style: &ComputedStyle,
         spans: &[(u32, u32, &ComputedStyle)],
         max_advance: Option<f32>,
+        env: &MediaEnv,
     ) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        let mut layout = self.build_layout(text, style, spans);
+        let mut layout = self.build_layout(text, style, spans, env);
         layout.break_all_lines(max_advance);
         (layout.width(), layout.height())
     }
@@ -85,11 +87,12 @@ impl TextSystem {
         text: &str,
         style: &ComputedStyle,
         spans: &[(u32, u32, &ComputedStyle)],
+        env: &MediaEnv,
     ) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        let mut layout = self.build_layout(text, style, spans);
+        let mut layout = self.build_layout(text, style, spans, env);
         layout.break_all_lines(Some(0.0));
         (layout.width(), layout.height())
     }
@@ -100,6 +103,7 @@ impl TextSystem {
         text: &str,
         style: &ComputedStyle,
         spans: &[(u32, u32, &ComputedStyle)],
+        env: &MediaEnv,
     ) -> parley::Layout<MeasureBrush> {
         let mut builder = self
             .layout_cx
@@ -111,6 +115,18 @@ impl TextSystem {
         builder.push_default(FontFamily::Source(family_cow(style)));
         if style.font_style() == crate::css::property::FontStyle::Italic {
             builder.push_default(StyleProperty::FontStyle(ParleyFontStyle::Italic));
+        }
+        // 行高/字距（盘点修复）：此前 line-height/letter-spacing 已解析入库
+        // 但无任何消费者。normal 不推（parley 默认 = 字体度量 ≈ CSS normal）；
+        // 字距 0 不推（等同默认）。span 级行高/字距为已知近似（仅基样式生效）。
+        if let Some(lh) = style.resolved_line_height_px(env) {
+            builder.push_default(StyleProperty::LineHeight(
+                parley::style::LineHeight::Absolute(lh),
+            ));
+        }
+        let letter_spacing = style.resolved_letter_spacing_px(env);
+        if letter_spacing != 0.0 {
+            builder.push_default(StyleProperty::LetterSpacing(letter_spacing));
         }
         for (start, end, span_cs) in spans {
             let range = (*start as usize)..(*end as usize).min(text.len());
@@ -164,7 +180,7 @@ mod tests {
             },
         );
         let style = crate::computed::compute_node(&tree, id, &sheet, &Default::default(), None);
-        assert_eq!(ts.measure("", &style), (0.0, 0.0));
+        assert_eq!(ts.measure("", &style, &MediaEnv::default()), (0.0, 0.0));
     }
 
     #[test]

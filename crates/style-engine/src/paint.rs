@@ -76,6 +76,10 @@ pub enum PaintOp {
         italic: bool,
         /// 换行约束（T5c-2）：测量与绘制共用同一 max_advance 保证折行一致；None = 无界。
         max_advance: Option<f32>,
+        /// 行高（盘点修复）：Some = 绝对 px；None = normal（排版器默认字体度量）。
+        line_height: Option<f32>,
+        /// 字距 px（0 = 默认）。span 级行高/字距为已知近似（仅基样式生效）。
+        letter_spacing: f32,
     },
     /// 裁剪层开始（overflow 非 visible）。
     PushClip {
@@ -430,6 +434,8 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 font_weight: style.font_weight(),
                 italic: style.font_style() == FontStyle::Italic,
                 max_advance: ctx.wrap_widths.get(&id).copied().flatten(),
+                line_height: style.resolved_line_height_px(env),
+                letter_spacing: style.resolved_letter_spacing_px(env),
             });
         }
     }
