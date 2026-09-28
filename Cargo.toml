@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/style-engine",
+    "crates/style-engine-vello",
+    "crates/style-engine-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+# --- CSS 语法层（servo 系，ADR-0004） ---
+cssparser = "0.38.0"
+selectors = "0.40.0"
+
+# --- linebender 绘制词汇表与渲染栈（ADR-0001/0002） ---
+peniko = "0.6.1"
+taffy = "0.14.0"
+parley = "0.11.1"
+vello = "0.10.0"
+
+# --- 宿主侧（仅 demo/sink，核心 crate 禁止，ADR-0001） ---
+wgpu = "29.0.3"
+winit = "=0.31.0-beta.3"
+
+# --- 基础设施 ---
+slotmap = "1.1.1"
+bitflags = "2.13.2"
+smallvec = "1"
+tracing = "0.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }

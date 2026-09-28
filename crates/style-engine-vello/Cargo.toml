@@ -1,0 +1,15 @@
+[package]
+name = "style-engine-vello"
+description = "Vello (wgpu) paint sink for style-engine display lists."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+style-engine = { path = "../style-engine", version = "0.1.0" }
+vello = { workspace = true }
+wgpu = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "style-engine"
+description = "Framework-agnostic CSS semantic styling for native GUIs: parse, cascade, lay out, and emit a paint-ready display list."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cssparser = { workspace = true }
+selectors = { workspace = true }
+peniko = { workspace = true }
+slotmap = { workspace = true }
+bitflags = { workspace = true }
+smallvec = { workspace = true }
+tracing = { workspace = true }
+taffy = { workspace = true, optional = true }
+parley = { workspace = true, optional = true }
+
+[features]
+default = ["layout", "text"]
+layout = ["dep:taffy"]
+text = ["dep:parley"]
+
+[lints]
+workspace = true

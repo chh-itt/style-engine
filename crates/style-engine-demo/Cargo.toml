@@ -1,0 +1,18 @@
+[package]
+name = "style-engine-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+style-engine = { path = "../style-engine", version = "0.1.0" }
+style-engine-vello = { path = "../style-engine-vello", version = "0.1.0" }
+vello = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+image = { workspace = true }
+
+[lints]
+workspace = true
