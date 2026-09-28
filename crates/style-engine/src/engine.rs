@@ -72,6 +72,8 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     /// 内置自动测量的文本叶集合（T5c-2）：仅这些节点参与换行重测量。
     #[cfg(feature = "text")]
     auto_text: std::collections::HashSet<NodeId>,
+    /// 文本叶测量所用换行约束（T5c-2）：绘制与测量折行一致；缺席 = 无界。
+    wrap_widths: HashMap<NodeId, Option<f32>>,
     /// 内置文本栈（feature = "text"；字体字节由宿主推送）。
     #[cfg(feature = "text")]
     text: crate::text::TextSystem,
@@ -111,6 +113,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             parents: HashMap::new(),
             #[cfg(feature = "text")]
             auto_text: std::collections::HashSet::new(),
+            wrap_widths: HashMap::new(),
         }
     }
 
@@ -182,6 +185,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.measures.clear();
             self.span_styles.clear();
             self.parents.clear();
+            self.wrap_widths.clear();
             #[cfg(feature = "text")]
             self.auto_text.clear();
             self.scroll_offsets.clear();
@@ -207,6 +211,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.measures.remove(&d);
             self.span_styles.remove(&d);
             self.parents.remove(&d);
+            self.wrap_widths.remove(&d);
             #[cfg(feature = "text")]
             self.auto_text.remove(&d);
             self.scroll_offsets.remove(&d);
@@ -424,6 +429,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     reflow |= (old.0 - w).abs() > f32::EPSILON || (old.1 - h).abs() > f32::EPSILON;
                 }
                 self.measures.insert(id, (w, h));
+                self.wrap_widths.insert(id, Some(avail));
                 if let Some(&tid) = self.taffy_node.get(&id) {
                     let mut ts = map_style(&cs, &self.media);
                     ts.size = taffy::prelude::Size {
@@ -448,7 +454,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let mut layout_by_node: HashMap<NodeId, (f32, f32, f32, f32)> =
             HashMap::with_capacity(self.tree.len());
         if self.root_key.is_some() {
-            self.collect(self.tree.root(), &mut boxes, &mut layout_by_node);
+            self.collect(self.tree.root(), 0.0, 0.0, &mut boxes, &mut layout_by_node);
         }
         let mut paint = crate::paint::DisplayList::default();
         crate::paint::build_display_list(
@@ -459,6 +465,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 scroll: &self.scroll_offsets,
                 env: &self.media,
                 spans: &self.span_styles,
+                wrap_widths: &self.wrap_widths,
             },
             self.tree.root(),
             self.generation,
@@ -478,7 +485,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if self.root_key.is_some() {
             let root = self.tree.root();
             let tid = self.build_taffy_subtree(root);
-            self.taffy_root = Some(tid);
+            // 合成视口根（ICB）：树根成为其子，树根自身的 margin 得以生效
+            //（taffy 不应用根节点 margin；CSS 中根盒 margin 相对初始包含块生效）。
+            let viewport = self
+                .taffy
+                .new_leaf(taffy::prelude::Style {
+                    display: taffy::prelude::Display::Block,
+                    ..Default::default()
+                })
+                .expect("viewport root");
+            self.taffy
+                .set_children(viewport, &[tid])
+                .expect("viewport root children");
+            self.taffy_root = Some(viewport);
         }
         self.dirty_struct = false;
         self.dirty_style = true; // 新树需重贴样式
@@ -507,6 +526,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.styles.clear();
         self.span_styles.clear();
         self.parents.clear();
+        self.wrap_widths.clear();
         let root = self.tree.root();
         self.restyle_node(root, None);
         self.dirty_style = false;
@@ -597,15 +617,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// 深度优先收集布局盒。taffy 的 `location` 是父相对坐标，故携带祖先累计偏移
+    /// 合成视口绝对坐标（合成视口根引入后，树根不再是 taffy 根）。
     fn collect(
         &self,
         id: NodeId,
+        ox: f32,
+        oy: f32,
         out: &mut Vec<LayoutEntry<K>>,
         layout_by_node: &mut HashMap<NodeId, (f32, f32, f32, f32)>,
     ) {
+        let mut x = ox;
+        let mut y = oy;
         if let Some(&tid) = self.taffy_node.get(&id) {
             if let Ok(l) = self.taffy.layout(tid) {
-                let box_rect = (l.location.x, l.location.y, l.size.width, l.size.height);
+                x = l.location.x + ox;
+                y = l.location.y + oy;
+                let box_rect = (x, y, l.size.width, l.size.height);
                 layout_by_node.insert(id, box_rect);
                 if let Some(&key) = self.node_to_key.get(&id) {
                     out.push(LayoutEntry {
@@ -619,7 +647,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
         }
         for c in self.tree.children(id) {
-            self.collect(*c, out, layout_by_node);
+            self.collect(*c, x, y, out, layout_by_node);
         }
     }
 }
@@ -670,6 +698,49 @@ mod tests {
         assert_eq!((s.start, s.end), (6, 10));
         assert_eq!(s.color.components, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(s.font_weight, 700.0);
+    }
+
+    #[test]
+    fn margin_and_block_flow() {
+        // 树根 margin 生效（合成视口根）+ 无 margin 定宽块级子盒靠 inline-start（不被 auto-margin 居中）
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.card { width: 300px; height: 160px; margin: 40px; padding: 16px; } div.kid { width: 100px; height: 20px; }"
+            )
+            .is_clean());
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("div".into()),
+                        classes: std::iter::once("card".into()).collect(),
+                        ..Default::default()
+                    },
+                )
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(
+                    Some(Key(1)),
+                    Key(2),
+                    StyleNode {
+                        name: Some("div".into()),
+                        classes: std::iter::once("kid".into()).collect(),
+                        ..Default::default()
+                    },
+                )
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert_eq!(frame.boxes.len(), 2);
+        assert_eq!(frame.boxes[0].x, 40.0);
+        assert_eq!(frame.boxes[0].y, 40.0);
+        // 子盒：padding 内 inline-start，而非 auto-margin 居中
+        assert_eq!(frame.boxes[1].x, 56.0); // 40 + 16
     }
 
     #[test]

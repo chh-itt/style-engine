@@ -19,7 +19,13 @@ div.card { width: 300px; height: 160px; margin: 40px; padding: 16px;
 div.badge { width: 120px; height: 48px;
   background-image: linear-gradient(90deg, #f6ad55, #f687b3);
   border-radius: 8px; }
+div.title { font-family: \"DejaVu Sans\"; font-size: 24px; font-weight: 700; color: #ffffff; }
+div.body { font-family: \"DejaVu Sans\"; font-size: 14px; color: #e2e8f0; white-space: normal; }
 ";
+
+// 字体资产（DejaVu，OFL/BSD 类自由许可，LICENSE 随目录归档）：宿主推入。
+const FONT_REGULAR: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf");
 
 struct GpuState {
     device: wgpu::Device,
@@ -52,6 +58,11 @@ impl Default for DemoApp {
 impl DemoApp {
     fn setup_scene(&mut self) {
         debug_assert!(self.engine.set_stylesheet(DEMO_CSS).is_clean());
+        // 字体双推（ADR-0006：宿主推字体；engine 测量 + sink 绘制）
+        self.engine.add_font(FONT_REGULAR.to_vec());
+        self.engine.add_font(FONT_BOLD.to_vec());
+        self.text.add_font(FONT_REGULAR.to_vec());
+        self.text.add_font(FONT_BOLD.to_vec());
         assert!(
             self.engine
                 .insert(
@@ -73,6 +84,35 @@ impl DemoApp {
                     StyleNode {
                         name: Some("div".into()),
                         classes: vec!["badge".into()].into(),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        // 文本叶（Latin 起步；CJK 字体后续接入）
+        assert!(
+            self.engine
+                .insert(
+                    Some(0),
+                    2,
+                    StyleNode {
+                        name: Some("div".into()),
+                        classes: vec!["title".into()].into(),
+                        text: Some("Style Engine Render Check".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        assert!(
+            self.engine
+                .insert(
+                    Some(0),
+                    3,
+                    StyleNode {
+                        name: Some("div".into()),
+                        classes: vec!["body".into()].into(),
+                        text: Some("The quick brown fox jumps over the lazy dog 0123456789".into()),
                         ..Default::default()
                     }
                 )

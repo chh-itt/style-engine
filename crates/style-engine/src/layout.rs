@@ -52,6 +52,23 @@ fn length_percentage_auto(
     }
 }
 
+/// margin：CSS 初始值为 0；显式 auto 保留（auto 水平 margin 使定宽块级盒居中）。
+/// 旧实现把缺席 margin 经 len_auto(None) 映射为 auto，导致无 margin 的
+/// 定宽块级子盒被意外水平居中。
+fn margin_side(
+    cs: &ComputedStyle,
+    id: PropertyId,
+    env: &MediaEnv,
+) -> taffy::prelude::LengthPercentageAuto {
+    use taffy::prelude::LengthPercentageAuto;
+    match cs.get(id) {
+        None => LengthPercentageAuto::length(0.0),
+        Some(DeclValue::LenAuto(None)) => LengthPercentageAuto::auto(),
+        Some(DeclValue::LenAuto(Some(lp))) => length_percentage_auto(Some(lp), cs, env),
+        Some(_) => length_percentage_auto(cs.len_auto(id), cs, env),
+    }
+}
+
 fn length_percentage(
     lp: &LengthPercentage,
     cs: &ComputedStyle,
@@ -110,7 +127,6 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
     use taffy::prelude::{Rect, Size, Style};
 
     let lp_auto = |id: PropertyId| cs.len_auto(id);
-    let margin = cs.margin();
     let padding = cs.padding();
 
     Style {
@@ -139,10 +155,10 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             height: length_percentage_auto(lp_auto(PropertyId::MaxHeight), cs, env),
         },
         margin: Rect {
-            top: length_percentage_auto(margin[0], cs, env),
-            right: length_percentage_auto(margin[1], cs, env),
-            bottom: length_percentage_auto(margin[2], cs, env),
-            left: length_percentage_auto(margin[3], cs, env),
+            top: margin_side(cs, PropertyId::MarginTop, env),
+            right: margin_side(cs, PropertyId::MarginRight, env),
+            bottom: margin_side(cs, PropertyId::MarginBottom, env),
+            left: margin_side(cs, PropertyId::MarginLeft, env),
         },
         padding: Rect {
             top: padding[0]

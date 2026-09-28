@@ -69,7 +69,10 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::ZIndex => DeclValue::Number(0.0),
         P::MinWidth | P::MinHeight => DeclValue::Len(LengthPercentage::Px(0.0)),
         P::AspectRatio => DeclValue::AspectRatio(None),
-        P::MarginTop | P::MarginRight | P::MarginBottom | P::MarginLeft => DeclValue::LenAuto(None),
+        // margin 初始值为 0（CSS）；显式 auto 仍解析为 LenAuto(None) → 居中语义保留
+        P::MarginTop | P::MarginRight | P::MarginBottom | P::MarginLeft => {
+            DeclValue::LenAuto(Some(LengthPercentage::Px(0.0)))
+        }
         P::PaddingTop
         | P::PaddingRight
         | P::PaddingBottom

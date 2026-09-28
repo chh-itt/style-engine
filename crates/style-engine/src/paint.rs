@@ -74,6 +74,8 @@ pub enum PaintOp {
         font_family: FontFamilyList,
         font_weight: f32,
         italic: bool,
+        /// 换行约束（T5c-2）：测量与绘制共用同一 max_advance 保证折行一致；None = 无界。
+        max_advance: Option<f32>,
     },
     /// 裁剪层开始（overflow 非 visible）。
     PushClip {
@@ -139,6 +141,8 @@ pub struct PaintCtx<'a> {
     pub env: &'a MediaEnv,
     /// span 级样式（T5c）：已按节点基样式级联求解。
     pub spans: &'a HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
+    /// 文本叶测量所用换行约束（T5c-2）：缺席 = 无界 / 宿主测量。
+    pub wrap_widths: &'a HashMap<NodeId, Option<f32>>,
 }
 
 /// 构建绘制清单（树序遍历；布局按节点给出 border-box）。
@@ -418,6 +422,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 font_family: style.font_family().clone(),
                 font_weight: style.font_weight(),
                 italic: style.font_style() == FontStyle::Italic,
+                max_advance: ctx.wrap_widths.get(&id).copied().flatten(),
             });
         }
     }
@@ -541,6 +546,7 @@ mod tests {
             scroll,
             env: &MediaEnv::default(),
             spans: &HashMap::new(),
+            wrap_widths: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
@@ -580,6 +586,7 @@ mod tests {
             scroll: &HashMap::new(),
             env: &env,
             spans: &HashMap::new(),
+            wrap_widths: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望顺序：b(z0,x=110) → c(z1,x=210) → a(z2,x=10)；根无背景不产生 FillRect

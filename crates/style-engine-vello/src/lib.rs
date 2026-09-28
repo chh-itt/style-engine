@@ -37,6 +37,7 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             font_family,
             font_weight,
             italic,
+            max_advance,
         } = op
         {
             text.draw_text(
@@ -50,6 +51,7 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
                 font_family,
                 *font_weight,
                 *italic,
+                *max_advance,
             );
             continue;
         }
@@ -119,6 +121,7 @@ impl VelloTextSystem {
         font_family: &style_engine::css::property::FontFamilyList,
         font_weight: f32,
         italic: bool,
+        max_advance: Option<f32>,
     ) {
         if content.is_empty() {
             return;
@@ -161,7 +164,8 @@ impl VelloTextSystem {
             }
         }
         let mut layout = builder.build(content);
-        layout.break_all_lines(None);
+        // 与测量共用同一 max_advance（T5c-2）：保证折行一致
+        layout.break_all_lines(max_advance);
         for line in layout.lines() {
             for item in line.items() {
                 let parley::layout::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
@@ -179,18 +183,19 @@ impl VelloTextSystem {
                     })
                     .map(|s| s.color)
                     .unwrap_or(color);
-                let tx = x + glyph_run.offset();
-                let ty = y + glyph_run.baseline();
+                // positioned_glyphs 已累计 advance 并并入 run 偏移与基线（line.rs:235），
+                // 故变换只需盒原点；glyphs() 是簇相对坐标，直接用会让整行字形叠在一点。
                 scene
                     .draw_glyphs(&font)
+                    .font_size(run.font_size())
                     .transform(vello::kurbo::Affine::translate((
-                        f64::from(tx),
-                        f64::from(ty),
+                        f64::from(x),
+                        f64::from(y),
                     )))
                     .brush(run_color)
                     .draw(
                         Fill::NonZero,
-                        glyph_run.glyphs().map(|g| vello::Glyph {
+                        glyph_run.positioned_glyphs().map(|g| vello::Glyph {
                             id: g.id,
                             x: g.x,
                             y: g.y,
