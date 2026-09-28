@@ -40,3 +40,11 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - vello/parley/taffy 均 0.x：允许破坏性升级，但必须一次升级整条 linebender 链（vello+peniko+parley 同批），不允许混代。
 - MSRV 以依赖最高者为准（当前这一代 linebender/wgpu 通常要求 Rust 1.85+，edition 2024），CI 用 cargo-hack 验证后在 README 定值。
 - 不承诺 no_std；L1（值与级联）保持 no_std+alloc 可达性，作为将来选项保留。
+
+## taffy calc 直通（预留特性票，未排期）
+
+调研结论（2026-09）：taffy 0.14 的 calc = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())` / `traits.rs fn calc(&self, val: *const (), basis: f32) -> f32`，布局期以 parent_size 为基调用，见 block.rs 各 resolve 点）。接入决策：
+
+- **独立特性票**，不搭车其他变更。实现必须引入 `unsafe`（指针所有权）、生命周期契约（calc 表达式必须活得比 TaffyTree 长——引擎侧由引擎池拥有、结构变更时回收），并走**独立的 unsafe review**（单独 PR，不与功能混提）。
+- **前置条件**：Numeric Channel（conformance harness 的数值对比通道）先就绪——calc 的正确性只能靠数值级验证（百分比基、嵌套 calc、边界 clamp），Pixel Channel 无法区分 0.5px 级语义差。
+- 替代现状：百分比基按 0 扁平化（FEATURES 布局映射注记）保留至直通落地。

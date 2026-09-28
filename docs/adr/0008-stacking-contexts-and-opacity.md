@@ -10,6 +10,21 @@ paint 层的绘制顺序从「兄弟按 z 稳定排序」（T4d）升级为 CSS 
 - **opacity**：`PaintOp::PushOpacity{alpha,x,y,w,h}/PopOpacity` 层对包住整节点绘制（背景边框文本子树全部在内）；sink 侧用 vello `push_layer` 的 alpha 参数（与裁剪层同机制）。`z-index: auto` 已在解析层物化为 `ZIndex(None)`，与缺席等价——「有值且为 Some」即是将来判定"此定位元素创建 SC"的依据。
 - 与 T4d 的行为差异：positioned z-index:auto/0 现在绘制在 in-flow 内容**之后**（Appendix E step 6），即使 DOM 序在前；负/正 z 相对顺序与旧排序一致。
 
+## 触发条件全集（实现契约）
+
+已实现（本 ADR 初版）：根；positioned 且数字 z；opacity < 1。下表为尚未实现触发者的**契约预登记**——落地时只需扩展 paint.rs 的触发判定与对应包装层，三带模型与 SC 原子性语义不变：
+
+| 触发者 | 生效条件 | 包装层（PaintOp） | 依赖 |
+|---|---|---|---|
+| transform ≠ none | SC + containing block（fixed 后代改挂）| transform 层（vello 侧经 push_layer 的 transform 参数或前置 push_transform，落地票定）| transform 解析（T4 未含）|
+| filter ≠ none | SC | 层包装 + 滤镜（vello 0.10 无 runtime filter，模糊/羽化待上游）| vello 能力 |
+| clip-path ≠ none | SC | PushClip 的形状扩展（vello Shape 任意路径）| clip-path 解析 |
+| will-change: transform/filter/opacity | SC（恒成立语义）| 随对应属性的包装层 | 属性解析 |
+| isolation: isolate | SC | 无包装，仅分带 | 属性解析 |
+| mix-blend-mode ≠ normal | SC + 混合 | push_layer(Mix::X, alpha=1) | vello BlendMode 已具备，解析缺席 |
+
+注记：positioned 且数字 z 以 `ZIndex(Some)` 判定（auto=None 不触发）；opacity clamp [0,1] 后判定、PushOpacity 层对；transform 的 containing block 副作用与 SC 触发同点实现、注释互引；**每个触发者的判定必须集中在 paint_node 的单点**（现 faded/SC 检查处），禁止分散在分带与包装两处——保证「触发即原子」不变量。
+
 ## Considered Options
 
 - 继续单一排序列表（T4d 模型）：被否——无法表达 in-flow 与 auto/0 定位的带序差，opacity 无处安放。
