@@ -28,6 +28,6 @@ sticky / fixed（依赖滚动语义的完整所有权，滚动偏移已按 ADR-0
 - 渐变：radial = 正圆、半径取对角线/2（farthest-corner 近似）；stop 缺省位置按 CSS 语义均匀补位；插值色空间 sRGB。
 - 文本：`PaintOp::Text` 经 sink `VelloTextSystem`（parley 0.11 排版 + DrawGlyphs）落字形（零副作用——系统字体禁用、字体字节由宿主双推 engine 测量/sink 绘制；无界宽度单行）；文本测量亦内置（text.rs），未推送测量的文本叶自动测量。
 - opacity / 背景图片：属性未实现（BackgroundImage 仅 Gradient/None；Opacity 未映射）。
-- z-index：已解析物化，绘制仍按树序；stacking context 属 T1 票据。
+- z-index：兄弟按生效 z-index 稳定排序绘制（position != static 生效，相等保持树序，T4d）；残余偏差：flex/grid 子项的 z-index（无 position）不生效，stacking context 嵌套语义属后续票据。
 - 布局映射：display:inline 缺席（统一块化）；calc 含百分比时百分比基按 0 扁平化；vw/vh 已按视口解析。
 - 滚动：`PushScroll/PopScroll` 折叠为坐标平移；滚动语义归宿主（ADR-0005）。

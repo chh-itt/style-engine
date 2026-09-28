@@ -126,6 +126,25 @@ pub fn build_display_list(
     paint_node(ctx, root, out);
 }
 
+/// 生效 z-index（T4d）：position != static 时取解析值，否则按 0（树序）。
+/// 残余偏差：flex/grid 子项的 z-index（无 position）不生效。
+fn effective_z(ctx: &PaintCtx<'_>, id: NodeId) -> f32 {
+    let Some(style) = ctx.styles.get(&id) else {
+        return 0.0;
+    };
+    let positioned = matches!(
+        style.get(crate::css::property::PropertyId::Position),
+        Some(DeclValue::Position(p)) if !matches!(p, crate::css::property::Position::Static)
+    );
+    if !positioned {
+        return 0.0;
+    }
+    match style.get(crate::css::property::PropertyId::ZIndex) {
+        Some(DeclValue::Number(n)) => *n,
+        _ => 0.0,
+    }
+}
+
 fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     let tree = ctx.tree;
     let styles = ctx.styles;
@@ -304,8 +323,15 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             scrolled = true;
         }
     }
-    for c in tree.children(id) {
-        paint_node(ctx, *c, out);
+    // 7) 子树：兄弟按生效 z-index 稳定排序（相等保持树序），PushClip/PopScroll 随序配对
+    let mut ordered: Vec<(f32, NodeId)> = tree
+        .children(id)
+        .iter()
+        .map(|c| (effective_z(ctx, *c), *c))
+        .collect();
+    ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (_, c) in ordered {
+        paint_node(ctx, c, out);
     }
     if scrolled {
         out.ops.push(PaintOp::PopScroll);
@@ -394,6 +420,53 @@ mod tests {
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
+    }
+
+    #[test]
+    fn z_index_orders_siblings() {
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let mk = |z: &str| StyleNode {
+            name: Some("div".into()),
+            declarations: crate::css::decl::parse_inline_declarations(&format!(
+                "background-color: #000001; position: relative; z-index: {z}"
+            ))
+            .0,
+            ..Default::default()
+        };
+        let a = tree.insert_child(root, mk("2"));
+        let b = tree.insert_child(root, mk("0"));
+        let c = tree.insert_child(root, mk("1"));
+        let sheet = parse_stylesheet("");
+        let env = MediaEnv::default();
+        let mut styles = HashMap::new();
+        for id in [root, a, b, c] {
+            styles.insert(id, compute_node(&tree, id, &sheet, &env, None));
+        }
+        let mut layout = HashMap::new();
+        layout.insert(root, (0.0, 0.0, 310.0, 100.0));
+        layout.insert(a, (10.0, 0.0, 100.0, 100.0));
+        layout.insert(b, (110.0, 0.0, 100.0, 100.0));
+        layout.insert(c, (210.0, 0.0, 100.0, 100.0));
+        let mut out = DisplayList::default();
+        let ctx = PaintCtx {
+            tree: &tree,
+            styles: &styles,
+            layout: &layout,
+            scroll: &HashMap::new(),
+            env: &env,
+        };
+        build_display_list(&ctx, root, 1, &mut out);
+        // 期望顺序：b(z0,x=110) → c(z1,x=210) → a(z2,x=10)；根无背景不产生 FillRect
+        let xs: Vec<f32> = out
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::FillRect { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs, vec![110.0, 210.0, 10.0]);
     }
 
     #[test]
