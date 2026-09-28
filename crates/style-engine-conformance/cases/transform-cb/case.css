@@ -1,0 +1,9 @@
+/* transform 包含块回归哨兵（回归防护，非红转绿）：A 有 transform（≠none）
+   即成为 B 的 absolute 包含块（浏览器 cb=A 的 padding 盒 → B 在 (50,20)）。
+   引擎侧 taffy 直锚 A 恰好同点，故两侧一致；恒等变换零投影噪声。
+   若移除 .a 的 transform，浏览器 cb 变为 .wrap（B.x=20）而引擎仍锚直父
+   （50,20）——锚定近似分歧，属既有偏差不在本用例暴露。 */
+body { margin: 0; }
+.wrap { position: relative; width: 400px; height: 300px; padding: 20px; }
+.a { transform: translate(0px, 0px); width: 200px; height: 200px; margin-left: 30px; background-color: #222244; }
+.b { position: absolute; left: 0; top: 0; width: 80px; height: 20px; background-color: #004488; }

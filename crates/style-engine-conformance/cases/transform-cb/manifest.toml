@@ -1,0 +1,9 @@
+# transform cb 回归哨兵：A transform≠none → absolute B 的包含块 = A。
+# 浏览器（cb=A padding 盒）与引擎（taffy 直锚 A）同点 (50,20)，恒等变换
+# 零投影噪声。无尺寸依赖（width/height 显式），不暴露锚定近似。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["transform", "position-absolute", "position-relative", "width", "height", "padding", "margin-single-side"]
+xfail = false
+tolerance = 0.5
