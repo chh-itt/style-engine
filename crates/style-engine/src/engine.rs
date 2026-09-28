@@ -401,13 +401,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         )
     }
 
-    /// absolute 叶的可用宽（T5d）：最近 positioned 祖先的内容宽（border-box
-    /// − padding − 已生效 border，`used_h_inset`）；无 positioned 祖先 → 视口宽。
+    /// transform ≠ none 的元素成为 absolute/fixed 后代的包含块
+    /// （ADR-0009 双时机之 L2：restyle 期谓词，cb walk 消费）。
+    fn is_transform_cb(&self, id: NodeId) -> bool {
+        self.styles.get(&id).is_some_and(|cs| cs.has_transform())
+    }
+
+    /// absolute 叶的可用宽（T5d）：最近 positioned 或 transformed 祖先的内容宽
+    /// （border-box − padding − 已生效 border，`used_h_inset`）；均无 → 视口宽。
     fn abs_avail_width(&self, id: NodeId) -> Option<f32> {
         let mut cb = self.parents.get(&id).copied();
         let mut cb_id: Option<NodeId> = None;
         while let Some(p) = cb {
-            if self.is_positioned(p) {
+            if self.is_positioned(p) || self.is_transform_cb(p) {
                 cb_id = Some(p);
                 break;
             }
@@ -1670,6 +1676,149 @@ mod tests {
             .text
             .measure_min_content("Hello World Test", &cs2, &[], &env);
         assert!(m4 > m0 + 4.0, "字距应作用于 min-content（Δ={}）", m4 - m0);
+    }
+
+    #[test]
+    fn transform_parse_2d_and_reject_3d() {
+        // ADR-0009 v1：2D 函数列表解析；3D 函数解析拒绝（warn 路径 → 非 clean，
+        // 声明丢弃 → 空表 = none）
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let rep = engine.set_stylesheet(
+            "div.a { transform: translate(10px, 20%) rotate(45deg) scale(2) skew(10deg); } div.b { transform: matrix(1, 0, 0, 1, 5, 6); } div.d { transform: none; }",
+        );
+        assert!(rep.is_clean(), "warnings={:?}", rep.warnings);
+        let mut engine3d: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            !engine3d
+                .set_stylesheet("div.c { transform: translate3d(1px, 2px, 3px); }")
+                .is_clean()
+        );
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "a").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "b").is_ok());
+        assert!(mk(&mut engine, Key(4), Some(Key(1)), "d").is_ok());
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        use crate::css::property::TransformFn as TF;
+        use crate::css::value::LengthPercentage as LP;
+        let cs = |e: &StyleEngine<Key>, k: Key| {
+            e.styles
+                .get(e.key_to_node.get(&k).unwrap())
+                .cloned()
+                .unwrap()
+        };
+        let a = cs(&engine, Key(1));
+        assert_eq!(
+            a.transform(),
+            &[
+                TF::Translate(LP::Px(10.0), LP::Percent(0.2)),
+                TF::Rotate(45.0),
+                TF::Scale(2.0, 2.0),
+                TF::Skew(10.0, 0.0),
+            ]
+        );
+        assert!(a.has_transform());
+        let b = cs(&engine, Key(2));
+        assert_eq!(b.transform(), &[TF::Matrix(1.0, 0.0, 0.0, 1.0, 5.0, 6.0)]);
+        let d = cs(&engine, Key(4));
+        assert!(d.transform().is_empty());
+    }
+
+    #[test]
+    fn transform_ancestor_is_absolute_cb_for_avail() {
+        // ADR-0009 L2 双时机：transform ≠ none 祖先 → absolute 后代包含块
+        // （修正前 cb walk 跳过 static+transformed 的 mid → avail = outer 内容宽
+        // 360 → 叶宽 360；修正后夹到 mid 内容宽 200）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.outer { position: relative; width: 400px; padding: 20px; } div.mid { transform: translate(0px, 0px); width: 200px; margin-left: 30px; } div.leaf { position: absolute; top: 0; left: 0; }"
+            )
+            .is_clean());
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "outer").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "mid").is_ok());
+        assert!(mk(&mut engine, Key(3), Some(Key(2)), "leaf").is_ok());
+        assert!(engine.set_leaf_measure(Key(3), 2000.0, 20.0).is_ok());
+        assert!(
+            engine
+                .set_leaf_intrinsic(Key(3), 80.0, 20.0, 2000.0, 20.0)
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b2 = frame.find(Key(2)).unwrap();
+        assert_eq!((b2.x, b2.width), (50.0, 200.0)); // 外 padding 20 + margin 30；identity 变换不改布局
+        let b3 = frame.find(Key(3)).unwrap();
+        // avail = mid 内容宽 200（transformed 祖先成为 cb），夹紧 80..2000
+        assert_eq!(b3.width, 200.0);
+        // taffy 锚定直父（mid）：x = mid.x，y = outer padding
+        assert_eq!((b3.x, b3.y), (50.0, 20.0));
+    }
+
+    #[test]
+    fn transform_creates_stacking_context_order() {
+        // ADR-0008/0009：非定位 transform ≠ none → SC，进 Pos 带键 0——
+        // 树序在前的 B（transform）画在树序在后的 A 之上；无 transform 控制组相反。
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let build = |transformed: bool| -> Vec<crate::paint::PaintOp> {
+            let mut engine: StyleEngine<Key> = StyleEngine::new();
+            let tb = if transformed {
+                " transform: translate(0px, 0px);"
+            } else {
+                ""
+            };
+            assert!(engine
+                .set_stylesheet(&format!(
+                    "div.a {{ width: 40px; height: 40px; background-color: #ff0000; }} div.b {{ width: 40px; height: 40px; background-color: #0000ff;{tb} }}"
+                ))
+                .is_clean());
+            assert!(engine.insert(None, Key(1), node("")).is_ok());
+            assert!(engine.insert(Some(Key(1)), Key(2), node("b")).is_ok());
+            assert!(engine.insert(Some(Key(1)), Key(3), node("a")).is_ok());
+            engine.frame((800.0, 600.0), 1.0, 0.0).paint.ops.to_vec()
+        };
+        let find = |ops: &[crate::paint::PaintOp], rgb: [f32; 3]| {
+            ops.iter().position(|op| {
+                matches!(op, crate::paint::PaintOp::FillRect { color, .. }
+                    if color.components[0] == rgb[0]
+                        && color.components[1] == rgb[1]
+                        && color.components[2] == rgb[2])
+            })
+        };
+        // 无 transform：Flow 带树序 → 蓝(B) 先画
+        let plain = build(false);
+        let (blue, red) = (find(&plain, [0.0, 0.0, 1.0]), find(&plain, [1.0, 0.0, 0.0]));
+        assert!(blue < red, "控制组应树序绘制（blue={blue:?} red={red:?}）");
+        // transform ≠ none：B 进 Pos 带 → 后画（覆盖 A）
+        let sc = build(true);
+        let (blue, red) = (find(&sc, [0.0, 0.0, 1.0]), find(&sc, [1.0, 0.0, 0.0]));
+        assert!(
+            blue > red,
+            "transform SC 应后画（blue={blue:?} red={red:?}）"
+        );
     }
 
     #[test]

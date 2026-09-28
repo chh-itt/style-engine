@@ -8,7 +8,7 @@
 use crate::computed::ComputedStyle;
 use crate::css::property::FontFamilyList;
 use crate::css::property::{
-    BackgroundImage, BorderStyle, DeclValue, FontStyle, Gradient, Overflow, PropertyId,
+    BackgroundImage, BorderStyle, DeclValue, FontStyle, Gradient, Overflow, PropertyId, TransformFn,
 };
 use crate::css::stylesheet::MediaEnv;
 use crate::css::value::{ColorValue, LengthPercentage, ResolveCtx};
@@ -99,6 +99,13 @@ pub enum PaintOp {
         height: f32,
     },
     PopOpacity,
+    /// 2D 仿射变换层开始（ADR-0009）：本节点子树全部绘制经矩阵变换；
+    /// 布局盒保持未变换坐标（taffy 不可见 transform）。
+    PushTransform {
+        /// [a, b, c, d, e, f]：x' = a·x + c·y + e，y' = b·x + d·y + f。
+        affine: [f32; 6],
+    },
+    PopTransform,
     /// 滚动偏移层开始。
     PushScroll {
         dx: f32,
@@ -253,6 +260,17 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         return;
     };
     let radius = resolve_radius(style, env);
+
+    // transform ≠ none（ADR-0009）：L3 绘制期仿射终结——translate 百分比基 =
+    // 自身 border-box，transform-origin 默认 50% 50%（T(o)·M·T(−o)）；层栈序
+    // transform → clip → filter → opacity（transform 最外）。布局盒保持未变换
+    // 坐标（taffy 不可见 transform）；绘制期终结见 ADR-0009 双时机契约。
+    let transformed = style.has_transform();
+    if transformed {
+        out.ops.push(PaintOp::PushTransform {
+            affine: resolve_transform_affine(style, w, h, env),
+        });
+    }
 
     // 0) opacity < 1（ADR-0008）：整节点（背景/边框/文本/子树）包 alpha 合成层；
     //    opacity 触发 stacking context，节点进 Pos 带（见子树分带）。
@@ -467,8 +485,8 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     // 7) 子树（ADR-0008，CSS 2.1 Appendix E 简化三带）：
     //    Neg：positioned 且负数字 z（z 升序、等值树序）——先于 in-flow；
     //    Flow：in-flow 非定位、非 SC 触发（树序，含文本叶）；
-    //    Pos：positioned（auto/0 树序在前、正 z 升序在后）+ 非定位但 opacity<1
-    //    （SC 触发，键 0 树序）。SC 节点子树经 paint_node 递归天然原子。
+    //    Pos：positioned（auto/0 树序在前、正 z 升序在后）+ 非定位 SC 触发者
+    //    （opacity<1 或 transform ≠ none，键 0 树序——ADR-0008/0009）
     //    残余偏差：flex/grid 子项的 z-index（无 position）不生效。
     let mut neg: Vec<(f32, usize, NodeId)> = Vec::new();
     let mut flow: Vec<NodeId> = Vec::new();
@@ -490,9 +508,13 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             cstyle.get(PropertyId::Opacity),
             Some(DeclValue::Number(n)) if *n < 1.0
         );
-        match (positioned, z, faded) {
-            (true, Some(n), _) if n < 0.0 => neg.push((n, idx, *c)),
-            (true, _, _) | (_, _, true) => pos.push((z.unwrap_or(0.0).max(0.0), idx, *c)),
+        // transform ≠ none 触发 SC（ADR-0008 全集 / ADR-0009）：非定位进 Pos 带键 0
+        let transformed = cstyle.has_transform();
+        match (positioned, transformed, z, faded) {
+            (true, _, Some(n), _) if n < 0.0 => neg.push((n, idx, *c)),
+            (true, _, _, _) | (_, true, _, _) | (_, _, _, true) => {
+                pos.push((z.unwrap_or(0.0).max(0.0), idx, *c))
+            }
             _ => flow.push(*c),
         }
     }
@@ -524,6 +546,66 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     if faded {
         out.ops.push(PaintOp::PopOpacity);
     }
+    if transformed {
+        out.ops.push(PaintOp::PopTransform);
+    }
+}
+
+/// 2D 仿射复合 [a, b, c, d, e, f]（列向量约定：x' = a·x + c·y + e）。
+/// 返回 m∘n（先 n 后 m）：M = M·N 的块乘。
+fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
+    [
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+    ]
+}
+
+/// 绘制期仿射终结（ADR-0009）：函数列表按书写顺序连乘（最右先应用），
+/// translate 百分比基 = 自身 border-box 宽/高，最后包 transform-origin
+/// 默认 50% 50%：A = T(o)·M·T(−o)。rotate 顺时针（y-down 屏幕坐标）。
+fn resolve_transform_affine(style: &ComputedStyle, w: f32, h: f32, env: &MediaEnv) -> [f32; 6] {
+    let ctx = crate::css::value::ResolveCtx {
+        em: style.font_size_px(),
+        rem: 16.0,
+        viewport_w: env.viewport_w,
+        viewport_h: env.viewport_h,
+    };
+    let mut m: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    for f in style.transform() {
+        let t = match f {
+            TransformFn::Translate(tx, ty) => [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                tx.resolve(&ctx, w).unwrap_or(0.0),
+                ty.resolve(&ctx, h).unwrap_or(0.0),
+            ],
+            TransformFn::Scale(sx, sy) => [*sx, 0.0, 0.0, *sy, 0.0, 0.0],
+            TransformFn::Rotate(deg) => {
+                let (s, c) = deg.to_radians().sin_cos();
+                [c, s, -s, c, 0.0, 0.0]
+            }
+            TransformFn::Skew(ax, ay) => [
+                1.0,
+                ay.to_radians().tan(),
+                ax.to_radians().tan(),
+                1.0,
+                0.0,
+                0.0,
+            ],
+            TransformFn::Matrix(a, b, c, d, e, f) => [*a, *b, *c, *d, *e, *f],
+        };
+        m = mul_affine(&m, &t);
+    }
+    let (ox, oy) = (w * 0.5, h * 0.5);
+    let pre = [1.0, 0.0, 0.0, 1.0, ox, oy];
+    let post = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
+    mul_affine(&mul_affine(&pre, &m), &post)
 }
 
 /// currentColor / light-dark 终结为绝对 sRGBA。

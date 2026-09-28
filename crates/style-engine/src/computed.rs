@@ -113,6 +113,7 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::OverflowX | P::OverflowY => DeclValue::Overflow(Overflow::Visible),
         // CSS 默认 content-box（width 只含内容盒）；box-model 用例约束该语义
         P::BoxSizing => DeclValue::BoxSizing(crate::css::property::BoxSizing::ContentBox),
+        P::Transform => DeclValue::Transform(Vec::new()),
         P::Color => DeclValue::Color(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 1.0]))),
         P::FontFamily => DeclValue::FontFamily(FontFamilyList(smallvec![FamilyName::SansSerif])),
         P::FontSize => DeclValue::Len(LengthPercentage::Px(16.0)), // medium
@@ -250,6 +251,19 @@ impl ComputedStyle {
             Some(DeclValue::BoxSizing(b)) => *b,
             _ => crate::css::property::BoxSizing::ContentBox,
         }
+    }
+
+    /// transform 函数列表（空 = none）。
+    pub fn transform(&self) -> &[crate::css::property::TransformFn] {
+        match self.values.get(&PropertyId::Transform) {
+            Some(DeclValue::Transform(list)) => list,
+            _ => &[],
+        }
+    }
+
+    /// transform ≠ none（ADR-0009 判定谓词单点：L2 cb 语义位与 L3 SC 触发共享）。
+    pub fn has_transform(&self) -> bool {
+        !self.transform().is_empty()
     }
 
     pub fn overflow_x(&self) -> Overflow {

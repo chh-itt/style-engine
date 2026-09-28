@@ -42,10 +42,16 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             letter_spacing,
         } = op
         {
+            // 字形为局部簇坐标（positioned_glyphs 已含 advance 与基线）：
+            // run 变换 = translate(偏移 + T·盒原点) ∘ T（T = 变换栈顶）。
+            // T 恒等时即原有 translate(偏移 + 盒原点)，行为不变。
+            let top = state.xform();
+            let origin = top * Point::new(f64::from(*x), f64::from(*y));
+            let run_transform =
+                Affine::translate((state.offset.x + origin.x, state.offset.y + origin.y)) * top;
             text.draw_text(
                 scene,
-                *x + state.offset.x as f32,
-                *y + state.offset.y as f32,
+                run_transform,
                 content,
                 *color,
                 spans,
@@ -111,13 +117,13 @@ impl VelloTextSystem {
             .register_fonts(parley::fontique::Blob::new(std::sync::Arc::new(data)), None);
     }
 
-    /// 绘制单个 Text 基元（原点 = 内容盒左上；无字体时为无字形 no-op）。
+    /// 绘制单个 Text 基元（run_transform = 偏移/变换合成后的字形 run 变换；
+    /// 无字体时为无字形 no-op）。
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,
         scene: &mut Scene,
-        x: f32,
-        y: f32,
+        run_transform: Affine,
         content: &str,
         color: AlphaColor<Srgb>,
         spans: &[style_engine::paint::TextSpanPaint],
@@ -199,14 +205,12 @@ impl VelloTextSystem {
                     .map(|s| s.color)
                     .unwrap_or(color);
                 // positioned_glyphs 已累计 advance 并并入 run 偏移与基线（line.rs:235），
-                // 故变换只需盒原点；glyphs() 是簇相对坐标，直接用会让整行字形叠在一点。
+                // 故变换只需 run_transform（= 偏移/变换合成，见 render_ops 调用点）；
+                // glyphs() 是簇相对坐标，直接用会让整行字形叠在一点。
                 scene
                     .draw_glyphs(&font)
                     .font_size(run.font_size())
-                    .transform(vello::kurbo::Affine::translate((
-                        f64::from(x),
-                        f64::from(y),
-                    )))
+                    .transform(run_transform)
                     .brush(run_color)
                     .draw(
                         Fill::NonZero,
@@ -233,6 +237,31 @@ struct RenderState {
     /// 累计滚动平移（PushScroll/PopScroll 栈）。
     offset: Vec2,
     stack: Vec<Vec2>,
+    /// 2D 仿射栈（ADR-0009 PushTransform/PopTransform）：屏幕空间合成，
+    /// 与手动叠加的偏移平移正交（形状坐标已偏移、见 effective() 共轭）。
+    xforms: Vec<Affine>,
+}
+
+impl RenderState {
+    /// 变换栈顶（无变换层 = 恒等）。
+    fn xform(&self) -> Affine {
+        self.xforms.last().copied().unwrap_or(Affine::IDENTITY)
+    }
+
+    /// 形状类绘制的 per-call 变换：形状构造时已手动叠加偏移平移，
+    /// 故变换层须与当前偏移共轭——eff(v) = offset + T·(v − offset)。
+    /// 无变换层时返回恒等（与变换前行为逐位一致）。
+    /// 已知近似：同一节点上 transform × 自身滚动（CSS 语义滚动在变换内）
+    /// 的次序由偏移共轭近似，记录于 FEATURES。
+    fn effective(&self) -> Affine {
+        let top = self.xform();
+        if top == Affine::IDENTITY {
+            return Affine::IDENTITY;
+        }
+        Affine::translate(Vec2::new(self.offset.x, self.offset.y))
+            * top
+            * Affine::translate(Vec2::new(-self.offset.x, -self.offset.y))
+    }
 }
 
 fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radius: [f32; 4]) -> RoundedRect {
@@ -273,7 +302,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *height,
                 *radius,
             );
-            scene.fill(Fill::NonZero, Affine::IDENTITY, *color, None, &shape);
+            scene.fill(Fill::NonZero, state.effective(), *color, None, &shape);
         }
         PaintOp::Gradient {
             x,
@@ -311,7 +340,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             });
             scene.fill(
                 Fill::NonZero,
-                Affine::IDENTITY,
+                state.effective(),
                 Brush::Gradient(&brush),
                 brush_transform,
                 &shape,
@@ -336,7 +365,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *height,
                 *radius,
             );
-            scene.fill(Fill::NonZero, Affine::IDENTITY, *color, None, &shape);
+            scene.fill(Fill::NonZero, state.effective(), *color, None, &shape);
         }
         PaintOp::Border {
             x,
@@ -354,6 +383,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *height,
                 *radius,
                 sides,
+                state.effective(),
             );
         }
         PaintOp::Text { .. } => {
@@ -374,7 +404,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *radius,
             );
             // 形状本身完成裁剪；混合取 Normal（vello 0.10 无 Mix::Clip）
-            scene.push_layer(Fill::NonZero, Mix::Normal, 1.0, Affine::IDENTITY, &shape);
+            scene.push_layer(Fill::NonZero, Mix::Normal, 1.0, state.effective(), &shape);
         }
         PaintOp::PopClip => {
             scene.pop_layer();
@@ -393,7 +423,13 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *height,
                 [0.0; 4],
             );
-            scene.push_layer(Fill::NonZero, Mix::Normal, *alpha, Affine::IDENTITY, &shape);
+            scene.push_layer(
+                Fill::NonZero,
+                Mix::Normal,
+                *alpha,
+                state.effective(),
+                &shape,
+            );
         }
         PaintOp::PopOpacity => {
             scene.pop_layer();
@@ -404,6 +440,23 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
         }
         PaintOp::PopScroll => {
             state.offset = state.stack.pop().unwrap_or(Vec2::ZERO);
+        }
+        PaintOp::PushTransform { affine } => {
+            // 屏幕空间合成：A·B 中 B 先应用（外层变换在外）
+            let top = state.xform();
+            state.xforms.push(
+                top * Affine::new([
+                    f64::from(affine[0]),
+                    f64::from(affine[1]),
+                    f64::from(affine[2]),
+                    f64::from(affine[3]),
+                    f64::from(affine[4]),
+                    f64::from(affine[5]),
+                ]),
+            );
+        }
+        PaintOp::PopTransform => {
+            state.xforms.pop();
         }
         // PaintOp #[non_exhaustive]：后续基元先忽略
         _ => {}
@@ -544,7 +597,12 @@ fn quarter_arc(path: &mut BezPath, cx: f64, cy: f64, r: f64, start_deg: f64) {
     );
 }
 
-fn stroke_side(scene: &mut Scene, path: &BezPath, s: &style_engine::paint::BorderSide) {
+fn stroke_side(
+    scene: &mut Scene,
+    path: &BezPath,
+    s: &style_engine::paint::BorderSide,
+    xform: Affine,
+) {
     use style_engine::css::property::BorderStyle;
     if s.style == BorderStyle::None || s.width <= 0.0 {
         return;
@@ -561,12 +619,13 @@ fn stroke_side(scene: &mut Scene, path: &BezPath, s: &style_engine::paint::Borde
         }
         _ => {}
     }
-    scene.stroke(&stroke, Affine::IDENTITY, s.color, None, path);
+    scene.stroke(&stroke, xform, s.color, None, path);
 }
 
 /// 四边分画（T4b）：每边一条「角弧 + 直线」描边路径；角弧按顺时针归属
 /// （TL→top、TR→right、BR→bottom、BL→left）。简化偏差：多色相邻边的
 /// 角部覆盖取后画方，不做对角线混合。
+#[allow(clippy::too_many_arguments)]
 fn draw_border(
     scene: &mut Scene,
     x: f32,
@@ -575,6 +634,7 @@ fn draw_border(
     h: f32,
     radius: [f32; 4],
     sides: &[style_engine::paint::BorderSide; 4],
+    xform: Affine,
 ) {
     let [tl, tr, br, bl] = radius;
     let (wt, wr, wb, wl) = (
@@ -598,7 +658,7 @@ fn draw_border(
         if tr > 0.0 { f(x + w - tr) } else { f(x + w) },
         f(y + wt / 2.0),
     ));
-    stroke_side(scene, &p, &sides[0]);
+    stroke_side(scene, &p, &sides[0], xform);
 
     // right（TR 弧）
     let mut p = BezPath::new();
@@ -613,7 +673,7 @@ fn draw_border(
         f(x + w - wr / 2.0),
         if br > 0.0 { f(y + h - br) } else { f(y + h) },
     ));
-    stroke_side(scene, &p, &sides[1]);
+    stroke_side(scene, &p, &sides[1], xform);
 
     // bottom（BR 弧）
     let mut p = BezPath::new();
@@ -628,7 +688,7 @@ fn draw_border(
         if bl > 0.0 { f(x + bl) } else { f(x) },
         f(y + h - wb / 2.0),
     ));
-    stroke_side(scene, &p, &sides[2]);
+    stroke_side(scene, &p, &sides[2], xform);
 
     // left（BL 弧）
     let mut p = BezPath::new();
@@ -643,5 +703,5 @@ fn draw_border(
         f(x + wl / 2.0),
         if tl > 0.0 { f(y + tl) } else { f(y) },
     ));
-    stroke_side(scene, &p, &sides[3]);
+    stroke_side(scene, &p, &sides[3], xform);
 }

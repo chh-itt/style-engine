@@ -81,6 +81,8 @@ pub enum PropertyId {
     OverflowX,
     OverflowY,
     BoxSizing,
+    /// transform（ADR-0009 v1：2D 仿射函数列表；3D 函数解析拒绝）。
+    Transform,
     // 文本
     Color,
     FontFamily,
@@ -158,6 +160,7 @@ impl PropertyId {
         Self::OverflowX,
         Self::OverflowY,
         Self::BoxSizing,
+        Self::Transform,
         Self::Color,
         Self::FontFamily,
         Self::FontSize,
@@ -234,6 +237,7 @@ impl PropertyId {
             Self::OverflowX => "overflow-x",
             Self::OverflowY => "overflow-y",
             Self::BoxSizing => "box-sizing",
+            Self::Transform => "transform",
             Self::Color => "color",
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
@@ -269,6 +273,7 @@ pub enum DeclValue {
     Position(Position),
     Overflow(Overflow),
     BoxSizing(BoxSizing),
+    Transform(Vec<TransformFn>),
     Align(Align),
     FlexDirection(FlexDirection),
     FlexWrap(FlexWrap),
@@ -329,6 +334,23 @@ pub enum Overflow {
 pub enum BoxSizing {
     ContentBox,
     BorderBox,
+}
+
+/// transform 函数（ADR-0009 v1 = 2D 仿射）。角度归一为度（value.rs 约定），
+/// Percent 存小数（0.5 = 50%）。TranslateX/Y 折入 Translate、ScaleX/Y 折入
+/// Scale、SkewX/Y 折入 Skew（缺省分量 = 单位元）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransformFn {
+    /// translate / translateX / translateY：x/y 位移（x 可百分比，基 = 自身 border-box 宽）。
+    Translate(LengthPercentage, LengthPercentage),
+    /// scale / scaleX / scaleY：x/y 缩放因子。
+    Scale(f32, f32),
+    /// rotate：顺时针角度（度，y-down 屏幕坐标）。
+    Rotate(f32),
+    /// skew / skewX / skewY：x/y 倾斜角（度）。
+    Skew(f32, f32),
+    /// matrix(a, b, c, d, e, f)：x' = a·x + c·y + e。
+    Matrix(f32, f32, f32, f32, f32, f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -643,6 +665,134 @@ pub fn parse_box_sizing(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         ))
     })
     .map(DeclValue::BoxSizing)
+}
+
+/// 角度 → 度（value.rs 约定：一律归一为度）。裸数字按 deg（宽容超集）。
+fn parse_angle_deg(p: &mut Parser<'_>) -> ValResult<f32> {
+    match p.next()? {
+        Token::Dimension { value, unit, .. } => match unit.to_ascii_lowercase().as_ref() {
+            "deg" => Ok(*value),
+            "grad" => Ok(value * 0.9),
+            "rad" => Ok(value.to_degrees()),
+            "turn" => Ok(value * 360.0),
+            _ => Err(p.new_error_for_next_token()),
+        },
+        Token::Number { value, .. } => Ok(*value),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+fn expect_comma(p: &mut Parser<'_>) -> ValResult<()> {
+    match p.next()? {
+        Token::Comma => Ok(()),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// transform（ADR-0009 v1）：none | 2D 函数列表。3D 函数显式拒绝
+/// （解析错误 → 声明丢弃 + warn，CSS 宽容路径）；未知函数同拒绝。
+pub fn parse_transform(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let none = p.try_parse(|p| -> ValResult<()> {
+        let t = p.next()?;
+        match &t {
+            Token::Ident(name) if name.eq_ignore_ascii_case("none") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if none.is_ok() {
+        return Ok(DeclValue::Transform(Vec::new()));
+    }
+    let mut fns = Vec::new();
+    loop {
+        // 列表头：Function → 解析；Comma → 宽容跳过；EOF/`;`/`}` → 正常终止
+        // （不消费终止符，交回声明循环）；其他 token → 严格拒绝。
+        let name = match p.next() {
+            Ok(Token::Function(name)) => name.to_ascii_lowercase(),
+            Ok(Token::Comma) => continue,
+            Ok(_) => break,
+            Err(_) => break, // EOF：值流尽
+        };
+        let f = p.parse_nested_block(|p| match name.as_str() {
+            "translate" | "translatex" | "translatey" => {
+                let tx = parse_length_percentage(p)?;
+                let ty = match name.as_str() {
+                    "translatex" => LengthPercentage::Px(0.0),
+                    "translatey" => {
+                        // translatey 只有一个实参：y = tx 槽位解析值
+                        return Ok(TransformFn::Translate(LengthPercentage::Px(0.0), tx));
+                    }
+                    _ => {
+                        // 单实参形式 translate(tx)：ty = 0（try_parse 失败自动回滚）
+                        let comma = p.try_parse(|p| expect_comma(p)).is_ok();
+                        if comma {
+                            parse_length_percentage(p).unwrap_or(LengthPercentage::Px(0.0))
+                        } else {
+                            LengthPercentage::Px(0.0)
+                        }
+                    }
+                };
+                Ok(TransformFn::Translate(tx, ty))
+            }
+            "scale" | "scalex" | "scaley" => {
+                let sx = match p.next()? {
+                    Token::Number { value, .. } => *value,
+                    _ => return Err(p.new_error_for_next_token()),
+                };
+                let sy = match name.as_str() {
+                    "scalex" => 1.0,
+                    "scaley" => {
+                        return Ok(TransformFn::Scale(1.0, sx));
+                    }
+                    _ => {
+                        let second = p.try_parse(|p| -> ValResult<f32> {
+                            expect_comma(p)?;
+                            match p.next()? {
+                                Token::Number { value, .. } => Ok(*value),
+                                _ => Err(p.new_error_for_next_token()),
+                            }
+                        });
+                        second.unwrap_or(sx)
+                    }
+                };
+                Ok(TransformFn::Scale(sx, sy))
+            }
+            "rotate" => Ok(TransformFn::Rotate(parse_angle_deg(p)?)),
+            "skew" | "skewx" | "skewy" => {
+                let ax = parse_angle_deg(p)?;
+                let ay = match name.as_str() {
+                    "skewx" => 0.0,
+                    "skewy" => return Ok(TransformFn::Skew(0.0, ax)),
+                    _ => {
+                        let second = p.try_parse(|p| -> ValResult<f32> {
+                            expect_comma(p)?;
+                            parse_angle_deg(p)
+                        });
+                        second.unwrap_or(0.0)
+                    }
+                };
+                Ok(TransformFn::Skew(ax, ay))
+            }
+            "matrix" => {
+                let mut v = [0.0f32; 6];
+                for (i, slot) in v.iter_mut().enumerate() {
+                    if i > 0 {
+                        expect_comma(p)?;
+                    }
+                    match p.next()? {
+                        Token::Number { value, .. } => *slot = *value,
+                        _ => return Err(p.new_error_for_next_token()),
+                    }
+                }
+                Ok(TransformFn::Matrix(v[0], v[1], v[2], v[3], v[4], v[5]))
+            }
+            // ADR-0009：3D 函数（含 perspective）v1 拒绝——vello 0.10 为纯 2D 仿射
+            "matrix3d" | "translate3d" | "translatez" | "rotate3d" | "rotatex" | "rotatey"
+            | "rotatez" | "scale3d" | "scalez" | "perspective" => Err(p.new_error_for_next_token()),
+            _ => Err(p.new_error_for_next_token()),
+        })?;
+        fns.push(f);
+    }
+    Ok(DeclValue::Transform(fns))
 }
 
 fn parse_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
@@ -1268,6 +1418,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::Position => parse_position(p),
         P::OverflowX | P::OverflowY => parse_overflow(p),
         P::BoxSizing => parse_box_sizing(p),
+        P::Transform => parse_transform(p),
         P::JustifyContent | P::AlignItems | P::AlignSelf | P::AlignContent => parse_align(p),
         P::FlexDirection => parse_flex_direction(p),
         P::FlexWrap => parse_flex_wrap(p),
