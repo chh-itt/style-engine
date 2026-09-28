@@ -32,6 +32,9 @@ pub struct Frame<K: Copy> {
     pub boxes: Vec<LayoutEntry<K>>,
     /// 本帧绘制清单（树序基元）。
     pub paint: crate::paint::DisplayList,
+    /// 滚动容器量程（ADR-0007）：key → 各轴最大滚动量（px，非滚动轴为 0）。
+    /// 引擎不夹紧偏移——量程供宿主 clamp 用（零副作用、幂等）。
+    pub scrollable: HashMap<K, (f32, f32)>,
 }
 
 impl<K: Copy + PartialEq> Frame<K> {
@@ -146,6 +149,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if self.key_to_node.contains_key(&key) {
             return Err(crate::error::ContractError::DuplicateNode);
         }
+        // class 语义归一（CSS class 属性为空格分隔 token）
+        let mut node = node;
+        node.classes = normalize_classes(&node.classes);
         // span 区间契约校验（T5c）：UTF-8 字节边界内、有序、不越界；
         // 无文本节点的 span 一律非法（区间无处着落）。
         for span in &node.spans {
@@ -270,7 +276,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let Some(&id) = self.key_to_node.get(&key) else {
             return Err(crate::error::ContractError::UnknownNode);
         };
-        self.tree.node_mut(id).classes = classes.iter().cloned().collect();
+        self.tree.node_mut(id).classes = normalize_classes(classes);
         self.dirty_style = true;
         Ok(())
     }
@@ -378,9 +384,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             );
         }
         // T5c-2：文本叶换行——pass1 布局给出包含块宽后，white-space: normal 的
-        // 自动测量文本叶按 max_advance 重测量并按需二次布局。近似：包含块内容宽
-        // = 父 border-box − 父左右 padding（border 未扣除）；shrink-to-fit 父宽
-        // 受无界文本影响的场景为残余偏差。
+        // 自动测量文本叶按 max_advance 重测量并按需二次布局。包含块内容宽 =
+        // 父 border-box − 父左右 padding − 已生效 border（style none 时宽归零）；
+        // shrink-to-fit 父宽受无界文本影响的场景为残余偏差。
         #[cfg(feature = "text")]
         if let Some(root) = self.taffy_root {
             let mut remeasure: Vec<(NodeId, f32)> = Vec::new();
@@ -477,6 +483,93 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if self.root_key.is_some() {
             self.collect(self.tree.root(), 0.0, 0.0, &mut boxes, &mut layout_by_node);
         }
+        // ADR-0007：滚动容器可滚动外延（宿主推进偏移的量程）。识别 = overflow
+        // ∈ {auto, scroll}（两轴独立）；外延 = padding box 与全部后代 border box
+        // 并集相对 padding box 原点的最大超出。近似：绝对定位后代一并并入，
+        // 随定位模型细化；偏移本身归宿主（set_scroll_offset），引擎不夹紧。
+        let mut scrollable: HashMap<K, (f32, f32)> = HashMap::new();
+        if self.root_key.is_some() {
+            let border_px = |cs: &ComputedStyle,
+                             w_id: crate::css::property::PropertyId,
+                             s_id: crate::css::property::PropertyId|
+             -> f32 {
+                let painted = !matches!(
+                    cs.get(s_id),
+                    Some(crate::css::property::DeclValue::BorderStyle(
+                        crate::css::property::BorderStyle::None
+                    ))
+                ) && cs.get(s_id).is_some();
+                if !painted {
+                    return 0.0;
+                }
+                match cs.get(w_id) {
+                    Some(crate::css::property::DeclValue::BorderWidth(Some(lp))) => lp
+                        .resolve(
+                            &crate::css::value::ResolveCtx {
+                                em: cs.font_size_px(),
+                                rem: 16.0,
+                                viewport_w: self.media.viewport_w,
+                                viewport_h: self.media.viewport_h,
+                            },
+                            0.0,
+                        )
+                        .unwrap_or(0.0),
+                    _ => 0.0,
+                }
+            };
+            for (&key, &id) in &self.key_to_node {
+                let Some(cs) = self.styles.get(&id) else {
+                    continue;
+                };
+                let scrollable_axis = |pid: crate::css::property::PropertyId| {
+                    // 解析层已把 auto 归一为 Scroll（引擎内语义等价，见 parse_overflow）
+                    matches!(
+                        cs.get(pid),
+                        Some(crate::css::property::DeclValue::Overflow(
+                            crate::css::property::Overflow::Scroll
+                        ))
+                    )
+                };
+                let ox = scrollable_axis(crate::css::property::PropertyId::OverflowX);
+                let oy = scrollable_axis(crate::css::property::PropertyId::OverflowY);
+                if !ox && !oy {
+                    continue;
+                }
+                let Some(&(x, y, w, h)) = layout_by_node.get(&id) else {
+                    continue;
+                };
+                use crate::css::property::PropertyId;
+                let bl = border_px(cs, PropertyId::BorderLeftWidth, PropertyId::BorderLeftStyle);
+                let bt = border_px(cs, PropertyId::BorderTopWidth, PropertyId::BorderTopStyle);
+                let br = border_px(
+                    cs,
+                    PropertyId::BorderRightWidth,
+                    PropertyId::BorderRightStyle,
+                );
+                let bb = border_px(
+                    cs,
+                    PropertyId::BorderBottomWidth,
+                    PropertyId::BorderBottomStyle,
+                );
+                let (px0, py0) = (x + bl, y + bt);
+                let (pw, ph) = ((w - bl - br).max(0.0), (h - bt - bb).max(0.0));
+                let mut ex = px0 + pw;
+                let mut ey = py0 + ph;
+                let mut stack: Vec<NodeId> = self.tree.children(id).to_vec();
+                while let Some(c) = stack.pop() {
+                    if let Some(&(cx, cy, cw, ch)) = layout_by_node.get(&c) {
+                        ex = ex.max(cx + cw);
+                        ey = ey.max(cy + ch);
+                    }
+                    stack.extend(self.tree.children(c).iter().copied());
+                }
+                let max_x = if ox { (ex - px0 - pw).max(0.0) } else { 0.0 };
+                let max_y = if oy { (ey - py0 - ph).max(0.0) } else { 0.0 };
+                if max_x > 0.0 || max_y > 0.0 {
+                    scrollable.insert(key, (max_x, max_y));
+                }
+            }
+        }
         let mut paint = crate::paint::DisplayList::default();
         crate::paint::build_display_list(
             &crate::paint::PaintCtx {
@@ -496,6 +589,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             generation: self.generation,
             boxes,
             paint,
+            scrollable,
         }
     }
 
@@ -671,6 +765,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.collect(*c, x, y, out, layout_by_node);
         }
     }
+}
+
+/// class 语义归一（CSS class 属性为空格分隔 token）：把每个条目按 ASCII
+/// 空白拆开并丢弃空项——宿主传 `"row alt"` 与 `["row", "alt"]` 等价。
+fn normalize_classes(input: &[String]) -> smallvec::SmallVec<[String; 4]> {
+    input
+        .iter()
+        .flat_map(|c| c.split_ascii_whitespace())
+        .map(String::from)
+        .collect()
 }
 
 /// 两阶段包含块内容宽的水平内缩项（T5c-2 收口）：padding 恒计；border 仅在
@@ -917,6 +1021,89 @@ mod tests {
             ..Default::default()
         };
         assert!(engine.insert(Some(Key(1)), Key(5), textless).is_err()); // 无文本
+    }
+
+    #[test]
+    fn scroll_bounds_reported_and_hidden_skipped() {
+        // ADR-0007：overflow∈{auto,scroll} 上报量程（padding box + 后代并集）；
+        // hidden 仅裁剪、不上报。list：内容底 310 − padbox 高 100 = 210。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.list { width: 200px; height: 100px; overflow-y: scroll; padding: 10px; } div.hid { width: 200px; height: 100px; overflow-y: hidden; padding: 10px; } div.item { width: 200px; height: 150px; }"
+            )
+            .is_clean());
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: if classes.is_empty() {
+                Default::default()
+            } else {
+                std::iter::once(classes.to_string()).collect()
+            },
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node("")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("list")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), node("item")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(4), node("item")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(5), node("hid")).is_ok());
+        assert!(engine.insert(Some(Key(5)), Key(6), node("item")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert_eq!(frame.scrollable.get(&Key(2)), Some(&(0.0, 210.0)));
+        assert!(!frame.scrollable.contains_key(&Key(5)));
+    }
+
+    #[test]
+    fn scroll_offset_translates_paint() {
+        // 宿主偏移 → PushScroll/PopScroll 平移层（不改布局盒）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet("div.list { width: 200px; height: 100px; overflow-y: scroll; }")
+                .is_clean()
+        );
+        let node = || StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once("list".to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node()).is_ok());
+        assert!(engine.set_scroll_offset(Key(1), 0.0, 40.0).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert!(frame.paint.ops.iter().any(|op| matches!(
+            op,
+            crate::paint::PaintOp::PushScroll { dx, dy } if *dx == 0.0 && *dy == 40.0
+        )));
+        assert!(
+            frame
+                .paint
+                .ops
+                .iter()
+                .any(|op| matches!(op, crate::paint::PaintOp::PopScroll))
+        );
+    }
+
+    #[test]
+    fn class_attribute_is_space_separated_tokens() {
+        // class 属性按空格拆 token："row alt" 同时命中 .row 与 .alt。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.row { width: 200px; height: 40px; } div.alt { background-color: #164e63; }"
+                )
+                .is_clean()
+        );
+        let node = StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once("row alt".to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = frame.find(Key(1)).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (0.0, 0.0, 200.0, 40.0));
     }
 
     #[test]

@@ -19,6 +19,9 @@ div.badge { width: 120px; height: 48px;
 div.title { font-family: \"DejaVu Sans\"; font-size: 24px; font-weight: 700; color: #ffffff; }
 div.body { font-family: \"DejaVu Sans\"; font-size: 14px; color: #e2e8f0; white-space: normal; }
 div.veil { width: 120px; height: 24px; background-color: #ffffff; opacity: 0.55; }
+div.scroll { width: 240px; height: 80px; overflow-y: scroll; background-color: #0e7490; }
+div.row { height: 40px; background-color: #22d3ee; }
+div.alt { background-color: #164e63; }
 ";
 
 fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
@@ -55,6 +58,12 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
         Some("The quick brown fox jumps over the lazy dog 0123456789"),
     );
     node(Some(0), 4, "veil", None);
+    node(Some(0), 5, "scroll", None);
+    node(Some(5), 6, "row", None);
+    node(Some(5), 7, "row alt", None);
+    node(Some(5), 8, "row", None);
+    // ADR-0007：滚动偏移归宿主——快照固定推进 20px 目验平移 + 裁剪
+    let _ = engine.set_scroll_offset(5, 0.0, 20.0);
     let frame = engine.frame((W as f32, H as f32), 1.0, 0.0);
     (frame, text)
 }
