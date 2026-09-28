@@ -35,6 +35,17 @@ fn numeric_cases_match_golden() {
         };
         let diffs = diff(&engine_boxes, &golden.boxes, tol);
         if case.manifest.xfail {
+            // xfail 资产：差异钉死「现状不可达」——打印实际差异供诊断与转正评估
+            eprintln!(
+                "xfail {}：{} 项差异（资产钉死）\n    {}",
+                case.name,
+                diffs.len(),
+                diffs
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n    ")
+            );
             assert!(
                 !diffs.is_empty(),
                 "xfail 用例 {} 意外通过——转正并重生成预算",

@@ -154,6 +154,24 @@ pub fn run_case(case: &NumericCase) -> Result<Vec<EngineBox>, String> {
     if !engine.set_stylesheet(&case.css).is_clean() {
         return Err(format!("case {} 的 CSS 未干净解析", case.name));
     }
+    // 字体装载（第四批⑥）：manifest.fonts 项 = "族名=相对仓库根路径"；
+    // 引擎按字体内部名匹配（与浏览器 @font-face 同源字节，保证文本用例
+    // 两侧字体对称）。族名仅供 dumper 的 @font-face 声明使用。
+    let repo_root = case
+        .dir
+        .ancestors()
+        .nth(4)
+        .ok_or_else(|| format!("case {} 无法定位仓库根", case.name))?
+        .to_path_buf();
+    for entry in &case.manifest.fonts {
+        let rel = entry
+            .split_once('=')
+            .map(|(_, p)| p)
+            .ok_or_else(|| format!("case {} 字体项须为 族名=路径：{entry}", case.name))?;
+        let bytes = std::fs::read(repo_root.join(rel))
+            .map_err(|e| format!("case {} 字体读取失败 {rel}: {e}", case.name))?;
+        engine.add_font(bytes);
+    }
     for (i, (key, parent, classes, text)) in case.nodes.iter().enumerate() {
         let _ = i;
         engine

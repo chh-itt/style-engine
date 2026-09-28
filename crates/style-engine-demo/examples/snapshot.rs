@@ -79,7 +79,7 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
         Some(100),
         9,
         "cjk",
-        Some("样式引擎渲染检查：CJK 字体接入与断行。"),
+        Some("样式引擎渲染检查：CJK 与 Latin 混排 Mixed Run 断行。"),
     );
     node(Some(100), 5, "scroll", None);
     node(Some(5), 6, "row", None);

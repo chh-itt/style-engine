@@ -1,0 +1,9 @@
+/* 禁则探针（第四批⑥）：窄容器内 CJK 文本断行——浏览器按 kinsoku 禁则
+   （行头禁排 」。、「等闭类标点）选择断点；引擎侧 parley UAX#14
+   （icu_segmenter）对标准闭类是否同判为本用例的检验点。字形度量
+   两侧同源（Noto Sans SC 经 @font-face / add_font 注入）。
+   注意：文本放约束容器的子叶——文本叶按包含块内容宽折行
+   （wrap_two_phase），自身显式宽度不生效（既有语义记 FEATURES）。 */
+body { margin: 0; }
+.wrap { width: 140px; }
+.txt { font-family: "Noto Sans SC"; font-size: 16px; white-space: normal; }

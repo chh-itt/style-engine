@@ -32,6 +32,30 @@ COLLECT_JS = """
 })
 """
 
+REPO_ROOT = CASES.parent.parent.parent
+
+
+def inject_fonts(page, manifest) -> None:
+    """第四批⑥：manifest.fonts 项 = "族名=相对仓库根路径"——以 data: URL
+    的 @font-face 注入（免 file:// 访问限制），并等待 document.fonts.ready，
+    保证文本用例与引擎侧（同字节 add_font）字体对称。"""
+    import base64
+
+    entries = manifest.get("fonts", [])
+    if not entries:
+        return
+    parts = []
+    for entry in entries:
+        family, _, rel = entry.partition("=")
+        font_path = REPO_ROOT / rel
+        b64 = base64.b64encode(font_path.read_bytes()).decode()
+        parts.append(
+            f"@font-face {{ font-family: '{family}'; "
+            f"src: url(data:font/ttf;base64,{b64}); }}"
+        )
+    page.add_style_tag(content="\n".join(parts))
+    page.evaluate("() => document.fonts.ready")
+
 
 def dump_case(case_dir: Path, browser) -> None:
     manifest = tomllib.loads((case_dir / "manifest.toml").read_text("utf-8"))
@@ -42,6 +66,7 @@ def dump_case(case_dir: Path, browser) -> None:
     )
     page.goto((case_dir / "case.html").as_uri())
     page.wait_for_load_state("networkidle")
+    inject_fonts(page, manifest)
     boxes = page.evaluate(COLLECT_JS)
     meta = {
         "generator": "tools/dump_rects.py",
