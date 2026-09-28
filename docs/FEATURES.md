@@ -20,3 +20,14 @@
 ## T2 — 暂缓（记录重估条件）
 
 sticky / fixed（依赖滚动语义的完整所有权，滚动偏移已按 ADR-0005 归宿主，重估时补滚动容器模型）、float、table 布局、multi-column（taffy 无对应算法）、打印
+
+## MVP 实现偏差核对（T4/T6 落地后现状）
+
+- 阴影：无模糊半径、无 inset（vello 0.10 无内置高斯模糊）；`PaintOp::Shadow` 以偏移半透明矩形近似。
+- 边框：四边统一取上边 width/style/color（`PaintOp::Border` 单值）；dashed/dotted 以 dash pattern 近似，圆角描边随形状。
+- 渐变：radial = 正圆、半径取对角线/2（farthest-corner 近似）；stop 缺省位置按 CSS 语义均匀补位；插值色空间 sRGB。
+- 文本：`PaintOp::Text` 记录排版输入（text/color/size/family/weight/italic），vello sink 暂跳过字形；文本叶子尺寸依赖宿主 `set_leaf_measure` 推送，parley 内置测量属 T5 票据。
+- opacity / 背景图片：属性未实现（BackgroundImage 仅 Gradient/None；Opacity 未映射）。
+- z-index：已解析物化，绘制仍按树序；stacking context 属 T1 票据。
+- 布局映射：display:inline 缺席（统一块化）；calc 含百分比时百分比基按 0 扁平化；vw/vh 已按视口解析。
+- 滚动：`PushScroll/PopScroll` 折叠为坐标平移；滚动语义归宿主（ADR-0005）。
