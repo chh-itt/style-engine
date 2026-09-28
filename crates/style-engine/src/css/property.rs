@@ -83,6 +83,10 @@ pub enum PropertyId {
     BoxSizing,
     /// transform（ADR-0009 v1：2D 仿射函数列表；3D 函数解析拒绝）。
     Transform,
+    /// filter/clip-path（第四批④：仅解析存在性语义位触发 SC，不做滤镜/裁剪效果）。
+    Filter,
+    /// clip-path（同上）。
+    ClipPath,
     // 文本
     Color,
     FontFamily,
@@ -161,6 +165,8 @@ impl PropertyId {
         Self::OverflowY,
         Self::BoxSizing,
         Self::Transform,
+        Self::Filter,
+        Self::ClipPath,
         Self::Color,
         Self::FontFamily,
         Self::FontSize,
@@ -238,6 +244,8 @@ impl PropertyId {
             Self::OverflowY => "overflow-y",
             Self::BoxSizing => "box-sizing",
             Self::Transform => "transform",
+            Self::Filter => "filter",
+            Self::ClipPath => "clip-path",
             Self::Color => "color",
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
@@ -295,6 +303,9 @@ pub enum DeclValue {
     /// z-index：auto → None（级联缺席等价；「有值且为 Some」是将来 ADR-0008
     /// 判定 stacking context 的依据），数字 → Some。
     ZIndex(Option<f32>),
+    /// filter/clip-path 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
+    /// 语义位（ADR-0008 全集），不携带也不实现滤镜/裁剪效果。
+    Effect(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -793,6 +804,41 @@ pub fn parse_transform(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         fns.push(f);
     }
     Ok(DeclValue::Transform(fns))
+}
+
+/// filter/clip-path 的 v0 解析（第四批④，ADR-0008 触发全集）：不实现滤镜/
+/// 裁剪效果，仅保留「值 ≠ none」存在性语义位（`DeclValue::Effect`）供 SC
+/// 判定与带序消费。任意函数/值宽容吞下，终止符（`;`/EOF）不消费交回声明循环。
+fn parse_sc_effect(p: &mut Parser) -> ValResult<DeclValue> {
+    let mut present = false;
+    loop {
+        match p.next() {
+            Ok(Token::Function(_)) => {
+                // parse_nested_block 走 parse_entirely（块内容须耗尽），须显式吞块
+                p.parse_nested_block(skip_block_content)?;
+                present = true;
+            }
+            // none：仅在值首（尚未见其他值）时缺席
+            Ok(Token::Ident(name)) if !present && name.eq_ignore_ascii_case("none") => {}
+            Ok(Token::Semicolon) => break,
+            Ok(_) => present = true,
+            Err(_) => break, // EOF：值流尽
+        }
+    }
+    Ok(DeclValue::Effect(present))
+}
+
+/// 吞掉一个嵌套块的全部内容（递归处理内嵌函数）——满足 parse_nested_block
+/// 经 parse_entirely 的 expect_exhausted 契约；闭合符由外层消费，块内
+/// next() 到达边界时返回 Err 即视为耗尽。
+fn skip_block_content(p: &mut Parser) -> ValResult<()> {
+    loop {
+        match p.next() {
+            Ok(Token::Function(_)) => p.parse_nested_block(skip_block_content)?,
+            Ok(_) => {}
+            Err(_) => return Ok(()),
+        }
+    }
 }
 
 fn parse_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
@@ -1419,6 +1465,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::OverflowX | P::OverflowY => parse_overflow(p),
         P::BoxSizing => parse_box_sizing(p),
         P::Transform => parse_transform(p),
+        P::Filter | P::ClipPath => parse_sc_effect(p),
         P::JustifyContent | P::AlignItems | P::AlignSelf | P::AlignContent => parse_align(p),
         P::FlexDirection => parse_flex_direction(p),
         P::FlexWrap => parse_flex_wrap(p),

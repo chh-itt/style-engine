@@ -1822,6 +1822,87 @@ mod tests {
     }
 
     #[test]
+    fn filter_clip_path_sc_effect_parse() {
+        // 第四批④：filter/clip-path 仅存在性语义位（Effect）——none 缺席、
+        // 任意值存在（多函数列表含内）；不做滤镜/裁剪效果实现
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.a { filter: blur(2px); } div.b { clip-path: inset(50%); } div.c { filter: none; } div.d { filter: blur(1px) saturate(2); }"
+            )
+            .is_clean());
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "a").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "b").is_ok());
+        assert!(mk(&mut engine, Key(3), Some(Key(1)), "c").is_ok());
+        assert!(mk(&mut engine, Key(4), Some(Key(1)), "d").is_ok());
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let cs = |e: &StyleEngine<Key>, k: Key| {
+            e.styles
+                .get(e.key_to_node.get(&k).unwrap())
+                .cloned()
+                .unwrap()
+        };
+        assert!(cs(&engine, Key(1)).has_filter());
+        assert!(!cs(&engine, Key(1)).has_clip_path());
+        assert!(cs(&engine, Key(2)).has_clip_path());
+        assert!(!cs(&engine, Key(3)).has_filter(), "none → 缺席");
+        assert!(cs(&engine, Key(4)).has_filter(), "多函数列表 → 存在");
+    }
+
+    #[test]
+    fn filter_clip_path_trigger_stacking_context_order() {
+        // 第四批④：非定位 filter/clip-path ≠ none → SC（Pos 带键 0），后画
+        // 覆盖树序控制组；且 op 总数与控制组一致（仅触发、不产生效果 PaintOp）
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let build = |trigger: &str| -> Vec<crate::paint::PaintOp> {
+            let mut engine: StyleEngine<Key> = StyleEngine::new();
+            assert!(engine
+                .set_stylesheet(&format!(
+                    "div.a {{ width: 40px; height: 40px; background-color: #ff0000; }} div.b {{ width: 40px; height: 40px; background-color: #0000ff;{trigger} }}"
+                ))
+                .is_clean());
+            assert!(engine.insert(None, Key(1), node("")).is_ok());
+            assert!(engine.insert(Some(Key(1)), Key(2), node("b")).is_ok());
+            assert!(engine.insert(Some(Key(1)), Key(3), node("a")).is_ok());
+            engine.frame((800.0, 600.0), 1.0, 0.0).paint.ops.to_vec()
+        };
+        let find = |ops: &[crate::paint::PaintOp], rgb: [f32; 3]| {
+            ops.iter().position(|op| {
+                matches!(op, crate::paint::PaintOp::FillRect { color, .. }
+                    if color.components[0] == rgb[0]
+                        && color.components[1] == rgb[1]
+                        && color.components[2] == rgb[2])
+            })
+        };
+        let plain = build("");
+        let (blue, red) = (find(&plain, [0.0, 0.0, 1.0]), find(&plain, [1.0, 0.0, 0.0]));
+        assert!(blue < red, "控制组应树序绘制（blue={blue:?} red={red:?}）");
+        for (label, ops) in [
+            ("filter", build(" filter: blur(0px);")),
+            ("clip-path", build(" clip-path: inset(0);")),
+        ] {
+            let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
+            assert!(blue > red, "{label} SC 应后画（blue={blue:?} red={red:?}）");
+            assert_eq!(ops.len(), plain.len(), "{label} 不应产生额外 PaintOp");
+        }
+    }
+
+    #[test]
     fn wrap_two_phase_frame_layout() {
         // T5c-2：两阶段帧通路（无字体时 remeasure 集为空，验证不回归）
         let mut engine: StyleEngine<Key> = StyleEngine::new();

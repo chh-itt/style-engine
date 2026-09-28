@@ -114,6 +114,8 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         // CSS 默认 content-box（width 只含内容盒）；box-model 用例约束该语义
         P::BoxSizing => DeclValue::BoxSizing(crate::css::property::BoxSizing::ContentBox),
         P::Transform => DeclValue::Transform(Vec::new()),
+        // filter/clip-path 初始缺席（第四批④：仅存在性语义位触发 SC）
+        P::Filter | P::ClipPath => DeclValue::Effect(false),
         P::Color => DeclValue::Color(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 1.0]))),
         P::FontFamily => DeclValue::FontFamily(FontFamilyList(smallvec![FamilyName::SansSerif])),
         P::FontSize => DeclValue::Len(LengthPercentage::Px(16.0)), // medium
@@ -264,6 +266,19 @@ impl ComputedStyle {
     /// transform ≠ none（ADR-0009 判定谓词单点：L2 cb 语义位与 L3 SC 触发共享）。
     pub fn has_transform(&self) -> bool {
         !self.transform().is_empty()
+    }
+
+    /// filter 存在性（第四批④：仅 SC 触发语义位，无滤镜效果实现）。
+    pub fn has_filter(&self) -> bool {
+        matches!(self.get(PropertyId::Filter), Some(DeclValue::Effect(true)))
+    }
+
+    /// clip-path 存在性（第四批④：仅 SC 触发语义位，无裁剪效果实现）。
+    pub fn has_clip_path(&self) -> bool {
+        matches!(
+            self.get(PropertyId::ClipPath),
+            Some(DeclValue::Effect(true))
+        )
     }
 
     pub fn overflow_x(&self) -> Overflow {

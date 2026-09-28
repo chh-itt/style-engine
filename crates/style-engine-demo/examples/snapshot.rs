@@ -70,7 +70,12 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
         Some("The quick brown fox jumps over the lazy dog 0123456789"),
     );
     node(Some(0), 4, "veil", None);
-    node(Some(100), 9, "cjk", Some("样式引擎渲染检查：CJK 字体接入与断行。"));
+    node(
+        Some(100),
+        9,
+        "cjk",
+        Some("样式引擎渲染检查：CJK 字体接入与断行。"),
+    );
     node(Some(100), 5, "scroll", None);
     node(Some(5), 6, "row", None);
     node(Some(5), 7, "row alt", None);

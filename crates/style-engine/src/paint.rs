@@ -508,9 +508,11 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             cstyle.get(PropertyId::Opacity),
             Some(DeclValue::Number(n)) if *n < 1.0
         );
-        // transform ≠ none 触发 SC（ADR-0008 全集 / ADR-0009）：非定位进 Pos 带键 0
-        let transformed = cstyle.has_transform();
-        match (positioned, transformed, z, faded) {
+        // SC 触发（ADR-0008 全集 / ADR-0009）：transform ≠ none 或
+        // filter/clip-path ≠ none（第四批④：仅触发、无效果实现、不产生
+        // 任何 PaintOp）；非定位触发者进 Pos 带键 0
+        let sc = cstyle.has_transform() || cstyle.has_filter() || cstyle.has_clip_path();
+        match (positioned, sc, z, faded) {
             (true, _, Some(n), _) if n < 0.0 => neg.push((n, idx, *c)),
             (true, _, _, _) | (_, true, _, _) | (_, _, _, true) => {
                 pos.push((z.unwrap_or(0.0).max(0.0), idx, *c))
