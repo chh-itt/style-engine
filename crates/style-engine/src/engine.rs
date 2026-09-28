@@ -67,6 +67,11 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     styles: HashMap<NodeId, ComputedStyle>,
     /// span 级样式（T5c）：NodeId → (字节起点, 字节终点, 覆盖后的 ComputedStyle)。
     span_styles: HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
+    /// 文本叶父指针（T5c-2）：换行重测量需读包含块宽度。
+    parents: HashMap<NodeId, NodeId>,
+    /// 内置自动测量的文本叶集合（T5c-2）：仅这些节点参与换行重测量。
+    #[cfg(feature = "text")]
+    auto_text: std::collections::HashSet<NodeId>,
     /// 内置文本栈（feature = "text"；字体字节由宿主推送）。
     #[cfg(feature = "text")]
     text: crate::text::TextSystem,
@@ -103,6 +108,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             taffy_node: HashMap::new(),
             styles: HashMap::new(),
             span_styles: HashMap::new(),
+            parents: HashMap::new(),
+            #[cfg(feature = "text")]
+            auto_text: std::collections::HashSet::new(),
         }
     }
 
@@ -172,6 +180,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.key_to_node.clear();
             self.node_to_key.clear();
             self.measures.clear();
+            self.span_styles.clear();
+            self.parents.clear();
+            #[cfg(feature = "text")]
+            self.auto_text.clear();
             self.scroll_offsets.clear();
             self.root_key = None;
             self.taffy_root = None;
@@ -193,6 +205,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 self.key_to_node.remove(&k);
             }
             self.measures.remove(&d);
+            self.span_styles.remove(&d);
+            self.parents.remove(&d);
+            #[cfg(feature = "text")]
+            self.auto_text.remove(&d);
             self.scroll_offsets.remove(&d);
             self.styles.remove(&d);
             self.taffy_node.remove(&d);
@@ -294,6 +310,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             return Err(crate::error::ContractError::UnknownNode);
         };
         self.measures.insert(id, (width, height));
+        // 宿主测量接管后不再参与自动换行重测量（T5c-2）
+        #[cfg(feature = "text")]
+        self.auto_text.remove(&id);
         self.dirty_style = true;
         Ok(())
     }
@@ -338,6 +357,91 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     height: taffy::prelude::AvailableSpace::Definite(viewport.1),
                 },
             );
+        }
+        // T5c-2：文本叶换行——pass1 布局给出包含块宽后，white-space: normal 的
+        // 自动测量文本叶按 max_advance 重测量并按需二次布局。近似：包含块内容宽
+        // = 父 border-box − 父左右 padding（border 未扣除）；shrink-to-fit 父宽
+        // 受无界文本影响的场景为残余偏差。
+        #[cfg(feature = "text")]
+        if let Some(root) = self.taffy_root {
+            let mut remeasure: Vec<(NodeId, f32)> = Vec::new();
+            for &id in self.measures.keys() {
+                if !self.auto_text.contains(&id) {
+                    continue;
+                }
+                let Some(cs) = self.styles.get(&id) else {
+                    continue;
+                };
+                let wraps = matches!(
+                    cs.get(crate::css::property::PropertyId::WhiteSpace),
+                    None | Some(crate::css::property::DeclValue::WhiteSpace(
+                        crate::css::property::WhiteSpace::Normal
+                    ))
+                );
+                if !wraps {
+                    continue;
+                }
+                let Some(&parent_id) = self.parents.get(&id) else {
+                    continue;
+                };
+                let Some(&ptid) = self.taffy_node.get(&parent_id) else {
+                    continue;
+                };
+                let (Ok(pline), Some(pcs)) = (self.taffy.layout(ptid), self.styles.get(&parent_id))
+                else {
+                    continue;
+                };
+                let pw = pline.size.width;
+                let rctx = crate::css::value::ResolveCtx {
+                    em: pcs.font_size_px(),
+                    rem: 16.0,
+                    viewport_w: self.media.viewport_w,
+                    viewport_h: self.media.viewport_h,
+                };
+                let inset: f32 = [
+                    crate::css::property::PropertyId::PaddingLeft,
+                    crate::css::property::PropertyId::PaddingRight,
+                ]
+                .iter()
+                .filter_map(|pid| pcs.len(*pid))
+                .filter_map(|lp| lp.resolve(&rctx, 0.0))
+                .sum();
+                remeasure.push((id, (pw - inset).max(0.0)));
+            }
+            let mut reflow = false;
+            for (id, avail) in remeasure {
+                let Some(text) = self.tree.node(id).text.clone() else {
+                    continue;
+                };
+                let Some(cs) = self.styles.get(&id).cloned() else {
+                    continue;
+                };
+                let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
+                let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                    owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
+                let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, Some(avail));
+                if let Some(old) = self.measures.get(&id) {
+                    reflow |= (old.0 - w).abs() > f32::EPSILON || (old.1 - h).abs() > f32::EPSILON;
+                }
+                self.measures.insert(id, (w, h));
+                if let Some(&tid) = self.taffy_node.get(&id) {
+                    let mut ts = map_style(&cs, &self.media);
+                    ts.size = taffy::prelude::Size {
+                        width: taffy::prelude::Dimension::length(w),
+                        height: taffy::prelude::Dimension::length(h),
+                    };
+                    let _ = self.taffy.set_style(tid, ts);
+                }
+            }
+            if reflow {
+                let _ = self.taffy.compute_layout(
+                    root,
+                    taffy::prelude::Size {
+                        width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                        height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                    },
+                );
+            }
         }
         self.generation += 1;
         let mut boxes = Vec::with_capacity(self.tree.len());
@@ -402,6 +506,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     fn restyle(&mut self) {
         self.styles.clear();
         self.span_styles.clear();
+        self.parents.clear();
         let root = self.tree.root();
         self.restyle_node(root, None);
         self.dirty_style = false;
@@ -417,6 +522,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 
     fn restyle_node(&mut self, id: NodeId, parent_id: Option<NodeId>) {
+        if let Some(p) = parent_id {
+            self.parents.insert(id, p);
+        }
         let parent_style = parent_id.and_then(|p| self.styles.get(&p).cloned());
         let cs = compute_node(
             &self.tree,
@@ -466,10 +574,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
             let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                 owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
-            // max_advance 接线属 T5c-2（taffy measure 回调后可传入可用宽）
             let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, None);
             if w > 0.0 || h > 0.0 {
                 self.measures.insert(id, (w, h));
+                self.auto_text.insert(id);
             }
         }
         let mut ts = map_style(&cs, &self.media);
@@ -562,6 +670,45 @@ mod tests {
         assert_eq!((s.start, s.end), (6, 10));
         assert_eq!(s.color.components, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(s.font_weight, 700.0);
+    }
+
+    #[test]
+    fn wrap_two_phase_frame_layout() {
+        // T5c-2：两阶段帧通路（无字体时 remeasure 集为空，验证不回归）
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet("div.p { width: 200px; padding: 10px; }")
+                .is_clean()
+        );
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("div".into()),
+                        classes: std::iter::once("p".into()).collect(),
+                        ..Default::default()
+                    },
+                )
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(
+                    Some(Key(1)),
+                    Key(2),
+                    StyleNode {
+                        name: Some("div".into()),
+                        text: Some("text".into()),
+                        ..Default::default()
+                    },
+                )
+                .is_ok()
+        );
+        let frame = engine.frame((400.0, 100.0), 1.0, 0.0);
+        assert_eq!(frame.boxes.len(), 2);
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
