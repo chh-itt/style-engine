@@ -11,7 +11,7 @@
 | precomputed-hash | 0.1.1 | L1 选择器 | selectors 0.40 要求的选择器词哈希；SelString 包装实现（FNV-1a） | Apache-2.0/MIT |
 | selectors | 0.40.0 | L1 | 选择器解析/匹配/specificity | 需实现 SelectorImpl，MPL-2.0 |
 | color | 0.3.3 | L1 | CSS Color 4 颜色模型（oklch/color-mix）| linebender 出品 |
-| taffy | 0.14.0 | L2 | 布局引擎 | 2026-08-24 发布 |
+| taffy | 0.14.0 | L2 | 布局引擎 | 2026-08-24 发布；calc 集成面 = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())` / `traits.rs calc(val, basis)`，block.rs 处以 parent_size 为基调用）——接入需指针所有权约定，待 calc 正式特性票 |
 | slotmap | 1.1.1 | 核心 | StyleTree 与 secondary map 存储 | |
 | bitflags | 2.13.2 | 核心 | StateFlags | |
 | smallvec | 1.x | L1 | 声明/子选择器内联存储 | 由 cargo update 定 patch |
