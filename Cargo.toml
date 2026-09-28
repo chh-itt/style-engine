@@ -4,6 +4,7 @@ members = [
     "crates/style-engine",
     "crates/style-engine-vello",
     "crates/style-engine-demo",
+    "crates/style-engine-conformance",
 ]
 
 [workspace.package]
@@ -28,7 +29,10 @@ selectors = "0.40.0"
 # --- linebender 绘制词汇表与渲染栈（ADR-0001/0002） ---
 peniko = "0.6.1"
 taffy = "0.14.0"
-parley = "0.11.1"
+# complex-scripts（parley#621）：CJ/SEA 词典级词分段；cjdict 已随
+# icu_segmenter_data baked（≈+2MiB 数据段）。CJK 行断行仍走 UAX#14
+# （icu_segmenter 2.x 行分段器有意不加载 CJ 词典——设计取舍，见 DEPENDENCIES）。
+parley = { version = "0.11.1", features = ["complex-scripts"] }
 vello = "0.10.0"
 
 # --- 宿主侧（仅 demo/sink，核心 crate 禁止，ADR-0001） ---
@@ -38,6 +42,10 @@ winit = "=0.31.0-beta.3"
 # --- 基础设施 ---
 slotmap = "1.1.1"
 bitflags = "2.13.2"
+# --- conformance harness（ADR-0003 双通道；仅 harness crate 使用） ---
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
 smallvec = "1"
 tracing = "0.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

@@ -80,6 +80,7 @@ pub enum PropertyId {
     Opacity,
     OverflowX,
     OverflowY,
+    BoxSizing,
     // 文本
     Color,
     FontFamily,
@@ -156,6 +157,7 @@ impl PropertyId {
         Self::Opacity,
         Self::OverflowX,
         Self::OverflowY,
+        Self::BoxSizing,
         Self::Color,
         Self::FontFamily,
         Self::FontSize,
@@ -231,6 +233,7 @@ impl PropertyId {
             Self::Opacity => "opacity",
             Self::OverflowX => "overflow-x",
             Self::OverflowY => "overflow-y",
+            Self::BoxSizing => "box-sizing",
             Self::Color => "color",
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
@@ -265,6 +268,7 @@ pub enum DeclValue {
     Display(Display),
     Position(Position),
     Overflow(Overflow),
+    BoxSizing(BoxSizing),
     Align(Align),
     FlexDirection(FlexDirection),
     FlexWrap(FlexWrap),
@@ -316,6 +320,15 @@ pub enum Overflow {
     Hidden,
     Clip,
     Scroll,
+}
+
+/// box-sizing（Numeric Channel box-model 用例驱动接入，ADR-0003）：
+/// CSS 默认 content-box——width/height 只含内容盒；border-box 含
+/// padding+border。taffy 的 size 语义为 border-box，映射处换算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,6 +632,17 @@ pub fn parse_overflow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         ))
     })
     .map(DeclValue::Overflow)
+}
+
+pub fn parse_box_sizing(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "content-box" => BoxSizing::ContentBox,
+            "border-box" => BoxSizing::BorderBox,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::BoxSizing)
 }
 
 fn parse_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
@@ -1243,6 +1267,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::Display => parse_display(p),
         P::Position => parse_position(p),
         P::OverflowX | P::OverflowY => parse_overflow(p),
+        P::BoxSizing => parse_box_sizing(p),
         P::JustifyContent | P::AlignItems | P::AlignSelf | P::AlignContent => parse_align(p),
         P::FlexDirection => parse_flex_direction(p),
         P::FlexWrap => parse_flex_wrap(p),

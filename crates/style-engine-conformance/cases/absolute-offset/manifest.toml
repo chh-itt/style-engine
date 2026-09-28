@@ -1,0 +1,7 @@
+# absolute 双锚探针：远边 inset（right/bottom）与近边（top/left）各一。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["position-absolute", "position-relative", "inset", "width", "height"]
+xfail = false
+tolerance = 0.5

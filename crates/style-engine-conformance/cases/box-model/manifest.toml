@@ -1,0 +1,8 @@
+# box-sizing 语义探针：CSS 默认 content-box。引擎若与浏览器分歧，本用例
+# 在 .pad/.bordered 的 w/h 上超差——修复方向是 box-sizing 映射而非改用例。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["width", "padding", "border", "margin-single-side"]
+xfail = false
+tolerance = 0.5

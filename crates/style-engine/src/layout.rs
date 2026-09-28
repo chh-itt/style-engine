@@ -142,6 +142,12 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             }
             crate::css::property::Position::Absolute => taffy::prelude::Position::Absolute,
         },
+        // box-sizing 直通：taffy 的 size 语义随 ContentBox/BorderBox 换算
+        // （block.rs 布局期以 padding_border_size 调整），CSS 默认 content-box
+        box_sizing: match cs.box_sizing() {
+            crate::css::property::BoxSizing::ContentBox => taffy::style::BoxSizing::ContentBox,
+            crate::css::property::BoxSizing::BorderBox => taffy::style::BoxSizing::BorderBox,
+        },
         size: Size {
             width: dimension(lp_auto(PropertyId::Width), cs, env),
             height: dimension(lp_auto(PropertyId::Height), cs, env),
@@ -179,6 +185,35 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             right: length_percentage_auto(lp_auto(PropertyId::Right), cs, env),
             bottom: length_percentage_auto(lp_auto(PropertyId::Bottom), cs, env),
             left: length_percentage_auto(lp_auto(PropertyId::Left), cs, env),
+        },
+        // 边框占位（Numeric Channel box-model 用例驱动，ADR-0003）：CSS 边框
+        // 计入布局（content-box 调整式含 padding+border）；style none → 0，
+        // 与 used_h_inset 的 used-width 语义一致
+        border: Rect {
+            top: border_side(
+                cs,
+                PropertyId::BorderTopWidth,
+                PropertyId::BorderTopStyle,
+                env,
+            ),
+            right: border_side(
+                cs,
+                PropertyId::BorderRightWidth,
+                PropertyId::BorderRightStyle,
+                env,
+            ),
+            bottom: border_side(
+                cs,
+                PropertyId::BorderBottomWidth,
+                PropertyId::BorderBottomStyle,
+                env,
+            ),
+            left: border_side(
+                cs,
+                PropertyId::BorderLeftWidth,
+                PropertyId::BorderLeftStyle,
+                env,
+            ),
         },
         gap: Size {
             width: length_percentage(
@@ -248,6 +283,31 @@ fn flex_number(cs: &ComputedStyle, id: PropertyId, fallback: f32) -> f32 {
     match cs.get(id) {
         Some(DeclValue::Number(n)) => *n,
         _ => fallback,
+    }
+}
+
+/// 有效边框宽（单侧）：style none → 0；width 缺席/none → 0；其余按 LP 解析。
+/// 与 used_h_inset 的 used-width 语义一致（style none 时边框宽归零）。
+fn border_side(
+    cs: &ComputedStyle,
+    width_id: PropertyId,
+    style_id: PropertyId,
+    env: &MediaEnv,
+) -> taffy::prelude::LengthPercentage {
+    let none = matches!(
+        cs.get(style_id),
+        Some(crate::css::property::DeclValue::BorderStyle(
+            crate::css::property::BorderStyle::None
+        ))
+    );
+    if none {
+        return taffy::prelude::LengthPercentage::length(0.0);
+    }
+    match cs.get(width_id) {
+        Some(crate::css::property::DeclValue::BorderWidth(Some(lp))) => {
+            length_percentage(lp, cs, env)
+        }
+        _ => taffy::prelude::LengthPercentage::length(0.0),
     }
 }
 

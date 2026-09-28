@@ -1,0 +1,7 @@
+# Numeric Channel manifest（字段语义见 crates/style-engine-conformance/src/numeric.rs）
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["block-flow", "padding", "margin-single-side", "auto-fill-width"]
+xfail = false
+tolerance = 0.5

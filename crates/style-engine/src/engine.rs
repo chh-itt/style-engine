@@ -597,8 +597,37 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 } else {
                     continue;
                 };
-                let Some(avail) = self.abs_avail_width(id) else {
+                let Some(raw_avail) = self.abs_avail_width(id) else {
                     continue;
+                };
+                // CSS 10.3.7：夹紧对象是内容宽——content-box 语义下先扣自身
+                // 水平 padding+border（border 仅 style 非 none 计入）
+                let avail = match self.styles.get(&id) {
+                    Some(cs) => {
+                        let rctx = crate::css::value::ResolveCtx {
+                            em: cs.font_size_px(),
+                            rem: 16.0,
+                            viewport_w: self.media.viewport_w,
+                            viewport_h: self.media.viewport_h,
+                        };
+                        let inset: f32 = [
+                            (crate::css::property::PropertyId::PaddingLeft, None),
+                            (crate::css::property::PropertyId::PaddingRight, None),
+                            (
+                                crate::css::property::PropertyId::BorderLeftWidth,
+                                Some(crate::css::property::PropertyId::BorderLeftStyle),
+                            ),
+                            (
+                                crate::css::property::PropertyId::BorderRightWidth,
+                                Some(crate::css::property::PropertyId::BorderRightStyle),
+                            ),
+                        ]
+                        .iter()
+                        .filter_map(|(pid, style_pid)| used_h_inset(cs, *pid, *style_pid, &rctx))
+                        .sum();
+                        (raw_avail - inset).max(0.0)
+                    }
+                    None => raw_avail,
                 };
                 let width = avail.min(max_w).max(min_w);
                 shrink.push((id, width));
@@ -1083,8 +1112,10 @@ mod tests {
         engine.add_font(TEST_FONT.to_vec());
         assert!(engine
             .set_stylesheet(
-                // 泛族 sans-serif 在零副作用集合中无解析（ADR-0006），测试显式指到注册字体
-                "div { font-family: \"DejaVu Sans\"; } div.p { width: 200px; padding: 10px; } div.b { width: 200px; padding: 10px; border: 5px solid black; }"
+                // 泛族 sans-serif 在零副作用集合中无解析（ADR-0006），测试显式指到注册字体。
+                // 父级 auto 宽（content-box 下 auto 与 box-sizing 无关）：
+                // wrap avail = 根 border-box − 自身 padding − 有效 border。
+                "div { font-family: \"DejaVu Sans\"; } div.p { padding: 10px; } div.b { padding: 10px; border: 5px solid black; }"
             )
             .is_clean());
         let node = |classes: &str, text: bool| StyleNode {
@@ -1117,8 +1148,8 @@ mod tests {
         let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
         let id3 = *engine.key_to_node.get(&Key(3)).unwrap();
         let id5 = *engine.key_to_node.get(&Key(5)).unwrap();
-        assert_eq!(engine.wrap_widths.get(&id3), Some(&Some(180.0)));
-        assert_eq!(engine.wrap_widths.get(&id5), Some(&Some(170.0)));
+        assert_eq!(engine.wrap_widths.get(&id3), Some(&Some(780.0)));
+        assert_eq!(engine.wrap_widths.get(&id5), Some(&Some(770.0)));
     }
 
     #[test]
@@ -1203,7 +1234,8 @@ mod tests {
     #[test]
     fn scroll_bounds_reported_and_hidden_skipped() {
         // ADR-0007：overflow∈{auto,scroll} 上报量程（padding box + 后代并集）；
-        // hidden 仅裁剪、不上报。list：内容底 310 − padbox 高 100 = 210。
+        // hidden 仅裁剪、不上报。content-box 默认：padbox = 220×120（含 padding），
+        // 内容底 310 → 量程 310 − 120 = 190。
         let mut engine: StyleEngine<Key> = StyleEngine::new();
         engine.add_font(TEST_FONT.to_vec());
         assert!(engine
@@ -1227,7 +1259,7 @@ mod tests {
         assert!(engine.insert(Some(Key(1)), Key(5), node("hid")).is_ok());
         assert!(engine.insert(Some(Key(5)), Key(6), node("item")).is_ok());
         let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
-        assert_eq!(frame.scrollable.get(&Key(2)), Some(&(0.0, 210.0)));
+        assert_eq!(frame.scrollable.get(&Key(2)), Some(&(0.0, 190.0)));
         assert!(!frame.scrollable.contains_key(&Key(5)));
     }
 

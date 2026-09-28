@@ -1,0 +1,7 @@
+/* 块级流基础：根 padding + 三子块；只单侧 margin（规避 margin collapse
+   分歧——taffy 0.14 无折叠语义，属已知差异，另行用例 xfail 记录）。 */
+body { margin: 0; }
+.root { padding: 16px; background-color: #222222; }
+.a { height: 40px; background-color: #bb0000; }
+.b { height: 60px; margin-top: 20px; background-color: #00bb00; }
+.c { height: 80px; margin-left: 30px; background-color: #0000bb; }

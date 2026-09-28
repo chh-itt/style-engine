@@ -111,6 +111,8 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::BoxShadow => DeclValue::BoxShadows(SmallVec::new()),
         P::Opacity => DeclValue::Number(1.0),
         P::OverflowX | P::OverflowY => DeclValue::Overflow(Overflow::Visible),
+        // CSS 默认 content-box（width 只含内容盒）；box-model 用例约束该语义
+        P::BoxSizing => DeclValue::BoxSizing(crate::css::property::BoxSizing::ContentBox),
         P::Color => DeclValue::Color(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 1.0]))),
         P::FontFamily => DeclValue::FontFamily(FontFamilyList(smallvec![FamilyName::SansSerif])),
         P::FontSize => DeclValue::Len(LengthPercentage::Px(16.0)), // medium
@@ -239,6 +241,14 @@ impl ComputedStyle {
         match self.values.get(&PropertyId::Position) {
             Some(DeclValue::Position(p)) => *p,
             _ => Position::Static,
+        }
+    }
+
+    /// box-sizing（默认 content-box；映射到 taffy 时换算 size 语义）。
+    pub fn box_sizing(&self) -> crate::css::property::BoxSizing {
+        match self.values.get(&PropertyId::BoxSizing) {
+            Some(DeclValue::BoxSizing(b)) => *b,
+            _ => crate::css::property::BoxSizing::ContentBox,
         }
     }
 

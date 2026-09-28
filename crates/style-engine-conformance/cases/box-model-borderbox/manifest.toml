@@ -1,0 +1,7 @@
+# border-box 显式路径对照用例（与 box-model 的 content-box 互为镜像）。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["box-sizing", "width", "padding", "border", "margin-single-side"]
+xfail = false
+tolerance = 0.5

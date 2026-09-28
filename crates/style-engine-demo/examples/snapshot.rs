@@ -12,7 +12,7 @@ const W: u32 = 800;
 const H: u32 = 600;
 
 const CSS: &str = "
-div.card { width: 300px; height: 160px; margin: 40px; padding: 16px;
+div.card { box-sizing: border-box; width: 300px; height: 160px; margin: 40px; padding: 16px;
   background-color: #2b6cb0; border-radius: 12px;
   border-style: solid; border-top-width: 2px; border-top-color: #90cdf4; }
 div.badge { width: 120px; height: 48px;
