@@ -32,6 +32,7 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             y,
             text: content,
             color,
+            spans,
             font_size,
             font_family,
             font_weight,
@@ -44,6 +45,7 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
                 *y + state.offset.y as f32,
                 content,
                 *color,
+                spans,
                 *font_size,
                 font_family,
                 *font_weight,
@@ -52,6 +54,20 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             continue;
         }
         apply_op(op, scene, &mut state);
+    }
+}
+
+/// 家族名归一（与 core text.rs 同一映射）。
+fn family_of(list: &style_engine::css::property::FontFamilyList) -> std::borrow::Cow<'static, str> {
+    match list.0.iter().next() {
+        Some(style_engine::css::property::FamilyName::Named(s)) => s.clone().into(),
+        Some(style_engine::css::property::FamilyName::Serif) => "serif".into(),
+        Some(style_engine::css::property::FamilyName::SansSerif) => "sans-serif".into(),
+        Some(style_engine::css::property::FamilyName::Monospace) => "monospace".into(),
+        Some(style_engine::css::property::FamilyName::Cursive) => "cursive".into(),
+        Some(style_engine::css::property::FamilyName::Fantasy) => "fantasy".into(),
+        Some(style_engine::css::property::FamilyName::SystemUi) => "system-ui".into(),
+        None => "sans-serif".into(),
     }
 }
 
@@ -98,6 +114,7 @@ impl VelloTextSystem {
         y: f32,
         content: &str,
         color: AlphaColor<Srgb>,
+        spans: &[style_engine::paint::TextSpanPaint],
         font_size: f32,
         font_family: &style_engine::css::property::FontFamilyList,
         font_weight: f32,
@@ -106,16 +123,6 @@ impl VelloTextSystem {
         if content.is_empty() {
             return;
         }
-        let family: std::borrow::Cow<'static, str> = match font_family.0.iter().next() {
-            Some(style_engine::css::property::FamilyName::Named(s)) => s.clone().into(),
-            Some(style_engine::css::property::FamilyName::Serif) => "serif".into(),
-            Some(style_engine::css::property::FamilyName::SansSerif) => "sans-serif".into(),
-            Some(style_engine::css::property::FamilyName::Monospace) => "monospace".into(),
-            Some(style_engine::css::property::FamilyName::Cursive) => "cursive".into(),
-            Some(style_engine::css::property::FamilyName::Fantasy) => "fantasy".into(),
-            Some(style_engine::css::property::FamilyName::SystemUi) => "system-ui".into(),
-            None => "sans-serif".into(),
-        };
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, content, 1.0, false);
@@ -123,11 +130,35 @@ impl VelloTextSystem {
         builder.push_default(parley::style::StyleProperty::FontWeight(
             parley::fontique::FontWeight::new(font_weight),
         ));
-        builder.push_default(parley::FontFamily::Source(family));
+        builder.push_default(parley::FontFamily::Source(family_of(font_family)));
         if italic {
             builder.push_default(parley::style::StyleProperty::FontStyle(
                 parley::fontique::FontStyle::Italic,
             ));
+        }
+        // span 覆盖样式（T5c）：字节区间 [start, end)
+        for s in spans {
+            let range = (s.start as usize)..(s.end as usize).min(content.len());
+            builder.push(
+                parley::style::StyleProperty::FontSize(s.font_size),
+                range.clone(),
+            );
+            builder.push(
+                parley::style::StyleProperty::FontWeight(parley::fontique::FontWeight::new(
+                    s.font_weight,
+                )),
+                range.clone(),
+            );
+            builder.push(
+                parley::FontFamily::Source(family_of(&s.font_family)),
+                range.clone(),
+            );
+            if s.italic {
+                builder.push(
+                    parley::style::StyleProperty::FontStyle(parley::fontique::FontStyle::Italic),
+                    range,
+                );
+            }
         }
         let mut layout = builder.build(content);
         layout.break_all_lines(None);
@@ -138,6 +169,16 @@ impl VelloTextSystem {
                 };
                 let run = glyph_run.run();
                 let font = run.font().clone();
+                // run → span 颜色：取与 run 文本区间重叠的最后一个 span（T5c）
+                let run_range = run.text_range();
+                let run_color = spans
+                    .iter()
+                    .rev()
+                    .find(|s| {
+                        (s.start as usize) < run_range.end && run_range.start < (s.end as usize)
+                    })
+                    .map(|s| s.color)
+                    .unwrap_or(color);
                 let tx = x + glyph_run.offset();
                 let ty = y + glyph_run.baseline();
                 scene
@@ -146,7 +187,7 @@ impl VelloTextSystem {
                         f64::from(tx),
                         f64::from(ty),
                     )))
-                    .brush(color)
+                    .brush(run_color)
                     .draw(
                         Fill::NonZero,
                         glyph_run.glyphs().map(|g| vello::Glyph {

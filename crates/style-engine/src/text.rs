@@ -56,19 +56,22 @@ impl TextSystem {
 
     /// 无界宽度测量（单行）。无可用字体时宽高趋 0。
     pub fn measure(&mut self, text: &str, style: &ComputedStyle) -> (f32, f32) {
+        self.measure_rich(text, style, &[], None)
+    }
+
+    /// 富文本测量（T5c）：spans 为 (字节起点, 字节终点, 覆盖样式)；
+    /// max_advance 为 Some 时按包含块宽换行（white-space: normal 由 parley 吸收）。
+    /// 区间按 UTF-8 字节偏移解释。
+    pub fn measure_rich(
+        &mut self,
+        text: &str,
+        style: &ComputedStyle,
+        spans: &[(u32, u32, &ComputedStyle)],
+        max_advance: Option<f32>,
+    ) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        let family: Cow<'static, str> = match style.font_family().0.iter().next() {
-            Some(crate::css::property::FamilyName::Named(s)) => Cow::Owned(s.clone()),
-            Some(crate::css::property::FamilyName::Serif) => Cow::Borrowed("serif"),
-            Some(crate::css::property::FamilyName::SansSerif) => Cow::Borrowed("sans-serif"),
-            Some(crate::css::property::FamilyName::Monospace) => Cow::Borrowed("monospace"),
-            Some(crate::css::property::FamilyName::Cursive) => Cow::Borrowed("cursive"),
-            Some(crate::css::property::FamilyName::Fantasy) => Cow::Borrowed("fantasy"),
-            Some(crate::css::property::FamilyName::SystemUi) => Cow::Borrowed("system-ui"),
-            None => Cow::Borrowed("sans-serif"),
-        };
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, false);
@@ -76,13 +79,42 @@ impl TextSystem {
         builder.push_default(StyleProperty::FontWeight(FontWeight::new(
             style.font_weight(),
         )));
-        builder.push_default(FontFamily::Source(family));
+        builder.push_default(FontFamily::Source(family_cow(style)));
         if style.font_style() == crate::css::property::FontStyle::Italic {
             builder.push_default(StyleProperty::FontStyle(ParleyFontStyle::Italic));
         }
+        for (start, end, span_cs) in spans {
+            let range = (*start as usize)..(*end as usize).min(text.len());
+            builder.push(
+                StyleProperty::FontSize(span_cs.font_size_px()),
+                range.clone(),
+            );
+            builder.push(
+                StyleProperty::FontWeight(FontWeight::new(span_cs.font_weight())),
+                range.clone(),
+            );
+            builder.push(FontFamily::Source(family_cow(span_cs)), range.clone());
+            if span_cs.font_style() == crate::css::property::FontStyle::Italic {
+                builder.push(StyleProperty::FontStyle(ParleyFontStyle::Italic), range);
+            }
+        }
         let mut layout = builder.build(text);
-        layout.break_all_lines(None);
+        layout.break_all_lines(max_advance);
         (layout.width(), layout.height())
+    }
+}
+
+/// 家族名归一：Named 原样、泛族名映射到 CSS 通用族关键字。
+fn family_cow(style: &ComputedStyle) -> Cow<'static, str> {
+    match style.font_family().0.iter().next() {
+        Some(crate::css::property::FamilyName::Named(s)) => Cow::Owned(s.clone()),
+        Some(crate::css::property::FamilyName::Serif) => Cow::Borrowed("serif"),
+        Some(crate::css::property::FamilyName::SansSerif) => Cow::Borrowed("sans-serif"),
+        Some(crate::css::property::FamilyName::Monospace) => Cow::Borrowed("monospace"),
+        Some(crate::css::property::FamilyName::Cursive) => Cow::Borrowed("cursive"),
+        Some(crate::css::property::FamilyName::Fantasy) => Cow::Borrowed("fantasy"),
+        Some(crate::css::property::FamilyName::SystemUi) => Cow::Borrowed("system-ui"),
+        None => Cow::Borrowed("sans-serif"),
     }
 }
 

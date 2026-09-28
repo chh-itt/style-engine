@@ -49,6 +49,16 @@ pub struct StyleNode {
     pub declarations: DeclarationBlock,
     /// 文本内容（叶节点；:empty 判定与 T5 文本布局用）。
     pub text: Option<String>,
+    /// 富文本 span（T5c）：声明覆盖文本的字节区间 [range.0, range.1)。
+    pub spans: SmallVec<[TextSpan; 2]>,
+}
+
+/// span 级富文本：区间内声明以级联覆盖基样式（引擎复用 compute_node 求解，
+/// 以节点基样式为 parent，得到与选择器规则一致的覆盖语义）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextSpan {
+    pub range: (u32, u32),
+    pub declarations: DeclarationBlock,
 }
 
 impl StyleNode {

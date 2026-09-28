@@ -62,12 +62,14 @@ pub enum PaintOp {
         radius: [f32; 4],
         sides: [BorderSide; 4],
     },
-    /// 文本（T5 转换为字形 run；MVP 记录排版输入）。
+    /// 文本（T5 转换为字形 run；spans 为 T5c 富文本覆盖，可为空）。
     Text {
         x: f32,
         y: f32,
         text: String,
         color: AlphaColor<Srgb>,
+        /// span 覆盖样式（T5c）：绘制期已终结；空 = 无富文本。
+        spans: Vec<TextSpanPaint>,
         font_size: f32,
         font_family: FontFamilyList,
         font_weight: f32,
@@ -107,6 +109,18 @@ pub struct RadialGeom {
     pub ry: f32,
 }
 
+/// 富文本 span（T5c）：绘制期已终结的覆盖样式；区间 [start, end) 为文本字节偏移。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextSpanPaint {
+    pub start: u32,
+    pub end: u32,
+    pub color: AlphaColor<Srgb>,
+    pub font_size: f32,
+    pub font_weight: f32,
+    pub italic: bool,
+    pub font_family: crate::css::property::FontFamilyList,
+}
+
 /// 一帧的绘制清单。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DisplayList {
@@ -123,6 +137,8 @@ pub struct PaintCtx<'a> {
     pub layout: &'a HashMap<NodeId, (f32, f32, f32, f32)>,
     pub scroll: &'a HashMap<NodeId, (f32, f32)>,
     pub env: &'a MediaEnv,
+    /// span 级样式（T5c）：已按节点基样式级联求解。
+    pub spans: &'a HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
 }
 
 /// 构建绘制清单（树序遍历；布局按节点给出 border-box）。
@@ -374,11 +390,30 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 .map(|lp| px(lp, style, env))
                 .unwrap_or(0.0);
             let color = resolve_color(&style.color(), style, env);
+            // T5c：span 绘制期样式终结（与基样式同一条解析路径）
+            let spans = ctx
+                .spans
+                .get(&id)
+                .map(|list| {
+                    list.iter()
+                        .map(|(start, end, scs)| TextSpanPaint {
+                            start: *start,
+                            end: *end,
+                            color: resolve_color(&scs.color(), scs, env),
+                            font_size: scs.font_size_px(),
+                            font_weight: scs.font_weight(),
+                            italic: scs.font_style() == FontStyle::Italic,
+                            font_family: scs.font_family().clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             out.ops.push(PaintOp::Text {
                 x: x + pad_l,
                 y: y + pad_t,
                 text: text.clone(),
                 color,
+                spans,
                 font_size: style.font_size_px(),
                 font_family: style.font_family().clone(),
                 font_weight: style.font_weight(),
@@ -505,6 +540,7 @@ mod tests {
             layout: &layout,
             scroll,
             env: &MediaEnv::default(),
+            spans: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
@@ -543,6 +579,7 @@ mod tests {
             layout: &layout,
             scroll: &HashMap::new(),
             env: &env,
+            spans: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望顺序：b(z0,x=110) → c(z1,x=210) → a(z2,x=10)；根无背景不产生 FillRect

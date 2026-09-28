@@ -65,6 +65,8 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     taffy_root: Option<taffy::NodeId>,
     taffy_node: HashMap<NodeId, taffy::NodeId>,
     styles: HashMap<NodeId, ComputedStyle>,
+    /// span 级样式（T5c）：NodeId → (字节起点, 字节终点, 覆盖后的 ComputedStyle)。
+    span_styles: HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
     /// 内置文本栈（feature = "text"；字体字节由宿主推送）。
     #[cfg(feature = "text")]
     text: crate::text::TextSystem,
@@ -100,6 +102,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             taffy_root: None,
             taffy_node: HashMap::new(),
             styles: HashMap::new(),
+            span_styles: HashMap::new(),
         }
     }
 
@@ -351,6 +354,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 layout: &layout_by_node,
                 scroll: &self.scroll_offsets,
                 env: &self.media,
+                spans: &self.span_styles,
             },
             self.tree.root(),
             self.generation,
@@ -397,6 +401,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
 
     fn restyle(&mut self) {
         self.styles.clear();
+        self.span_styles.clear();
         let root = self.tree.root();
         self.restyle_node(root, None);
         self.dirty_style = false;
@@ -420,6 +425,33 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             &self.media,
             parent_style.as_ref(),
         );
+        // T5c：span 级联求解——以节点基样式为 parent，复用 compute_node（空临时树）
+        let spans = self.tree.node(id).spans.clone();
+        let text_len = self
+            .tree
+            .node(id)
+            .text
+            .as_ref()
+            .map(|t| t.len() as u32)
+            .unwrap_or(0);
+        if spans.is_empty() {
+            self.span_styles.remove(&id);
+        } else {
+            let mut resolved = Vec::with_capacity(spans.len());
+            for sp in &spans {
+                let mut tmp = crate::tree::StyleTree::new();
+                let tmp_id = tmp.insert_child(
+                    tmp.root(),
+                    crate::tree::StyleNode {
+                        declarations: sp.declarations.clone(),
+                        ..Default::default()
+                    },
+                );
+                let scs = compute_node(&tmp, tmp_id, &self.sheet, &self.media, Some(&cs));
+                resolved.push((sp.range.0.min(text_len), sp.range.1.min(text_len), scs));
+            }
+            self.span_styles.insert(id, resolved);
+        }
         // T5：未推送测量的文本叶 → 内置 parley 测量（无字体时宽高 0，不落表）
         #[cfg(feature = "text")]
         if !self.measures.contains_key(&id)
@@ -431,7 +463,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 .is_some_and(|t| !t.is_empty())
         {
             let text = self.tree.node(id).text.clone().unwrap_or_default();
-            let (w, h) = self.text.measure(&text, &cs);
+            let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
+            let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
+            // max_advance 接线属 T5c-2（taffy measure 回调后可传入可用宽）
+            let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, None);
             if w > 0.0 || h > 0.0 {
                 self.measures.insert(id, (w, h));
             }
@@ -484,6 +520,49 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
 mod tests {
     use super::*;
     use crate::tree::NodeState;
+
+    #[test]
+    fn rich_text_spans_reach_paint() {
+        use crate::tree::TextSpan;
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine.set_stylesheet("").is_clean());
+        let span_decls =
+            crate::css::decl::parse_inline_declarations("color: #ff0000; font-weight: 700").0;
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("span".into()),
+                        text: Some("hello link world".into()),
+                        spans: std::iter::once(TextSpan {
+                            range: (6, 10),
+                            declarations: span_decls,
+                        })
+                        .collect(),
+                        ..Default::default()
+                    },
+                )
+                .is_ok()
+        );
+        let frame = engine.frame((400.0, 100.0), 1.0, 0.0);
+        let (text, spans) = frame
+            .paint
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                crate::paint::PaintOp::Text { text, spans, .. } => Some((text.as_str(), spans)),
+                _ => None,
+            })
+            .expect("text op");
+        assert_eq!(text, "hello link world");
+        assert_eq!(spans.len(), 1);
+        let s = &spans[0];
+        assert_eq!((s.start, s.end), (6, 10));
+        assert_eq!(s.color.components, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(s.font_weight, 700.0);
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     struct Key(u32);
