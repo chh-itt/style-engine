@@ -4,6 +4,14 @@
 //! 未知 at-rule）不中断解析，记录进 `ParseReport` 后跳过；契约错误不在
 //! 此层出现。
 
+pub mod decl;
+pub mod property;
 pub mod value;
 
+pub use decl::{DeclSource, Declaration, DeclarationBlock};
+pub use property::{
+    Align, BackgroundImage, BorderStyle, BoxShadow, BoxShadowList, ColorStop, DeclValue, Display,
+    FamilyName, FlexDirection, FlexWrap, FontFamilyList, Gradient, GradientKind, GridAutoFlowKind,
+    GridTemplate, LineHeight, Overflow, Position, PropertyId, TextAlign, TrackSize, WhiteSpace,
+};
 pub use value::{Angle, ColorValue, LengthPercentage, ResolveCtx};

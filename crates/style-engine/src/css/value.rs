@@ -96,12 +96,12 @@ impl CalcNode {
                 CalcUnit::Vw => v * ctx.viewport_w,
                 CalcUnit::Vh => v * ctx.viewport_h,
             }),
-            Self::Sum(a, b) => Some(
-                a.resolve(ctx, percent_basis)? + b.resolve(ctx, percent_basis)?,
-            ),
-            Self::Sub(a, b) => Some(
-                a.resolve(ctx, percent_basis)? - b.resolve(ctx, percent_basis)?,
-            ),
+            Self::Sum(a, b) => {
+                Some(a.resolve(ctx, percent_basis)? + b.resolve(ctx, percent_basis)?)
+            }
+            Self::Sub(a, b) => {
+                Some(a.resolve(ctx, percent_basis)? - b.resolve(ctx, percent_basis)?)
+            }
             Self::Product(a, b) => {
                 // 数字系数取原始标量，另一侧按量纲解析（长度×长度解析期已拒绝）
                 let v = match (a.is_pure_number(), b.is_pure_number()) {
@@ -167,7 +167,9 @@ fn to_srgb_clamped(c: color::DynamicColor) -> AlphaColor<Srgb> {
 
 pub fn parse_length_percentage(p: &mut Parser<'_>) -> ValResult<LengthPercentage> {
     match p.next()?.clone() {
-        Token::Dimension { value, ref unit, .. } => {
+        Token::Dimension {
+            value, ref unit, ..
+        } => {
             if unit.eq_ignore_ascii_case("px") {
                 Ok(LengthPercentage::Px(value))
             } else if unit.eq_ignore_ascii_case("em") {
@@ -184,7 +186,7 @@ pub fn parse_length_percentage(p: &mut Parser<'_>) -> ValResult<LengthPercentage
         }
         Token::Percentage { unit_value, .. } => Ok(LengthPercentage::Percent(unit_value)),
         // 无单位数字仅 0 可作长度
-        Token::Number { value, .. } if value == 0.0 => Ok(LengthPercentage::Px(0.0)),
+        Token::Number { value: 0.0, .. } => Ok(LengthPercentage::Px(0.0)),
         Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {
             Ok(LengthPercentage::Calc(Box::new(parse_calc_body(p)?)))
         }
@@ -255,10 +257,10 @@ fn parse_calc_product(p: &mut Parser<'_>) -> ValResult<CalcNode> {
 fn parse_calc_value(p: &mut Parser<'_>) -> ValResult<CalcNode> {
     match p.next()?.clone() {
         Token::Number { value, .. } => Ok(CalcNode::Value(value, CalcUnit::Number)),
-        Token::Percentage { unit_value, .. } => {
-            Ok(CalcNode::Value(unit_value, CalcUnit::Percent))
-        }
-        Token::Dimension { value, ref unit, .. } => {
+        Token::Percentage { unit_value, .. } => Ok(CalcNode::Value(unit_value, CalcUnit::Percent)),
+        Token::Dimension {
+            value, ref unit, ..
+        } => {
             let u = if unit.eq_ignore_ascii_case("px") {
                 CalcUnit::Px
             } else if unit.eq_ignore_ascii_case("em") {
@@ -290,7 +292,9 @@ fn parse_calc_value(p: &mut Parser<'_>) -> ValResult<CalcNode> {
 
 pub fn parse_angle(p: &mut Parser<'_>) -> ValResult<Angle> {
     match p.next()?.clone() {
-        Token::Dimension { value, ref unit, .. } => {
+        Token::Dimension {
+            value, ref unit, ..
+        } => {
             let deg = if unit.eq_ignore_ascii_case("deg") {
                 value
             } else if unit.eq_ignore_ascii_case("grad") {
@@ -320,9 +324,7 @@ pub fn parse_number(p: &mut Parser<'_>) -> ValResult<f32> {
 pub fn parse_color_value(p: &mut Parser<'_>) -> ValResult<ColorValue> {
     match p.next()?.clone() {
         Token::Ident(ref name) => parse_color_keyword(name, p),
-        Token::Hash(value) | Token::IDHash(value) => {
-            delegate_parse_color(&format!("#{value}"), p)
-        }
+        Token::Hash(value) | Token::IDHash(value) => delegate_parse_color(&format!("#{value}"), p),
         Token::Function(ref name) if name.eq_ignore_ascii_case("light-dark") => {
             let (a, b) = p.parse_nested_block(|p| {
                 let a = require_absolute(parse_color_value(p)?, p)?;
@@ -342,24 +344,22 @@ pub fn parse_color_value(p: &mut Parser<'_>) -> ValResult<ColorValue> {
     }
 }
 
-fn parse_color_keyword(name: &str, p: &mut Parser<'_>) -> ValResult<ColorValue> {
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "currentcolor" => return Ok(ColorValue::CurrentColor),
-        "transparent" => {
-            return Ok(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 0.0])))
-        }
-        _ => {}
-    }
-    delegate_parse_color(&lower, p)
-}
-
 /// MVP 偏差：light-dark() 参数仅支持绝对色，其余走容错丢弃。
 fn require_absolute(v: ColorValue, p: &mut Parser<'_>) -> ValResult<AlphaColor<Srgb>> {
     match v {
         ColorValue::Absolute(c) => Ok(c),
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+fn parse_color_keyword(name: &str, p: &mut Parser<'_>) -> ValResult<ColorValue> {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "currentcolor" => return Ok(ColorValue::CurrentColor),
+        "transparent" => return Ok(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 0.0]))),
+        _ => {}
+    }
+    delegate_parse_color(&lower, p)
 }
 
 fn delegate_parse_color(s: &str, p: &mut Parser<'_>) -> ValResult<ColorValue> {
@@ -374,21 +374,16 @@ fn serialize_nested_tokens(p: &mut Parser<'_>) -> ValResult<String> {
     p.parse_nested_block(|p| {
         let mut out = String::new();
         let mut prev: Option<TokenSerializationType> = None;
-        loop {
-            match p.next_including_whitespace() {
-                Ok(t) => {
-                    if matches!(t, Token::Comment(_)) {
-                        continue;
-                    }
-                    let ser = t.serialization_type();
-                    if prev.is_some_and(|prev| prev.needs_separator_when_before(ser)) {
-                        out.push(' ');
-                    }
-                    out.push_str(&t.to_css_string());
-                    prev = Some(ser);
-                }
-                Err(_) => break,
+        while let Ok(t) = p.next_including_whitespace() {
+            if matches!(t, Token::Comment(_)) {
+                continue;
             }
+            let ser = t.serialization_type();
+            if prev.is_some_and(|prev| prev.needs_separator_when_before(ser)) {
+                out.push(' ');
+            }
+            out.push_str(&t.to_css_string());
+            prev = Some(ser);
         }
         Ok(out)
     })
@@ -443,10 +438,7 @@ mod tests {
     #[test]
     fn calc() {
         let c = ctx();
-        assert_eq!(
-            lp("calc(100% - 32px)").resolve(&c, 200.0),
-            Some(168.0)
-        );
+        assert_eq!(lp("calc(100% - 32px)").resolve(&c, 200.0), Some(168.0));
         assert_eq!(lp("calc(2 * (1em + 4px))").resolve(&c, 0.0), Some(40.0));
         assert_eq!(lp("calc(10px / 4)").resolve(&c, 0.0), Some(2.5));
         assert_eq!(lp("calc(50vw + 10px)").resolve(&c, 0.0), Some(410.0));
@@ -470,11 +462,23 @@ mod tests {
             ColorValue::LightDark(..)
         ));
         assert!(matches!(color("rebeccapurple"), ColorValue::Absolute(_)));
-        assert!(matches!(color("rgb(255 0 0 / 50%)"), ColorValue::Absolute(_)));
+        assert!(matches!(
+            color("rgb(255 0 0 / 50%)"),
+            ColorValue::Absolute(_)
+        ));
         assert!(matches!(color("rgb(255, 0, 0)"), ColorValue::Absolute(_)));
-        assert!(matches!(color("hsl(120deg 50% 50%)"), ColorValue::Absolute(_)));
-        assert!(matches!(color("oklch(70% 0.1 200)"), ColorValue::Absolute(_)));
-        assert!(matches!(color("color(srgb 1 0 0)"), ColorValue::Absolute(_)));
+        assert!(matches!(
+            color("hsl(120deg 50% 50%)"),
+            ColorValue::Absolute(_)
+        ));
+        assert!(matches!(
+            color("oklch(70% 0.1 200)"),
+            ColorValue::Absolute(_)
+        ));
+        assert!(matches!(
+            color("color(srgb 1 0 0)"),
+            ColorValue::Absolute(_)
+        ));
         assert!(parse_color_value(&mut Parser::new("nosuchcolor")).is_err());
     }
 }
