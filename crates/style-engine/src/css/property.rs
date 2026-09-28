@@ -283,6 +283,9 @@ pub enum DeclValue {
     GridAutoFlow(GridAutoFlowKind),
     /// border-*-width：none → None（宽度归零）；thin/medium/thick → 定值。
     BorderWidth(Option<LengthPercentage>),
+    /// z-index：auto → None（级联缺席等价；「有值且为 Some」是将来 ADR-0008
+    /// 判定 stacking context 的依据），数字 → Some。
+    ZIndex(Option<f32>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +534,21 @@ pub fn parse_len(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 
 pub fn parse_number_value(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_number(p).map(DeclValue::Number)
+}
+
+/// z-index：auto → ZIndex(None)；数字 → ZIndex(Some(n))。
+pub fn parse_z_index(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let auto = p.try_parse(|p| -> ValResult<()> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) if name.eq_ignore_ascii_case("auto") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if auto.is_ok() {
+        return Ok(DeclValue::ZIndex(None));
+    }
+    parse_number(p).map(|n| DeclValue::ZIndex(Some(n)))
 }
 
 pub fn parse_color(p: &mut Parser<'_>) -> ValResult<DeclValue> {
@@ -1213,7 +1231,8 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         | P::BorderTopRightRadius
         | P::BorderBottomRightRadius
         | P::BorderBottomLeftRadius => parse_len(p),
-        P::Opacity | P::FlexGrow | P::FlexShrink | P::ZIndex => parse_number_value(p),
+        P::Opacity | P::FlexGrow | P::FlexShrink => parse_number_value(p),
+        P::ZIndex => parse_z_index(p),
         P::FontWeight => parse_font_weight(p),
         P::Color
         | P::BackgroundColor

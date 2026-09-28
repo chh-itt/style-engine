@@ -65,8 +65,8 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         | P::FlexBasis
         | P::GridAutoRows
         | P::GridAutoColumns => DeclValue::LenAuto(None),
-        // z-index initial auto；Number 无 auto 表达 → 0（taffy z-index 0 语义，偏差）
-        P::ZIndex => DeclValue::Number(0.0),
+        // z-index 初始 auto → ZIndex(None)；显式数字 → Some（auto 不再物化为 0）
+        P::ZIndex => DeclValue::ZIndex(None),
         P::MinWidth | P::MinHeight => DeclValue::Len(LengthPercentage::Px(0.0)),
         P::AspectRatio => DeclValue::AspectRatio(None),
         // margin 初始值为 0（CSS）；显式 auto 仍解析为 LenAuto(None) → 居中语义保留

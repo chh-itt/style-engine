@@ -22,6 +22,9 @@ pub enum ContractError {
     Cycle,
     /// 引擎已有根节点，再次 `insert(None, ..)` 冲突。
     RootExists,
+    /// `insert` 携带的 span 字节区间非法（越界、倒置或落在 UTF-8 字符内部；
+    /// 无文本节点的 span 一律非法）。
+    InvalidSpan,
 }
 
 impl fmt::Display for ContractError {
@@ -31,6 +34,9 @@ impl fmt::Display for ContractError {
             Self::DuplicateNode => "node key already exists",
             Self::Cycle => "operation would create a cycle",
             Self::RootExists => "the engine already has a root node",
+            Self::InvalidSpan => {
+                "text span byte range is invalid (out of bounds, inverted, or not a char boundary)"
+            }
         })
     }
 }

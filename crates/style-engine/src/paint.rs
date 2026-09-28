@@ -171,7 +171,7 @@ fn effective_z(ctx: &PaintCtx<'_>, id: NodeId) -> f32 {
         return 0.0;
     }
     match style.get(crate::css::property::PropertyId::ZIndex) {
-        Some(DeclValue::Number(n)) => *n,
+        Some(DeclValue::ZIndex(Some(n))) => *n,
         _ => 0.0,
     }
 }

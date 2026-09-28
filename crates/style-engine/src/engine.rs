@@ -146,6 +146,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if self.key_to_node.contains_key(&key) {
             return Err(crate::error::ContractError::DuplicateNode);
         }
+        // span 区间契约校验（T5c）：UTF-8 字节边界内、有序、不越界；
+        // 无文本节点的 span 一律非法（区间无处着落）。
+        for span in &node.spans {
+            let (start, end) = (span.range.0 as usize, span.range.1 as usize);
+            let ok = node.text.as_ref().is_some_and(|t| {
+                start <= end
+                    && end <= t.len()
+                    && t.is_char_boundary(start)
+                    && t.is_char_boundary(end)
+            });
+            if !ok {
+                return Err(crate::error::ContractError::InvalidSpan);
+            }
+        }
         match parent {
             None => {
                 if self.root_key.is_some() {
@@ -404,12 +418,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     viewport_h: self.media.viewport_h,
                 };
                 let inset: f32 = [
-                    crate::css::property::PropertyId::PaddingLeft,
-                    crate::css::property::PropertyId::PaddingRight,
+                    (crate::css::property::PropertyId::PaddingLeft, None),
+                    (crate::css::property::PropertyId::PaddingRight, None),
+                    (
+                        crate::css::property::PropertyId::BorderLeftWidth,
+                        Some(crate::css::property::PropertyId::BorderLeftStyle),
+                    ),
+                    (
+                        crate::css::property::PropertyId::BorderRightWidth,
+                        Some(crate::css::property::PropertyId::BorderRightStyle),
+                    ),
                 ]
                 .iter()
-                .filter_map(|pid| pcs.len(*pid))
-                .filter_map(|lp| lp.resolve(&rctx, 0.0))
+                .filter_map(|(pid, style_pid)| used_h_inset(pcs, *pid, *style_pid, &rctx))
                 .sum();
                 remeasure.push((id, (pw - inset).max(0.0)));
             }
@@ -652,6 +673,33 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 }
 
+/// 两阶段包含块内容宽的水平内缩项（T5c-2 收口）：padding 恒计；border 仅在
+/// style 非 none 时计入（CSS used width：style none 时边框宽归零，初始
+/// medium 不参与）。width 侧兼容 Len 与 BorderWidth 两种物化。
+fn used_h_inset(
+    cs: &ComputedStyle,
+    width_id: crate::css::property::PropertyId,
+    style_id: Option<crate::css::property::PropertyId>,
+    rctx: &crate::css::value::ResolveCtx,
+) -> Option<f32> {
+    if let Some(sid) = style_id {
+        let none = match cs.get(sid) {
+            Some(crate::css::property::DeclValue::BorderStyle(s)) => {
+                matches!(s, crate::css::property::BorderStyle::None)
+            }
+            _ => true,
+        };
+        if none {
+            return None;
+        }
+    }
+    match cs.get(width_id) {
+        Some(crate::css::property::DeclValue::Len(lp)) => lp.resolve(rctx, 0.0),
+        Some(crate::css::property::DeclValue::BorderWidth(Some(lp))) => lp.resolve(rctx, 0.0),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,6 +789,134 @@ mod tests {
         assert_eq!(frame.boxes[0].y, 40.0);
         // 子盒：padding 内 inline-start，而非 auto-margin 居中
         assert_eq!(frame.boxes[1].x, 56.0); // 40 + 16
+    }
+
+    /// 真实字体（demo 资产，同仓自由许可）：让测量/换行通路在测试中真实生效。
+    const TEST_FONT: &[u8] = include_bytes!("../../style-engine-demo/assets/fonts/DejaVuSans.ttf");
+
+    #[test]
+    fn wrap_avail_subtracts_padding_and_used_border() {
+        // T5c-2 收口：包含块内容宽 = width − padding − 已生效 border
+        //（border-style 为 none 时宽归零，初始 medium 不计入）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                // 泛族 sans-serif 在零副作用集合中无解析（ADR-0006），测试显式指到注册字体
+                "div { font-family: \"DejaVu Sans\"; } div.p { width: 200px; padding: 10px; } div.b { width: 200px; padding: 10px; border: 5px solid black; }"
+            )
+            .is_clean());
+        let node = |classes: &str, text: bool| StyleNode {
+            name: Some("div".into()),
+            classes: if classes.is_empty() {
+                Default::default()
+            } else {
+                std::iter::once(classes.to_string()).collect()
+            },
+            text: if text {
+                Some("the quick brown fox jumps over the lazy dog".into())
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node("", false)).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("p", false))
+                .is_ok()
+        );
+        assert!(engine.insert(Some(Key(2)), Key(3), node("", true)).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(4), node("b", false))
+                .is_ok()
+        );
+        assert!(engine.insert(Some(Key(4)), Key(5), node("", true)).is_ok());
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let id3 = *engine.key_to_node.get(&Key(3)).unwrap();
+        let id5 = *engine.key_to_node.get(&Key(5)).unwrap();
+        assert_eq!(engine.wrap_widths.get(&id3), Some(&Some(180.0)));
+        assert_eq!(engine.wrap_widths.get(&id5), Some(&Some(170.0)));
+    }
+
+    #[test]
+    fn z_index_auto_not_materialized_as_number() {
+        // z-index: auto → ZIndex(None)（不再物化为 Number(0)）；
+        // 数字 → ZIndex(Some(n))，paint effective_z 仅认 Some。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.a { position: relative; z-index: auto; } div.n { position: relative; z-index: 5; }"
+            )
+            .is_clean());
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node("a")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("n")).is_ok());
+        let _ = engine.frame((400.0, 100.0), 1.0, 0.0);
+        let ida = *engine.key_to_node.get(&Key(1)).unwrap();
+        let idn = *engine.key_to_node.get(&Key(2)).unwrap();
+        assert_eq!(
+            engine
+                .styles
+                .get(&ida)
+                .and_then(|cs| cs.get(crate::css::property::PropertyId::ZIndex)),
+            Some(&crate::css::property::DeclValue::ZIndex(None))
+        );
+        assert_eq!(
+            engine
+                .styles
+                .get(&idn)
+                .and_then(|cs| cs.get(crate::css::property::PropertyId::ZIndex)),
+            Some(&crate::css::property::DeclValue::ZIndex(Some(5.0)))
+        );
+    }
+
+    #[test]
+    fn insert_rejects_invalid_span_ranges() {
+        // span 区间契约：UTF-8 边界内、有序、不越界；无文本节点的 span 非法。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let span = |start: u32, end: u32| crate::tree::TextSpan {
+            range: (start, end),
+            declarations: crate::css::decl::parse_inline_declarations("color: #ff0000").0,
+        };
+        let mk = |spans: std::iter::Once<crate::tree::TextSpan>| StyleNode {
+            name: Some("div".into()),
+            text: Some("héllo".into()),
+            spans: spans.collect(),
+            ..Default::default()
+        };
+        // h(0) é(1..3) l(3) l(4) o(5) → len 6，边界 {0,1,3,4,5,6}
+        assert!(
+            engine
+                .insert(None, Key(1), mk(std::iter::once(span(1, 3))))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), mk(std::iter::once(span(2, 4))))
+                .is_err()
+        ); // 2 非字符边界
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(3), mk(std::iter::once(span(0, 10))))
+                .is_err()
+        ); // 越界
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(4), mk(std::iter::once(span(4, 2))))
+                .is_err()
+        ); // 倒置
+        let textless = StyleNode {
+            name: Some("div".into()),
+            spans: std::iter::once(span(0, 1)).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(Some(Key(1)), Key(5), textless).is_err()); // 无文本
     }
 
     #[test]
