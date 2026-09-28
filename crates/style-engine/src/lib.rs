@@ -24,11 +24,21 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "layout")]
+pub mod engine;
+#[cfg(feature = "layout")]
+pub mod layout;
+
 pub mod cascade;
 pub mod computed;
 pub mod css;
 pub mod error;
 pub mod selector;
 pub mod tree;
+
+pub use cascade::{Candidate, CascadeOutput, CustomCandidate, MatchedRule, Origin};
+pub use computed::{ComputedStyle, compute_node};
+#[cfg(feature = "layout")]
+pub use engine::{Frame, LayoutEntry, StyleEngine};
 
 pub use error::{ContractError, ParseReport};
