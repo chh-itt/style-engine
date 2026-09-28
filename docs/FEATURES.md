@@ -25,7 +25,7 @@ sticky / fixed（依赖滚动语义的完整所有权，滚动偏移已按 ADR-0
 
 - 阴影：无模糊半径、无 inset（vello 0.10 无内置高斯模糊）；`PaintOp::Shadow` 以偏移半透明矩形近似。
 - 边框：四边独立（`PaintOp::Border` 携带每边 `BorderSide{width,style,color}`，none/0 宽边由 sink 忽略）；solid 与 dashed/dotted 同走「角弧+直线」中心线描边（圆角弧三次贝塞尔近似），角弧按顺时针归属（TL→top、TR→right、BR→bottom、BL→left）；简化偏差：多色相邻边的角部覆盖取后画方，不做对角线混合，dashed 角部接合为近似。
-- 渐变：radial = 正圆、半径取对角线/2（farthest-corner 近似）；stop 缺省位置按 CSS 语义均匀补位；插值色空间 sRGB。
+- 渐变：radial 语义完整（T4c：`circle|ellipse` + `closest/farthest-side|corner` / 显式半径 + `at <position>`，paint 层按盒子解析为绝对 center/r；ellipse rx≠ry 由 sink 画刷 x 向缩放近似）；stop 缺省位置按 CSS 语义均匀补位；插值色空间 sRGB。
 - 文本：`PaintOp::Text` 经 sink `VelloTextSystem`（parley 0.11 排版 + DrawGlyphs）落字形（零副作用——系统字体禁用、字体字节由宿主双推 engine 测量/sink 绘制；无界宽度单行）；文本测量亦内置（text.rs），未推送测量的文本叶自动测量。
 - opacity / 背景图片：属性未实现（BackgroundImage 仅 Gradient/None；Opacity 未映射）。
 - z-index：兄弟按生效 z-index 稳定排序绘制（position != static 生效，相等保持树序，T4d）；残余偏差：flex/grid 子项的 z-index（无 position）不生效，stacking context 嵌套语义属后续票据。

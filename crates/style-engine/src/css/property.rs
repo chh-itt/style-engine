@@ -436,7 +436,36 @@ pub struct Gradient {
 pub enum GradientKind {
     /// 角度归一为度；`to bottom`（默认）= 180deg。
     Linear(Angle),
-    Radial,
+    /// 径向：shape/size/position 为语义值，paint 层按盒子解析为绝对几何（T4c）。
+    Radial(RadialSpec),
+}
+
+/// 径向渐变语义（css-images-3 子集）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadialSpec {
+    pub shape: RadialShape,
+    pub size: RadialSize,
+    /// 圆心 (x, y)；百分比分别基准盒子宽/高。
+    pub position: (LengthPercentage, LengthPercentage),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RadialShape {
+    Circle,
+    Ellipse,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RadialSize {
+    ClosestSide,
+    ClosestCorner,
+    FarthestSide,
+    FarthestCorner,
+    /// 显式半径（circle 一个、ellipse 两个；百分比分别基准宽/高）
+    Explicit {
+        rx: LengthPercentage,
+        ry: Option<LengthPercentage>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -972,13 +1001,104 @@ fn angle_deg_from_unit(value: f32, unit: &str) -> Option<f32> {
 }
 
 fn parse_radial_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
-    // MVP：仅支持无 shape/size 段的形式（radial-gradient(red, blue)）；
-    // 带 circle/ellipse 等前缀的形式按容错拒绝（偏差记录）。
+    // 语法（css-images-3 子集）：[circle|ellipse] || [closest-side|closest-corner|
+    // farthest-side|farthest-corner|<length>{1,2}] [at <position>]? <stops>
+    // `||` 组合按容错实现为顺序无关的前导解析（T4c）。
+    let mut shape: Option<RadialShape> = None;
+    let mut size: Option<RadialSize> = None;
+    let mut position: Option<(LengthPercentage, LengthPercentage)> = None;
+    loop {
+        if position.is_none() {
+            let at = p.try_parse(|p| -> ValResult<()> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) if name.eq_ignore_ascii_case("at") => Ok(()),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            if at.is_ok() {
+                let x = parse_position_component(p)?;
+                let y = parse_position_component(p)?;
+                position = Some((x, y));
+                continue;
+            }
+        }
+        if shape.is_none() {
+            let s = p.try_parse(|p| -> ValResult<RadialShape> {
+                let t = p.next()?.clone();
+                let Token::Ident(name) = &t else {
+                    return Err(p.new_error_for_next_token());
+                };
+                match name.to_ascii_lowercase().as_str() {
+                    "circle" => Ok(RadialShape::Circle),
+                    "ellipse" => Ok(RadialShape::Ellipse),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            if let Ok(s) = s {
+                shape = Some(s);
+                continue;
+            }
+        }
+        if size.is_none() {
+            let kw = p.try_parse(|p| -> ValResult<RadialSize> {
+                let t = p.next()?.clone();
+                let Token::Ident(name) = &t else {
+                    return Err(p.new_error_for_next_token());
+                };
+                match name.to_ascii_lowercase().as_str() {
+                    "closest-side" => Ok(RadialSize::ClosestSide),
+                    "closest-corner" => Ok(RadialSize::ClosestCorner),
+                    "farthest-side" => Ok(RadialSize::FarthestSide),
+                    "farthest-corner" => Ok(RadialSize::FarthestCorner),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            if let Ok(k) = kw {
+                size = Some(k);
+                continue;
+            }
+            let rx = p.try_parse(parse_length_percentage);
+            if let Ok(rx) = rx {
+                let ry = p.try_parse(parse_length_percentage).ok();
+                size = Some(RadialSize::Explicit { rx, ry });
+                continue;
+            }
+        }
+        break;
+    }
+    if shape.is_some() || size.is_some() || position.is_some() {
+        p.expect_comma().map_err(cssparser::ParseError::from)?;
+    }
     let stops = parse_gradient_stops(p)?;
     Ok(Gradient {
-        kind: GradientKind::Radial,
+        kind: GradientKind::Radial(RadialSpec {
+            shape: shape.unwrap_or(RadialShape::Ellipse),
+            size: size.unwrap_or(RadialSize::FarthestCorner),
+            position: position.unwrap_or((
+                LengthPercentage::Percent(0.5),
+                LengthPercentage::Percent(0.5),
+            )),
+        }),
         stops,
     })
+}
+
+/// 位置分量：<length-percentage> | left | center | right | top | bottom。
+fn parse_position_component(p: &mut Parser<'_>) -> ValResult<LengthPercentage> {
+    if let Ok(lp) = p.try_parse(parse_length_percentage) {
+        return Ok(lp);
+    }
+    let t = p.next()?.clone();
+    let Token::Ident(name) = &t else {
+        return Err(p.new_error_for_next_token());
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "left" | "top" => Ok(LengthPercentage::Percent(0.0)),
+        "center" => Ok(LengthPercentage::Percent(0.5)),
+        "right" | "bottom" => Ok(LengthPercentage::Percent(1.0)),
+        _ => Err(p.new_error_for_next_token()),
+    }
 }
 
 fn parse_gradient_stops(p: &mut Parser<'_>) -> ValResult<Vec<ColorStop>> {

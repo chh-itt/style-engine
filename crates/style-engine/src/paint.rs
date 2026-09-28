@@ -38,6 +38,8 @@ pub enum PaintOp {
         height: f32,
         radius: [f32; 4],
         gradient: Gradient,
+        /// 径向几何（T4c）：圆心与半径已按盒子解析为绝对 px（线性渐变为 None）。
+        radial: Option<RadialGeom>,
     },
     /// 外阴影（MVP：矩形阴影；inset 阴影暂缺）。
     Shadow {
@@ -96,6 +98,15 @@ pub struct BorderSide {
     pub color: AlphaColor<Srgb>,
 }
 
+/// 已解析的径向几何（绝对 px；椭圆分别给 rx/ry，圆时相等）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadialGeom {
+    pub cx: f32,
+    pub cy: f32,
+    pub rx: f32,
+    pub ry: f32,
+}
+
 /// 一帧的绘制清单。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DisplayList {
@@ -142,6 +153,76 @@ fn effective_z(ctx: &PaintCtx<'_>, id: NodeId) -> f32 {
     match style.get(crate::css::property::PropertyId::ZIndex) {
         Some(DeclValue::Number(n)) => *n,
         _ => 0.0,
+    }
+}
+
+/// 径向几何解析（T4c）：语义值 → 绝对 center/半径（px）。
+/// 圆公式取 CSS spec：circle farthest-corner = 到最远角距离；
+/// ellipse farthest-corner = fx·√2, fy·√2（fx/fy 为圆心到最远边距离）。
+fn resolve_radial(
+    spec: &crate::css::property::RadialSpec,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    style: &ComputedStyle,
+    env: &MediaEnv,
+) -> RadialGeom {
+    let ctx = ResolveCtx {
+        em: style.font_size_px(),
+        rem: 16.0,
+        viewport_w: env.viewport_w,
+        viewport_h: env.viewport_h,
+    };
+    let cx = spec.position.0.resolve(&ctx, w).unwrap_or(w * 0.5);
+    let cy = spec.position.1.resolve(&ctx, h).unwrap_or(h * 0.5);
+    let (fx, fx_min) = (cx.max(w - cx), cx.min(w - cx));
+    let (fy, fy_min) = (cy.max(h - cy), cy.min(h - cy));
+    let sqrt2 = std::f32::consts::SQRT_2;
+    use crate::css::property::{RadialShape, RadialSize};
+    let circle = matches!(spec.shape, RadialShape::Circle);
+    let (rx, ry) = match &spec.size {
+        RadialSize::Explicit { rx, ry } => {
+            let r = rx.resolve(&ctx, w).unwrap_or(0.0);
+            let r2 = ry.as_ref().and_then(|v| v.resolve(&ctx, h)).unwrap_or(r);
+            (r, r2)
+        }
+        RadialSize::ClosestSide => {
+            if circle {
+                (fx_min.min(fy_min), fx_min.min(fy_min))
+            } else {
+                (fx_min, fy_min)
+            }
+        }
+        RadialSize::FarthestSide => {
+            if circle {
+                (fx.max(fy), fx.max(fy))
+            } else {
+                (fx, fy)
+            }
+        }
+        RadialSize::ClosestCorner => {
+            if circle {
+                let d = (fx_min * fx_min + fy_min * fy_min).sqrt();
+                (d, d)
+            } else {
+                (fx_min * sqrt2, fy_min * sqrt2)
+            }
+        }
+        RadialSize::FarthestCorner => {
+            if circle {
+                let d = (fx * fx + fy * fy).sqrt();
+                (d, d)
+            } else {
+                (fx * sqrt2, fy * sqrt2)
+            }
+        }
+    };
+    RadialGeom {
+        cx: x + cx,
+        cy: y + cy,
+        rx: rx.max(0.0),
+        ry: ry.max(0.0),
     }
 }
 
@@ -194,6 +275,12 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                     })
                     .collect(),
             };
+            let radial = match &g.kind {
+                crate::css::property::GradientKind::Radial(spec) => {
+                    Some(resolve_radial(spec, x, y, w, h, style, env))
+                }
+                _ => None,
+            };
             out.ops.push(PaintOp::Gradient {
                 x,
                 y,
@@ -201,6 +288,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 height: h,
                 radius,
                 gradient: resolved,
+                radial,
             });
         }
         _ => {
@@ -467,6 +555,38 @@ mod tests {
             })
             .collect();
         assert_eq!(xs, vec![110.0, 210.0, 10.0]);
+    }
+
+    #[test]
+    fn radial_gradient_geometry() {
+        // 显式半径 + 关键字圆心：circle 20px at left top → (0,0,r=20)
+        let (tree, id, style) = setup(
+            "background-image: radial-gradient(circle 20px at left top, red, blue)",
+            None,
+        );
+        let out = run(&tree, id, style, &HashMap::new());
+        match &out.ops[0] {
+            PaintOp::Gradient { radial, .. } => {
+                let g = radial.expect("radial geometry");
+                // 盒原点 (10,20)（run 脚手架）+ 圆心 left/top (0,0) + r=20
+                assert_eq!((g.cx, g.cy, g.rx, g.ry), (10.0, 20.0, 20.0, 20.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        // 默认（无前导段）：盒心 + ellipse farthest-corner → r = 50√2
+        let (tree, id, style) = setup("background-image: radial-gradient(red, blue)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        match &out.ops[0] {
+            PaintOp::Gradient { radial, .. } => {
+                let g = radial.expect("radial geometry");
+                // 盒 100×50 @ (10,20)：盒心 (60,45)；fx=50→rx=50√2，fy=25→ry=25√2
+                let rx = 50.0 * std::f32::consts::SQRT_2;
+                let ry = 25.0 * std::f32::consts::SQRT_2;
+                assert_eq!((g.cx, g.cy), (60.0, 45.0));
+                assert!((g.rx - rx).abs() < 0.01 && (g.ry - ry).abs() < 0.01);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

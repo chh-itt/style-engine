@@ -221,6 +221,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             height,
             radius,
             gradient,
+            radial,
         } => {
             let shape = rect_shape(
                 *x + state.offset.x as f32,
@@ -229,12 +230,29 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *height,
                 *radius,
             );
-            let brush = peniko_gradient(gradient, *width, *height, state);
+            let brush = peniko_gradient(gradient, *radial, *width, *height, state);
+            // 椭圆修正（T4c）：rx≠ry 时对画刷施加以圆心为锚的 x 向缩放
+            let brush_transform = radial.and_then(|gm| {
+                if gm.ry > 0.0 && (gm.rx - gm.ry).abs() > 0.01 {
+                    let sx = f64::from(gm.rx) / f64::from(gm.ry);
+                    let c = Point::new(
+                        f64::from(gm.cx) + state.offset.x,
+                        f64::from(gm.cy) + state.offset.y,
+                    );
+                    Some(
+                        Affine::translate((c.x, c.y))
+                            * Affine::scale_non_uniform(sx, 1.0)
+                            * Affine::translate((-c.x, -c.y)),
+                    )
+                } else {
+                    None
+                }
+            });
             scene.fill(
                 Fill::NonZero,
                 Affine::IDENTITY,
                 Brush::Gradient(&brush),
-                None,
+                brush_transform,
                 &shape,
             );
         }
@@ -315,6 +333,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
 /// 引擎 Gradient → peniko Gradient（CSS 渐变线几何；stop 缺省位置均匀分配）。
 fn peniko_gradient(
     g: &style_engine::css::property::Gradient,
+    radial: Option<style_engine::paint::RadialGeom>,
     w: f32,
     h: f32,
     state: &RenderState,
@@ -333,15 +352,23 @@ fn peniko_gradient(
             let end = Point::new(cx + dir.x * line, cy + dir.y * line);
             Gradient::new_linear(start, end)
         }
-        style_engine::css::property::GradientKind::Radial => {
-            // MVP：正圆、中心点、半径 = 到最远角（farthest-corner 近似对角线/2）
+        style_engine::css::property::GradientKind::Radial(_) => {
+            // T4c：圆心/半径已在 paint 层解析为绝对值；缺失时退回盒心对角线近似
+            let diag =
+                (((f64::from(w) / 2.0).powi(2) + (f64::from(h) / 2.0).powi(2)).sqrt()) as f32;
+            let geom = radial.unwrap_or(style_engine::paint::RadialGeom {
+                cx: w * 0.5,
+                cy: h * 0.5,
+                rx: diag,
+                ry: diag,
+            });
             Gradient {
                 kind: GradientKind::Radial(RadialGradientPosition::new(
                     Point::new(
-                        f64::from(w) / 2.0 + state.offset.x,
-                        f64::from(h) / 2.0 + state.offset.y,
+                        f64::from(geom.cx) + state.offset.x,
+                        f64::from(geom.cy) + state.offset.y,
                     ),
-                    (((f64::from(w) / 2.0).powi(2) + (f64::from(h) / 2.0).powi(2)).sqrt()) as f32,
+                    geom.ry.max(0.5),
                 )),
                 ..Default::default()
             }
