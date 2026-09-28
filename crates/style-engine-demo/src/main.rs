@@ -148,7 +148,13 @@ impl DemoApp {
                 )
                 .is_ok()
         );
-        for (key, class) in [(5u64, "row"), (6, "row alt"), (7, "row"), (8, "row alt"), (9, "row")] {
+        for (key, class) in [
+            (5u64, "row"),
+            (6, "row alt"),
+            (7, "row"),
+            (8, "row alt"),
+            (9, "row"),
+        ] {
             assert!(
                 self.engine
                     .insert(
@@ -299,7 +305,8 @@ impl ApplicationHandler for DemoApp {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => f32::from(y) * 40.0,
+                    // winit 0.31：LineDelta 已是 f32（0.30 为 f64）
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
                     _ => return,
                 };

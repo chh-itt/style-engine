@@ -6,6 +6,8 @@ use style_engine_vello::{VelloTextSystem, render_ops_with_text};
 
 const FONT_REGULAR: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
 const FONT_BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf");
+// CJK 第二波（Noto Sans SC，OFL 1.1，LICENSE 随目录归档；可变字体默认实例 = Regular）
+const FONT_CJK: &[u8] = include_bytes!("../assets/fonts/NotoSansSC.ttf");
 const W: u32 = 800;
 const H: u32 = 600;
 
@@ -19,6 +21,7 @@ div.badge { width: 120px; height: 48px;
 div.title { font-family: \"DejaVu Sans\"; font-size: 24px; font-weight: 700; color: #ffffff; }
 div.body { font-family: \"DejaVu Sans\"; font-size: 14px; color: #e2e8f0; white-space: normal; }
 div.veil { width: 120px; height: 24px; background-color: #ffffff; opacity: 0.55; }
+div.cjk { font-family: \"Noto Sans SC\"; font-size: 16px; color: #f1f5f9; white-space: normal; }
 div.scroll { width: 240px; height: 80px; overflow-y: scroll; background-color: #0e7490; }
 div.row { height: 40px; background-color: #22d3ee; }
 div.alt { background-color: #164e63; }
@@ -29,9 +32,11 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
     assert!(engine.set_stylesheet(CSS).is_clean());
     engine.add_font(FONT_REGULAR.to_vec());
     engine.add_font(FONT_BOLD.to_vec());
+    engine.add_font(FONT_CJK.to_vec());
     let mut text = VelloTextSystem::new();
     text.add_font(FONT_REGULAR.to_vec());
     text.add_font(FONT_BOLD.to_vec());
+    text.add_font(FONT_CJK.to_vec());
     let mut node = |parent: Option<u64>, key: u64, cls: &str, txt: Option<&str>| {
         assert!(
             engine
@@ -58,6 +63,12 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
         Some("The quick brown fox jumps over the lazy dog 0123456789"),
     );
     node(Some(0), 4, "veil", None);
+    node(
+        Some(0),
+        9,
+        "cjk",
+        Some("样式引擎渲染检查：CJK 字体接入与断行。"),
+    );
     node(Some(0), 5, "scroll", None);
     node(Some(5), 6, "row", None);
     node(Some(5), 7, "row alt", None);
