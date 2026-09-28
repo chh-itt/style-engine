@@ -2,8 +2,9 @@
 //! DisplayList 经 style-engine-vello 直出 wgpu surface。
 //! API 测绘依据 docs/T7-API-NOTES.md。
 //!
-//! 注：未推入字体文件（仓库不携带字体资产），文本叶尺寸为 0——
-//! 运行时可用 `engine.add_font(bytes)` 注入任意 ttf/otf。
+//! 字体资产内嵌（DejaVu，自由许可、LICENSE 随目录归档）：宿主双推
+//! engine 测量 / sink 绘制。滚动为 ADR-0007 的宿主集成样例：滚轮命中
+//! 列表盒 → Frame.scrollable 量程夹紧 → set_scroll_offset。
 
 use style_engine::StyleEngine;
 use style_engine::tree::StyleNode;
@@ -21,6 +22,10 @@ div.badge { width: 120px; height: 48px;
   border-radius: 8px; }
 div.title { font-family: \"DejaVu Sans\"; font-size: 24px; font-weight: 700; color: #ffffff; }
 div.body { font-family: \"DejaVu Sans\"; font-size: 14px; color: #e2e8f0; white-space: normal; }
+div.list { width: 300px; height: 120px; overflow-y: scroll; margin: 0 40px;
+  background-color: #0e7490; }
+div.row { height: 40px; background-color: #22d3ee; }
+div.alt { background-color: #164e63; }
 ";
 
 // 字体资产（DejaVu，OFL/BSD 类自由许可，LICENSE 随目录归档）：宿主推入。
@@ -41,6 +46,13 @@ struct DemoApp {
     engine: StyleEngine<u64>,
     text: style_engine_vello::VelloTextSystem,
     now: f64,
+    /// 滚动列表（ADR-0007 宿主集成样例）：宿主拥有的偏移状态。
+    scroll_y: f32,
+    /// 最近一帧的量程（Frame.scrollable 上报）与列表盒（命中测试用）。
+    scrollable_y: f32,
+    list_box: Option<(f32, f32, f32, f32)>,
+    /// 光标物理坐标（命中测试）。
+    cursor: (f64, f64),
 }
 
 impl Default for DemoApp {
@@ -51,6 +63,10 @@ impl Default for DemoApp {
             engine: StyleEngine::new(),
             text: style_engine_vello::VelloTextSystem::new(),
             now: 0.0,
+            scroll_y: 0.0,
+            scrollable_y: 0.0,
+            list_box: None,
+            cursor: (0.0, 0.0),
         }
     }
 }
@@ -118,6 +134,35 @@ impl DemoApp {
                 )
                 .is_ok()
         );
+        // ADR-0007 滚动列表：5×40 行内容 > 120 盒高 → 量程 80
+        assert!(
+            self.engine
+                .insert(
+                    None,
+                    4,
+                    StyleNode {
+                        name: Some("div".into()),
+                        classes: vec!["list".into()].into(),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        for (key, class) in [(5u64, "row"), (6, "row alt"), (7, "row"), (8, "row alt"), (9, "row")] {
+            assert!(
+                self.engine
+                    .insert(
+                        Some(4),
+                        key,
+                        StyleNode {
+                            name: Some("div".into()),
+                            classes: vec![class.to_string()].into(),
+                            ..Default::default()
+                        }
+                    )
+                    .is_ok()
+            );
+        }
     }
 
     fn render(&mut self) {
@@ -136,6 +181,9 @@ impl DemoApp {
         let frame = self
             .engine
             .frame((w as f32, h as f32), window.scale_factor() as f32, self.now);
+        // ADR-0007 宿主集成：缓存量程与列表盒（滚轮事件消费，一帧陈旧可接受）
+        self.scrollable_y = frame.scrollable.get(&4).map(|s| s.1).unwrap_or(0.0);
+        self.list_box = frame.find(4).map(|b| (b.x, b.y, b.width, b.height));
         let mut scene = vello::Scene::new();
         style_engine_vello::render_ops_with_text(&frame.paint, &mut scene, &mut self.text);
         let tex = match gpu.surface.get_current_texture() {
@@ -162,6 +210,19 @@ impl DemoApp {
             .expect("render to texture");
         tex.present();
         window.request_redraw(); // 连续帧驱动（演示用）
+    }
+    /// ADR-0007 宿主集成样例：命中测试 → 量程夹紧 → set_scroll_offset。
+    /// 偏移状态与夹紧策略全在宿主——引擎零内部滚动状态。
+    fn scroll_list(&mut self, dy: f32) {
+        let Some((lx, ly, lw, lh)) = self.list_box else {
+            return;
+        };
+        let (cx, cy) = self.cursor;
+        if cx < lx as f64 || cx > (lx + lw) as f64 || cy < ly as f64 || cy > (ly + lh) as f64 {
+            return;
+        }
+        self.scroll_y = (self.scroll_y - dy).clamp(0.0, self.scrollable_y);
+        let _ = self.engine.set_scroll_offset(4, 0.0, self.scroll_y);
     }
 }
 
@@ -233,6 +294,17 @@ impl ApplicationHandler for DemoApp {
         match event {
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::PointerMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => f32::from(y) * 40.0,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    _ => return,
+                };
+                self.scroll_list(dy);
+            }
             _ => {}
         }
     }
