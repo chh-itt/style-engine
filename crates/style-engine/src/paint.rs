@@ -86,6 +86,15 @@ pub enum PaintOp {
         radius: [f32; 4],
     },
     PopClip,
+    /// 透明度层开始（opacity < 1，ADR-0008）：整节点子树以 alpha 合成。
+    PushOpacity {
+        alpha: f32,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
+    PopOpacity,
     /// 滚动偏移层开始。
     PushScroll {
         dx: f32,
@@ -155,25 +164,6 @@ pub fn build_display_list(
     out.ops.clear();
     out.generation = generation;
     paint_node(ctx, root, out);
-}
-
-/// 生效 z-index（T4d）：position != static 时取解析值，否则按 0（树序）。
-/// 残余偏差：flex/grid 子项的 z-index（无 position）不生效。
-fn effective_z(ctx: &PaintCtx<'_>, id: NodeId) -> f32 {
-    let Some(style) = ctx.styles.get(&id) else {
-        return 0.0;
-    };
-    let positioned = matches!(
-        style.get(crate::css::property::PropertyId::Position),
-        Some(DeclValue::Position(p)) if !matches!(p, crate::css::property::Position::Static)
-    );
-    if !positioned {
-        return 0.0;
-    }
-    match style.get(crate::css::property::PropertyId::ZIndex) {
-        Some(DeclValue::ZIndex(Some(n))) => *n,
-        _ => 0.0,
-    }
 }
 
 /// 径向几何解析（T4c）：语义值 → 绝对 center/半径（px）。
@@ -259,6 +249,23 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         return;
     };
     let radius = resolve_radius(style, env);
+
+    // 0) opacity < 1（ADR-0008）：整节点（背景/边框/文本/子树）包 alpha 合成层；
+    //    opacity 触发 stacking context，节点进 Pos 带（见子树分带）。
+    let opacity = match style.get(PropertyId::Opacity) {
+        Some(DeclValue::Number(n)) => (*n).clamp(0.0, 1.0),
+        _ => 1.0,
+    };
+    let faded = opacity < 1.0 && w > 0.0 && h > 0.0;
+    if faded {
+        out.ops.push(PaintOp::PushOpacity {
+            alpha: opacity,
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+    }
 
     // 1) 外阴影（CSS 绘制顺序：先于背景）
     if let Some(DeclValue::BoxShadows(shadows)) = style.get(PropertyId::BoxShadow) {
@@ -451,14 +458,55 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             scrolled = true;
         }
     }
-    // 7) 子树：兄弟按生效 z-index 稳定排序（相等保持树序），PushClip/PopScroll 随序配对
-    let mut ordered: Vec<(f32, NodeId)> = tree
-        .children(id)
-        .iter()
-        .map(|c| (effective_z(ctx, *c), *c))
-        .collect();
-    ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    for (_, c) in ordered {
+    // 7) 子树（ADR-0008，CSS 2.1 Appendix E 简化三带）：
+    //    Neg：positioned 且负数字 z（z 升序、等值树序）——先于 in-flow；
+    //    Flow：in-flow 非定位、非 SC 触发（树序，含文本叶）；
+    //    Pos：positioned（auto/0 树序在前、正 z 升序在后）+ 非定位但 opacity<1
+    //    （SC 触发，键 0 树序）。SC 节点子树经 paint_node 递归天然原子。
+    //    残余偏差：flex/grid 子项的 z-index（无 position）不生效。
+    let mut neg: Vec<(f32, usize, NodeId)> = Vec::new();
+    let mut flow: Vec<NodeId> = Vec::new();
+    let mut pos: Vec<(f32, usize, NodeId)> = Vec::new();
+    for (idx, c) in tree.children(id).iter().enumerate() {
+        let Some(cstyle) = styles.get(c) else {
+            flow.push(*c);
+            continue;
+        };
+        let positioned = matches!(
+            cstyle.get(PropertyId::Position),
+            Some(DeclValue::Position(p)) if !matches!(p, crate::css::property::Position::Static)
+        );
+        let z = match cstyle.get(PropertyId::ZIndex) {
+            Some(DeclValue::ZIndex(Some(n))) => Some(*n),
+            _ => None,
+        };
+        let faded = matches!(
+            cstyle.get(PropertyId::Opacity),
+            Some(DeclValue::Number(n)) if *n < 1.0
+        );
+        match (positioned, z, faded) {
+            (true, Some(n), _) if n < 0.0 => neg.push((n, idx, *c)),
+            (true, _, _) | (_, _, true) => pos.push((z.unwrap_or(0.0).max(0.0), idx, *c)),
+            _ => flow.push(*c),
+        }
+    }
+    neg.sort_by(|a, b| {
+        (a.0, a.1)
+            .partial_cmp(&(b.0, b.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    pos.sort_by(|a, b| {
+        (a.0, a.1)
+            .partial_cmp(&(b.0, b.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (_, _, c) in neg {
+        paint_node(ctx, c, out);
+    }
+    for c in flow {
+        paint_node(ctx, c, out);
+    }
+    for (_, _, c) in pos {
         paint_node(ctx, c, out);
     }
     if scrolled {
@@ -466,6 +514,9 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     }
     if clip {
         out.ops.push(PaintOp::PopClip);
+    }
+    if faded {
+        out.ops.push(PaintOp::PopOpacity);
     }
 }
 
@@ -599,6 +650,84 @@ mod tests {
             })
             .collect();
         assert_eq!(xs, vec![110.0, 210.0, 10.0]);
+    }
+
+    #[test]
+    fn appendix_e_band_order() {
+        // ADR-0008 三带（CSS 2.1 Appendix E 简化）：
+        // Neg(z-1) → Flow(树序) → Pos(auto 树序 → faded → 正 z 升序)。
+        // DOM 序：n1 负 z、n2 flow、n3 定位 auto、n4 z2、n5 半透明。
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let mk = |inline: &str| StyleNode {
+            name: Some("div".into()),
+            declarations: crate::css::decl::parse_inline_declarations(inline).0,
+            ..Default::default()
+        };
+        let c1 = tree.insert_child(
+            root,
+            mk("background-color: #000001; position: relative; z-index: -1"),
+        );
+        let c2 = tree.insert_child(root, mk("background-color: #000002"));
+        let c3 = tree.insert_child(
+            root,
+            mk("background-color: #000003; position: relative; z-index: auto"),
+        );
+        let c4 = tree.insert_child(
+            root,
+            mk("background-color: #000004; position: relative; z-index: 2"),
+        );
+        let c5 = tree.insert_child(root, mk("background-color: #000005; opacity: 0.5"));
+        let sheet = parse_stylesheet("");
+        let env = MediaEnv::default();
+        let mut styles = HashMap::new();
+        for id in [root, c1, c2, c3, c4, c5] {
+            styles.insert(id, compute_node(&tree, id, &sheet, &env, None));
+        }
+        let mut layout = HashMap::new();
+        layout.insert(root, (0.0, 0.0, 510.0, 100.0));
+        for (i, id) in [c1, c2, c3, c4, c5].iter().enumerate() {
+            layout.insert(*id, (10.0 + i as f32 * 100.0, 0.0, 100.0, 100.0));
+        }
+        let mut out = DisplayList::default();
+        let ctx = PaintCtx {
+            tree: &tree,
+            styles: &styles,
+            layout: &layout,
+            scroll: &HashMap::new(),
+            env: &env,
+            spans: &HashMap::new(),
+            wrap_widths: &HashMap::new(),
+        };
+        build_display_list(&ctx, root, 1, &mut out);
+        // 期望：n1(Neg) → n2(Flow) → n3(auto) → n5(faded) → n4(z2)
+        let ids: Vec<u8> = out
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::FillRect { color, .. } => Some((color.components[2] * 255.0) as u8),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3, 5, 4]);
+    }
+
+    #[test]
+    fn opacity_layer_pairing() {
+        // opacity < 1：PushOpacity/PopOpacity 包住整节点绘制；alpha clamp 到 [0,1]
+        let (tree, id, style) = setup("background-color: #101010; opacity: 0.5", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        assert!(matches!(
+            out.ops.first(),
+            Some(PaintOp::PushOpacity { alpha, .. }) if (alpha - 0.5).abs() < 1e-6
+        ));
+        assert!(matches!(out.ops.get(1), Some(PaintOp::FillRect { .. })));
+        assert!(matches!(out.ops.last(), Some(PaintOp::PopOpacity)));
+        // opacity: 2 → clamp 为 1 → 不包层
+        let (tree2, id2, style2) = setup("background-color: #101010; opacity: 2", None);
+        let out2 = run(&tree2, id2, style2, &HashMap::new());
+        assert!(matches!(out2.ops.first(), Some(PaintOp::FillRect { .. })));
+        assert!(!matches!(out2.ops.last(), Some(PaintOp::PopOpacity)));
     }
 
     #[test]

@@ -18,6 +18,7 @@ div.badge { width: 120px; height: 48px;
   border-radius: 8px; }
 div.title { font-family: \"DejaVu Sans\"; font-size: 24px; font-weight: 700; color: #ffffff; }
 div.body { font-family: \"DejaVu Sans\"; font-size: 14px; color: #e2e8f0; white-space: normal; }
+div.veil { width: 120px; height: 24px; background-color: #ffffff; opacity: 0.55; }
 ";
 
 fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
@@ -53,6 +54,7 @@ fn build() -> (style_engine::Frame<u64>, VelloTextSystem) {
         "body",
         Some("The quick brown fox jumps over the lazy dog 0123456789"),
     );
+    node(Some(0), 4, "veil", None);
     let frame = engine.frame((W as f32, H as f32), 1.0, 0.0);
     (frame, text)
 }

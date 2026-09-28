@@ -364,6 +364,25 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
         PaintOp::PopClip => {
             scene.pop_layer();
         }
+        PaintOp::PushOpacity {
+            alpha,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let shape = rect_shape(
+                *x + state.offset.x as f32,
+                *y + state.offset.y as f32,
+                *width,
+                *height,
+                [0.0; 4],
+            );
+            scene.push_layer(Fill::NonZero, Mix::Normal, *alpha, Affine::IDENTITY, &shape);
+        }
+        PaintOp::PopOpacity => {
+            scene.pop_layer();
+        }
         PaintOp::PushScroll { dx, dy } => {
             state.stack.push(state.offset);
             state.offset += Vec2::new(f64::from(*dx), f64::from(*dy));
