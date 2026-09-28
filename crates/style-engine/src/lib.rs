@@ -33,6 +33,7 @@ pub mod cascade;
 pub mod computed;
 pub mod css;
 pub mod error;
+pub mod paint;
 pub mod selector;
 pub mod tree;
 
@@ -42,3 +43,4 @@ pub use computed::{ComputedStyle, compute_node};
 pub use engine::{Frame, LayoutEntry, StyleEngine};
 
 pub use error::{ContractError, ParseReport};
+pub use paint::{DisplayList, PaintOp};

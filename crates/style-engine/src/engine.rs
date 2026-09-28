@@ -23,13 +23,15 @@ pub struct LayoutEntry<K: Copy> {
     pub height: f32,
 }
 
-/// 一帧的布局结果。
+/// 一帧的布局与绘制结果。
 #[derive(Debug, Clone)]
 pub struct Frame<K: Copy> {
     /// 单调递增帧号。
     pub generation: u64,
     /// 布局盒（树序，含根）。
     pub boxes: Vec<LayoutEntry<K>>,
+    /// 本帧绘制清单（树序基元）。
+    pub paint: crate::paint::DisplayList,
 }
 
 impl<K: Copy + PartialEq> Frame<K> {
@@ -331,12 +333,28 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
         self.generation += 1;
         let mut boxes = Vec::with_capacity(self.tree.len());
+        let mut layout_by_node: HashMap<NodeId, (f32, f32, f32, f32)> =
+            HashMap::with_capacity(self.tree.len());
         if self.root_key.is_some() {
-            self.collect(self.tree.root(), &mut boxes);
+            self.collect(self.tree.root(), &mut boxes, &mut layout_by_node);
         }
+        let mut paint = crate::paint::DisplayList::default();
+        crate::paint::build_display_list(
+            &crate::paint::PaintCtx {
+                tree: &self.tree,
+                styles: &self.styles,
+                layout: &layout_by_node,
+                scroll: &self.scroll_offsets,
+                env: &self.media,
+            },
+            self.tree.root(),
+            self.generation,
+            &mut paint,
+        );
         Frame {
             generation: self.generation,
             boxes,
+            paint,
         }
     }
 
@@ -405,20 +423,29 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    fn collect(&self, id: NodeId, out: &mut Vec<LayoutEntry<K>>) {
-        if let (Some(&tid), Some(&key)) = (self.taffy_node.get(&id), self.node_to_key.get(&id)) {
-            if let Ok(layout) = self.taffy.layout(tid) {
-                out.push(LayoutEntry {
-                    key,
-                    x: layout.location.x,
-                    y: layout.location.y,
-                    width: layout.size.width,
-                    height: layout.size.height,
-                });
+    fn collect(
+        &self,
+        id: NodeId,
+        out: &mut Vec<LayoutEntry<K>>,
+        layout_by_node: &mut HashMap<NodeId, (f32, f32, f32, f32)>,
+    ) {
+        if let Some(&tid) = self.taffy_node.get(&id) {
+            if let Ok(l) = self.taffy.layout(tid) {
+                let box_rect = (l.location.x, l.location.y, l.size.width, l.size.height);
+                layout_by_node.insert(id, box_rect);
+                if let Some(&key) = self.node_to_key.get(&id) {
+                    out.push(LayoutEntry {
+                        key,
+                        x: box_rect.0,
+                        y: box_rect.1,
+                        width: box_rect.2,
+                        height: box_rect.3,
+                    });
+                }
             }
         }
         for c in self.tree.children(id) {
-            self.collect(*c, out);
+            self.collect(*c, out, layout_by_node);
         }
     }
 }
