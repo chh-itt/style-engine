@@ -35,9 +35,10 @@
 - 事件循环收尾：`let mut app = DemoApp::default(); let event_loop = EventLoop::builder().build()?; event_loop.run_app(&mut app)?;`（app 先声明，避免 E0597）。
 - 引擎侧：`engine.frame((w,h), scale, now)` → `style_engine_vello::render(&frame.paint)` → `Scene`；字体经 `engine.add_font(bytes)` 注入（仓库不携带字体资产，文本叶宽高 0 可接受）。
 
-## 剩余待查（写 T7 前先验证）
+## 剩余待查（已全部核实，demo 已按此落地）
 
-1. `InstanceDescriptor.display` 字段类型与空值构造。
-2. `ExperimentalFeatures::disabled()` 确切名称。
-3. `create_surface` 对 `&dyn Window`/`Box<dyn Window>` 的 From 实现是否存在。
-4. `MemoryBudgetThresholds` 是否有 `Default`。
+1. `InstanceDescriptor.display` = `Option<Box<dyn WgpuHasDisplayHandle>>` → `None`。
+2. `ExperimentalFeatures::disabled()` 存在（const fn）。
+3. `create_surface(&'static dyn Window)` 直接可用（Into<SurfaceTarget<'static>>）。
+4. `MemoryBudgetThresholds` 有 `Default`（字段 `for_resource_creation`/`for_device_loss`）。
+5. `run_app(self, app: A)` **按值收编**且 `A: ApplicationHandler + 'static`——app 不可用引用传入。

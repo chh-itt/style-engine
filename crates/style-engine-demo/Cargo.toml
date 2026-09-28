@@ -13,6 +13,7 @@ vello = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
 image = { workspace = true }
+pollster = "0.4"
 
 [lints]
 workspace = true
