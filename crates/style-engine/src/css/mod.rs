@@ -6,6 +6,7 @@
 
 pub mod decl;
 pub mod property;
+pub mod stylesheet;
 pub mod value;
 
 pub use decl::{DeclSource, Declaration, DeclarationBlock};
@@ -14,4 +15,5 @@ pub use property::{
     FamilyName, FlexDirection, FlexWrap, FontFamilyList, Gradient, GradientKind, GridAutoFlowKind,
     GridTemplate, LineHeight, Overflow, Position, PropertyId, TextAlign, TrackSize, WhiteSpace,
 };
+pub use stylesheet::{ColorScheme, MediaEnv, MediaFeature, MediaQuery, Rule, Stylesheet};
 pub use value::{Angle, ColorValue, LengthPercentage, ResolveCtx};

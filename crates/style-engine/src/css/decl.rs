@@ -85,7 +85,7 @@ fn contains_var(buf: &[OwnedToken]) -> bool {
 
 /// 捕获 delimited 输入的全部 token（递归进函数/块；遇顶层 `!` 停止，
 /// 从而排除尾随的 `!important`）。
-fn capture_tokens(p: &mut Parser<'_>, buf: &mut TokenBuf) {
+pub(crate) fn capture_tokens(p: &mut Parser<'_>, buf: &mut TokenBuf) {
     while let Ok(t) = p.next_including_whitespace() {
         if matches!(t, Token::Comment(_)) {
             continue;

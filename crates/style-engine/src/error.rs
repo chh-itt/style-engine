@@ -75,4 +75,9 @@ impl ParseReport {
             message,
         });
     }
+
+    /// 合并另一份报告（顺序保留），常用于子解析器上报。
+    pub(crate) fn extend(&mut self, other: ParseReport) {
+        self.warnings.extend(other.warnings);
+    }
 }
