@@ -1103,6 +1103,8 @@ mod tests {
 
     /// 真实字体（demo 资产，同仓自由许可）：让测量/换行通路在测试中真实生效。
     const TEST_FONT: &[u8] = include_bytes!("../../style-engine-demo/assets/fonts/DejaVuSans.ttf");
+    const TEST_FONT_CJK: &[u8] =
+        include_bytes!("../../style-engine-demo/assets/fonts/NotoSansSC.ttf");
 
     #[test]
     fn wrap_avail_subtracts_padding_and_used_border() {
@@ -1452,6 +1454,132 @@ mod tests {
         assert_eq!(b3.width, 300.0);
         let b5 = frame.find(Key(5)).unwrap();
         assert_eq!(b5.width, 500.0);
+    }
+
+    #[test]
+    fn scroll_offset_set_is_idempotent() {
+        // ADR-0007 宿主集成边界（滚轮夹紧在宿主）：同值重设不改变任何
+        // 状态与输出——偏移表幂等、布局盒不动（滚动只是绘制期平移）、
+        // 量程不变。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.list { position: relative; width: 240px; height: 80px; overflow-y: scroll; } div.row { height: 40px; }"
+            )
+            .is_clean());
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: if classes.is_empty() {
+                Default::default()
+            } else {
+                std::iter::once(classes.to_string()).collect()
+            },
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), node("")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("list")).is_ok());
+        for k in [Key(3), Key(4), Key(5)] {
+            assert!(engine.insert(Some(Key(2)), k, node("row")).is_ok());
+        }
+        let _ = engine.frame((400.0, 300.0), 1.0, 0.0);
+        let id2 = *engine.key_to_node.get(&Key(2)).unwrap();
+        assert!(engine.set_scroll_offset(Key(2), 0.0, 20.0).is_ok());
+        let first = *engine.scroll_offsets.get(&id2).unwrap();
+        assert!(engine.set_scroll_offset(Key(2), 0.0, 20.0).is_ok());
+        assert_eq!(engine.scroll_offsets.get(&id2), Some(&first));
+        let f1 = engine.frame((400.0, 300.0), 1.0, 0.0);
+        let s1 = f1.scrollable.get(&Key(2)).copied();
+        let b1 = f1.find(Key(3)).unwrap();
+        let f2 = engine.frame((400.0, 300.0), 1.0, 0.0);
+        assert_eq!(f2.scrollable.get(&Key(2)), s1.as_ref());
+        let b2 = f2.find(Key(3)).unwrap();
+        assert_eq!(
+            (b1.x, b1.y, b1.width, b1.height),
+            (b2.x, b2.y, b2.width, b2.height)
+        );
+    }
+
+    #[test]
+    fn cjk_min_content_is_single_char() {
+        // T5d × CJK：CJK 的 min-content = 单字宽（UAX #14 表意文字逐字可断），
+        // 与 Latin 的「最宽词」语义相对；max-content 仍为无界整行。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT_CJK.to_vec());
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div { font-family: \"Noto Sans SC\"; font-size: 16px; white-space: normal; }"
+                )
+                .is_clean()
+        );
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("div".into()),
+                        text: Some("样式引擎渲染检查".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let id1 = *engine.key_to_node.get(&Key(1)).unwrap();
+        let min = engine
+            .min_measures
+            .get(&id1)
+            .copied()
+            .expect("CJK 文本叶应有 min-content");
+        let cs = engine.styles.get(&id1).cloned().unwrap();
+        let (single, _) = engine.text.measure("样", &cs);
+        assert!(
+            (min.0 - single).abs() < 0.6,
+            "min={} 单字宽={}",
+            min.0,
+            single
+        );
+        let (max, _) = engine.text.measure("样式引擎渲染检查", &cs);
+        assert!(max > single + 1.0);
+    }
+
+    #[test]
+    fn absolute_without_positioned_ancestor_uses_initial_cb() {
+        // CSS 10.3.7：无 positioned 祖先 → 包含块 = 初始包含块（视口）。
+        // LeafMeasure 2000 宽叶在 800 视口被夹到 800（≥ min 80）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet("div.leaf { position: absolute; top: 0; left: 0; }")
+                .is_clean()
+        );
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: if class.is_empty() {
+                        Default::default()
+                    } else {
+                        std::iter::once(class.to_string()).collect()
+                    },
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "leaf").is_ok());
+        assert!(engine.set_leaf_measure(Key(2), 2000.0, 20.0).is_ok());
+        assert!(
+            engine
+                .set_leaf_intrinsic(Key(2), 80.0, 20.0, 2000.0, 20.0)
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b2 = frame.find(Key(2)).unwrap();
+        assert_eq!(b2.width, 800.0);
     }
 
     #[test]

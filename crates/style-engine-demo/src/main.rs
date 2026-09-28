@@ -227,8 +227,36 @@ impl DemoApp {
         if cx < lx as f64 || cx > (lx + lw) as f64 || cy < ly as f64 || cy > (ly + lh) as f64 {
             return;
         }
-        self.scroll_y = (self.scroll_y - dy).clamp(0.0, self.scrollable_y);
+        self.scroll_y = clamp_scroll_offset(self.scroll_y, dy, self.scrollable_y);
         let _ = self.engine.set_scroll_offset(4, 0.0, self.scroll_y);
+    }
+}
+
+/// 滚轮偏移夹紧（纯函数，ADR-0007 宿主职责）：cur − dy 夹到 [0, max]；
+/// 边界上重复事件幂等（结果仍贴边界）。
+fn clamp_scroll_offset(current: f32, dy: f32, max: f32) -> f32 {
+    (current - dy).clamp(0.0, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_scroll_offset;
+
+    #[test]
+    fn scroll_clamp_is_idempotent_at_bounds() {
+        // 顶端上滚：保持 0，重复事件不变
+        assert_eq!(clamp_scroll_offset(0.0, 100.0, 80.0), 0.0);
+        let once = clamp_scroll_offset(0.0, 100.0, 80.0);
+        assert_eq!(clamp_scroll_offset(once, 100.0, 80.0), 0.0);
+        // 底端下滚：保持 max
+        assert_eq!(clamp_scroll_offset(80.0, -40.0, 80.0), 80.0);
+        assert_eq!(clamp_scroll_offset(80.0, -400.0, 80.0), 80.0);
+        // 中段正常滚动与远超量程夹紧
+        assert_eq!(clamp_scroll_offset(0.0, -30.0, 80.0), 30.0);
+        assert_eq!(clamp_scroll_offset(50.0, 20.0, 80.0), 30.0);
+        assert_eq!(clamp_scroll_offset(0.0, -400.0, 80.0), 80.0);
+        // 量程为 0（无溢出）：任何方向都不动
+        assert_eq!(clamp_scroll_offset(0.0, -50.0, 0.0), 0.0);
     }
 }
 
