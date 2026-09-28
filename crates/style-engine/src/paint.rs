@@ -51,16 +51,14 @@ pub enum PaintOp {
         offset_y: f32,
         blur: f32,
     },
-    /// 边框描边（MVP：四边取上边样式，偏差记录）。
+    /// 边框（四边独立：top/right/bottom/left；style none 或 width 0 的边由 sink 忽略）。
     Border {
         x: f32,
         y: f32,
         width: f32,
         height: f32,
         radius: [f32; 4],
-        color: AlphaColor<Srgb>,
-        style: BorderStyle,
-        border_width: f32,
+        sides: [BorderSide; 4],
     },
     /// 文本（T5 转换为字形 run；MVP 记录排版输入）。
     Text {
@@ -88,6 +86,14 @@ pub enum PaintOp {
         dy: f32,
     },
     PopScroll,
+}
+
+/// 单边边框（T4b：宽度/样式/颜色已在 paint 层终结为绝对值）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderSide {
+    pub width: f32,
+    pub style: BorderStyle,
+    pub color: AlphaColor<Srgb>,
 }
 
 /// 一帧的绘制清单。
@@ -193,29 +199,59 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         }
     }
 
-    // 3) 边框（MVP：统一取上边样式）
-    let border_width = match style.get(PropertyId::BorderTopWidth) {
-        Some(DeclValue::BorderWidth(Some(lp))) => px(lp, style, env),
-        _ => 0.0,
-    };
-    let border_style = match style.get(PropertyId::BorderTopStyle) {
-        Some(DeclValue::BorderStyle(s)) => *s,
-        _ => BorderStyle::None,
-    };
-    if border_style != BorderStyle::None && border_width > 0.0 {
-        let color = match style.get(PropertyId::BorderTopColor) {
+    // 3) 边框：四边独立读取（top/right/bottom/left）
+    let side = |w_id: PropertyId, s_id: PropertyId, c_id: PropertyId| -> BorderSide {
+        let width = match style.get(w_id) {
+            Some(DeclValue::BorderWidth(Some(lp))) => px(lp, style, env),
+            _ => 0.0,
+        };
+        let bstyle = match style.get(s_id) {
+            Some(DeclValue::BorderStyle(s)) => *s,
+            _ => BorderStyle::None,
+        };
+        let color = match style.get(c_id) {
             Some(DeclValue::Color(c)) => resolve_color(c, style, env),
             _ => AlphaColor::new([0.0, 0.0, 0.0, 1.0]),
         };
+        BorderSide {
+            width,
+            style: bstyle,
+            color,
+        }
+    };
+    let sides = [
+        side(
+            PropertyId::BorderTopWidth,
+            PropertyId::BorderTopStyle,
+            PropertyId::BorderTopColor,
+        ),
+        side(
+            PropertyId::BorderRightWidth,
+            PropertyId::BorderRightStyle,
+            PropertyId::BorderRightColor,
+        ),
+        side(
+            PropertyId::BorderBottomWidth,
+            PropertyId::BorderBottomStyle,
+            PropertyId::BorderBottomColor,
+        ),
+        side(
+            PropertyId::BorderLeftWidth,
+            PropertyId::BorderLeftStyle,
+            PropertyId::BorderLeftColor,
+        ),
+    ];
+    if sides
+        .iter()
+        .any(|s| s.style != BorderStyle::None && s.width > 0.0)
+    {
         out.ops.push(PaintOp::Border {
             x,
             y,
             width: w,
             height: h,
             radius,
-            color,
-            style: border_style,
-            border_width,
+            sides,
         });
     }
 
@@ -383,15 +419,11 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match &out.ops[1] {
-            PaintOp::Border {
-                color,
-                border_width,
-                style: bs,
-                ..
-            } => {
-                assert_eq!(*border_width, 2.0);
-                assert_eq!(*bs, BorderStyle::Solid);
-                assert_eq!(color.components, [0.0, 0.0, 1.0, 1.0]);
+            PaintOp::Border { sides, .. } => {
+                let s = &sides[0]; // top
+                assert_eq!(s.width, 2.0);
+                assert_eq!(s.style, BorderStyle::Solid);
+                assert_eq!(s.color.components, [0.0, 0.0, 1.0, 1.0]);
             }
             other => panic!("{other:?}"),
         }
@@ -439,7 +471,9 @@ mod tests {
         let out = run(&tree, id, style, &HashMap::new());
         assert_eq!(out.ops.len(), 1); // 透明背景跳过
         match &out.ops[0] {
-            PaintOp::Border { color, .. } => assert_eq!(color.components, [0.0, 1.0, 0.0, 1.0]),
+            PaintOp::Border { sides, .. } => {
+                assert_eq!(sides[0].color.components, [0.0, 1.0, 0.0, 1.0])
+            }
             other => panic!("{other:?}"),
         }
     }

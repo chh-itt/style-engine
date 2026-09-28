@@ -11,7 +11,7 @@
 use style_engine::css::value::ColorValue;
 use style_engine::{DisplayList, PaintOp};
 use vello::Scene;
-use vello::kurbo::{Affine, Point, Rect, RoundedRect, RoundedRectRadii, Stroke, Vec2};
+use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Stroke, Vec2};
 use vello::peniko::color::{AlphaColor, Srgb};
 use vello::peniko::{Brush, Extend, Fill, Gradient, GradientKind, Mix, RadialGradientPosition};
 
@@ -265,30 +265,17 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             width,
             height,
             radius,
-            color,
-            style,
-            border_width,
+            sides,
         } => {
-            let shape = rect_shape(
+            draw_border(
+                scene,
                 *x + state.offset.x as f32,
                 *y + state.offset.y as f32,
                 *width,
                 *height,
                 *radius,
+                sides,
             );
-            let mut stroke = Stroke::new(f64::from(*border_width));
-            match style {
-                style_engine::css::property::BorderStyle::Dashed => {
-                    stroke = stroke.with_dashes(0.0, [f64::from(*border_width) * 3.0]);
-                }
-                style_engine::css::property::BorderStyle::Dotted => {
-                    stroke = stroke
-                        .with_caps(vello::kurbo::Cap::Round)
-                        .with_dashes(0.0, [0.0, f64::from(*border_width) * 2.0]);
-                }
-                _ => {}
-            }
-            scene.stroke(&stroke, Affine::IDENTITY, *color, None, &shape);
         }
         PaintOp::Text { .. } => {
             // 偏差：字形 run 随 T5 落地
@@ -432,4 +419,122 @@ fn distribute_stops(
             (p, c)
         })
         .collect()
+}
+
+/// 90° 圆弧的三次贝塞尔近似（y-down，θ 递增 = 屏幕顺时针；起点须已 move_to）。
+fn quarter_arc(path: &mut BezPath, cx: f64, cy: f64, r: f64, start_deg: f64) {
+    let k = 0.552_284_7;
+    let (a1, a2) = (start_deg.to_radians(), (start_deg + 90.0).to_radians());
+    let (p0x, p0y) = (a1.cos(), a1.sin());
+    let (p3x, p3y) = (a2.cos(), a2.sin());
+    let half_pi = core::f64::consts::FRAC_PI_2;
+    let (t1x, t1y) = ((a1 + half_pi).cos(), (a1 + half_pi).sin());
+    let (t2x, t2y) = ((a2 + half_pi).cos(), (a2 + half_pi).sin());
+    path.curve_to(
+        Point::new(cx + (p0x + t1x * k) * r, cy + (p0y + t1y * k) * r),
+        Point::new(cx + (p3x - t2x * k) * r, cy + (p3y - t2y * k) * r),
+        Point::new(cx + p3x * r, cy + p3y * r),
+    );
+}
+
+fn stroke_side(scene: &mut Scene, path: &BezPath, s: &style_engine::paint::BorderSide) {
+    use style_engine::css::property::BorderStyle;
+    if s.style == BorderStyle::None || s.width <= 0.0 {
+        return;
+    }
+    let mut stroke = Stroke::new(f64::from(s.width));
+    match s.style {
+        BorderStyle::Dashed => {
+            stroke = stroke.with_dashes(0.0, [f64::from(s.width) * 3.0]);
+        }
+        BorderStyle::Dotted => {
+            stroke = stroke
+                .with_caps(vello::kurbo::Cap::Round)
+                .with_dashes(0.0, [0.0, f64::from(s.width) * 2.0]);
+        }
+        _ => {}
+    }
+    scene.stroke(&stroke, Affine::IDENTITY, s.color, None, path);
+}
+
+/// 四边分画（T4b）：每边一条「角弧 + 直线」描边路径；角弧按顺时针归属
+/// （TL→top、TR→right、BR→bottom、BL→left）。简化偏差：多色相邻边的
+/// 角部覆盖取后画方，不做对角线混合。
+fn draw_border(
+    scene: &mut Scene,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: [f32; 4],
+    sides: &[style_engine::paint::BorderSide; 4],
+) {
+    let [tl, tr, br, bl] = radius;
+    let (wt, wr, wb, wl) = (
+        sides[0].width,
+        sides[1].width,
+        sides[2].width,
+        sides[3].width,
+    );
+    let f = f64::from;
+
+    // top（TL 弧）
+    let mut p = BezPath::new();
+    if tl > 0.0 && wt > 0.0 {
+        let rc = f((tl - wt / 2.0).max(0.5));
+        p.move_to(Point::new(f(x + tl) - rc, f(y + tl)));
+        quarter_arc(&mut p, f(x + tl), f(y + tl), rc, 180.0);
+    } else {
+        p.move_to(Point::new(f(x), f(y + wt / 2.0)));
+    }
+    p.line_to(Point::new(
+        if tr > 0.0 { f(x + w - tr) } else { f(x + w) },
+        f(y + wt / 2.0),
+    ));
+    stroke_side(scene, &p, &sides[0]);
+
+    // right（TR 弧）
+    let mut p = BezPath::new();
+    if tr > 0.0 && wr > 0.0 {
+        let rc = f((tr - wr / 2.0).max(0.5));
+        p.move_to(Point::new(f(x + w - tr), f(y + tr) - rc));
+        quarter_arc(&mut p, f(x + w - tr), f(y + tr), rc, 270.0);
+    } else {
+        p.move_to(Point::new(f(x + w - wr / 2.0), f(y)));
+    }
+    p.line_to(Point::new(
+        f(x + w - wr / 2.0),
+        if br > 0.0 { f(y + h - br) } else { f(y + h) },
+    ));
+    stroke_side(scene, &p, &sides[1]);
+
+    // bottom（BR 弧）
+    let mut p = BezPath::new();
+    if br > 0.0 && wb > 0.0 {
+        let rc = f((br - wb / 2.0).max(0.5));
+        p.move_to(Point::new(f(x + w - br) + rc, f(y + h - br)));
+        quarter_arc(&mut p, f(x + w - br), f(y + h - br), rc, 0.0);
+    } else {
+        p.move_to(Point::new(f(x + w), f(y + h - wb / 2.0)));
+    }
+    p.line_to(Point::new(
+        if bl > 0.0 { f(x + bl) } else { f(x) },
+        f(y + h - wb / 2.0),
+    ));
+    stroke_side(scene, &p, &sides[2]);
+
+    // left（BL 弧）
+    let mut p = BezPath::new();
+    if bl > 0.0 && wl > 0.0 {
+        let rc = f((bl - wl / 2.0).max(0.5));
+        p.move_to(Point::new(f(x + bl), f(y + h - bl) + rc));
+        quarter_arc(&mut p, f(x + bl), f(y + h - bl), rc, 90.0);
+    } else {
+        p.move_to(Point::new(f(x + wl / 2.0), f(y + h)));
+    }
+    p.line_to(Point::new(
+        f(x + wl / 2.0),
+        if tl > 0.0 { f(y + tl) } else { f(y) },
+    ));
+    stroke_side(scene, &p, &sides[3]);
 }
