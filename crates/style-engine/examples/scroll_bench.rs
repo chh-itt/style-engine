@@ -15,8 +15,8 @@
 
 use std::time::Instant;
 
-use style_engine::tree::StyleNode;
 use style_engine::StyleEngine;
+use style_engine::tree::StyleNode;
 
 const ROWS: usize = 200;
 const TICKS: usize = 60;
@@ -42,7 +42,9 @@ fn main() {
         .expect("viewport classes");
     for i in 1..=ROWS as u64 {
         engine.insert(Some(0), i, node("div")).expect("row");
-        engine.set_classes(i, &["row".to_string()]).expect("row classes");
+        engine
+            .set_classes(i, &["row".to_string()])
+            .expect("row classes");
     }
     let mut frame = engine.frame((320.0, 568.0), 1.0, 0.0);
     let (_, max_y) = frame.scrollable.get(&0).copied().unwrap_or((0.0, 0.0));
@@ -73,7 +75,10 @@ fn main() {
     println!("  最差   {worst:8.3} ms/帧");
     let budget = 1000.0 / 120.0;
     if avg <= budget {
-        println!("  120fps 预算（{budget:.2} ms）: 满足（余量 {:.1}×）", budget / avg);
+        println!(
+            "  120fps 预算（{budget:.2} ms）: 满足（余量 {:.1}×）",
+            budget / avg
+        );
     } else {
         println!(
             "  120fps 预算（{budget:.2} ms）: 超出 {:.1}× —— ㉙ 增量帧重估触发条件命中",

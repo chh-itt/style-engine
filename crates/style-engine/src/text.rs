@@ -14,6 +14,7 @@ use parley::fontique::{
 use parley::style::StyleProperty;
 use parley::{FontContext, FontFamily, LayoutContext};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 测量用画笔类型（不需要画笔语义；parley 0.11 对满足 Clone+PartialEq+Debug+Default
@@ -25,6 +26,11 @@ struct MeasureBrush;
 pub struct TextSystem {
     font_cx: FontContext,
     layout_cx: LayoutContext<MeasureBrush>,
+    /// ㉚ normal 行高探针缓存：(主族名, 字号 bits, 字重 bits, italic) →
+    /// Chromium 对齐值。命中即免探针遍（两遍法退单遍）；add_font 时清空
+    /// （字体集变更可能改变选择结果）。值来自探针首 run 的 RunMetrics，
+    /// 与 ㉔ 公式逐位一致。
+    normal_lh_cache: HashMap<(String, u32, u32, bool), f32>,
 }
 
 impl Default for TextSystem {
@@ -46,6 +52,7 @@ impl TextSystem {
                 source_cache: parley::fontique::SourceCache::default(),
             },
             layout_cx: LayoutContext::default(),
+            normal_lh_cache: HashMap::new(),
         }
     }
 
@@ -54,6 +61,8 @@ impl TextSystem {
         self.font_cx
             .collection
             .register_fonts(Blob::new(Arc::new(data)), None);
+        // 字体集变更可能改变族选择结果——normal 行高缓存整体失效（㉚）。
+        self.normal_lh_cache.clear();
     }
 
     /// 无界宽度测量（单行）。无可用字体时宽高趋 0。
@@ -107,16 +116,33 @@ impl TextSystem {
         max_advance: Option<f32>,
         env: &MediaEnv,
     ) -> (f32, f32) {
-        let mut layout = self.build_layout(text, style, spans, None, env);
         let forced_lh = if style.line_height() == &LineHeight::Normal {
-            layout.break_all_lines(max_advance);
-            chromium_normal_lh(&layout)
+            // ㉚：探针缓存命中（同主族+字号+字重+字形）即免探针遍——两遍法
+            // 退单遍；首见组合仍付探针，此后摊销为一次哈希查（典型 GUI 同
+            // 族同号文本占绝对多数）。fontique 0.11 无公开度量查询 API
+            // （FontInfo 无 metrics 字段），免探针直读需引入 skrifa 表解析，
+            // 列为升级路径（DEPENDENCIES 同步）。
+            let key = (
+                family_cow(style).to_string(),
+                style.font_size_px().to_bits(),
+                style.font_weight().to_bits(),
+                style.font_style() == crate::css::property::FontStyle::Italic,
+            );
+            if let Some(&lh) = self.normal_lh_cache.get(&key) {
+                Some(lh)
+            } else {
+                let mut probe = self.build_layout(text, style, spans, None, env);
+                probe.break_all_lines(max_advance);
+                let lh = chromium_normal_lh(&probe);
+                if let Some(lh) = lh {
+                    self.normal_lh_cache.insert(key, lh);
+                }
+                lh
+            }
         } else {
             None
         };
-        if forced_lh.is_some() {
-            layout = self.build_layout(text, style, spans, forced_lh, env);
-        }
+        let mut layout = self.build_layout(text, style, spans, forced_lh, env);
         layout.break_all_lines(max_advance);
         (layout.width(), layout.height())
     }

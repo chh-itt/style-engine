@@ -59,6 +59,12 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - **无 provider 注入口**：parley 硬编码 baked 数据（无 DataProvider 参数/re-export），`AnalysisDataSources` 为 pub(crate)。
 - **禁则（kinsoku）上游受限**：parley 唯一断行钩子 `LineBreakOverrideFn` 对非 ASCII 直接返回 None（`break_overrides.rs:135-139`）——CJK 禁则无法经此实现。若将来需要「CJ 词典级行断行」或「禁则」，循 [parley#623](https://github.com/linebender/parley/issues/623)（已按 #621 关闭）的措辞向上游提 issue（"an API to choose the segmenter variant" 或 override 解除 ASCII 限制）。
 
+## parley/fontique 度量查询缺口（第五批㉚）
+
+- fontique 0.11 公共 API 不暴露字体度量（`FontInfo` 无 metrics 字段——仅 source/width/style/weight/axes/charmap_index；`Collection::family_id/family/query` 均不可达度量）。normal 行高的 Chromium 对齐值（第五批㉔）只能经布局探针（build+break 读首 run `RunMetrics`）取得。
+- 缓解：TextSystem 探针缓存（主族+字号+字重+italic → normal 值），同键组合免探针遍（两遍法退单遍，`add_font` 时清空）；稳态摊销实测见 FEATURES ㉚（50 文本叶帧 0.757ms vs 首帧 3.905ms，单叶摊销 14.5µs）。
+- 升级路径：引入 skrifa（parley 传递依赖，已在树内）直读 OS/2/hhea 表自算 typo 度量，可彻底免探针——但需与 parley RunMetrics 口径逐位对齐（fontique 内部取表路径），列为特性票不排期。
+
 ## 字体资产与 LFS 评估（2026-09）
 
 现状：仓库内字体 ≈19.2MB（DejaVu Regular/Bold ≈1.4MB + Noto Sans SC 可变字体 ≈17.8MB），随用例增长只会更多（conformance 需与浏览器强制同字体，ADR-0003）。
