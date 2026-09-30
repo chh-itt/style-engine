@@ -1,0 +1,17 @@
+[package]
+name = "style-engine-soft"
+description = "Pure-software paint sink for style-engine display lists (contract-validation crate, zero GPU / zero extra deps)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+style-engine = { path = "../style-engine", version = "0.1.0" }
+
+[dev-dependencies]
+# 测试构造 PaintOp 色值所需（主代码只读 components，零运行时依赖保持）。
+peniko = { workspace = true }
+
+[lints]
+workspace = true

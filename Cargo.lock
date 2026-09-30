@@ -2132,6 +2132,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "style-engine-soft"
+version = "0.1.0"
+dependencies = [
+ "peniko",
+ "style-engine",
+]
+
+[[package]]
 name = "style-engine-vello"
 version = "0.1.0"
 dependencies = [
