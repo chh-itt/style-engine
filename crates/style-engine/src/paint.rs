@@ -745,6 +745,73 @@ mod tests {
     }
 
     #[test]
+    fn radial_ellipse_geometry_calibrated() {
+        // 第五批⑫校准：径向几何全组与 css-images-3 一致——ellipse
+        // farthest-corner（默认）= fx·√2 / fy·√2（过最远角的规范唯一解）、
+        // closest/farthest-side=边距本身、closest-corner=最小边距·√2；
+        // circle 全组=对应距离标量（角=欧氏、边=min/max）。
+        use crate::css::property::{RadialShape as RS, RadialSize as RZ, RadialSpec};
+        let (_, _, cs) = setup("", None);
+        let env = MediaEnv {
+            viewport_w: 1280.0,
+            viewport_h: 800.0,
+            dark: false,
+            reduced_motion: false,
+        };
+        let geom = |shape: RS, size: RZ, px: f32, py: f32| {
+            resolve_radial(
+                &RadialSpec {
+                    shape,
+                    size,
+                    position: (
+                        LengthPercentage::Percent(px / 100.0),
+                        LengthPercentage::Percent(py / 100.0),
+                    ),
+                },
+                10.0,
+                20.0,
+                100.0,
+                50.0,
+                &cs,
+                &env,
+            )
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // 居中：fx=50 fy=25（min=max）
+        let g = geom(RS::Ellipse, RZ::FarthestCorner, 50.0, 50.0);
+        assert!(
+            near(g.rx, 50.0 * std::f32::consts::SQRT_2)
+                && near(g.ry, 25.0 * std::f32::consts::SQRT_2)
+        );
+        let g = geom(RS::Circle, RZ::FarthestCorner, 50.0, 50.0);
+        assert!(near(g.rx, (50.0f32 * 50.0 + 25.0 * 25.0).sqrt()) && near(g.ry, g.rx));
+        // 偏心 10% 20%：fx=90 fy=40 min=(10,10)
+        let g = geom(RS::Ellipse, RZ::FarthestCorner, 10.0, 20.0);
+        assert!(
+            near(g.rx, 90.0 * std::f32::consts::SQRT_2)
+                && near(g.ry, 40.0 * std::f32::consts::SQRT_2)
+        );
+        let g = geom(RS::Ellipse, RZ::ClosestCorner, 10.0, 20.0);
+        assert!(
+            near(g.rx, 10.0 * std::f32::consts::SQRT_2)
+                && near(g.ry, 10.0 * std::f32::consts::SQRT_2)
+        );
+        let g = geom(RS::Circle, RZ::ClosestCorner, 10.0, 20.0);
+        assert!(near(g.rx, (200.0f32).sqrt()));
+        let g = geom(RS::Ellipse, RZ::ClosestSide, 10.0, 20.0);
+        assert!(near(g.rx, 10.0) && near(g.ry, 10.0));
+        let g = geom(RS::Ellipse, RZ::FarthestSide, 10.0, 20.0);
+        assert!(near(g.rx, 90.0) && near(g.ry, 40.0));
+        let g = geom(RS::Circle, RZ::ClosestSide, 10.0, 20.0);
+        assert!(near(g.rx, 10.0) && near(g.ry, 10.0));
+        let g = geom(RS::Circle, RZ::FarthestSide, 10.0, 20.0);
+        assert!(near(g.rx, 90.0) && near(g.ry, 90.0));
+        // 绝对定位锚：cx/cy 加盒子原点 (10, 20)
+        let g = geom(RS::Ellipse, RZ::ClosestSide, 10.0, 20.0);
+        assert!(near(g.cx, 20.0) && near(g.cy, 30.0));
+    }
+
+    #[test]
     fn z_index_orders_siblings() {
         let mut tree = StyleTree::new();
         let root = tree.root();
