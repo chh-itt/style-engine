@@ -574,9 +574,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 self.wrap_widths.insert(id, Some(avail));
                 if let Some(&tid) = self.taffy_node.get(&id) {
                     let mut ts = map_style(&cs, &self.media);
+                    // 第五批⑥：同 restyle_node 契约——声明宽优先，否则
+                    // taffy auto（块流拉伸到容器内容宽）；测量高兜底。
                     ts.size = taffy::prelude::Size {
-                        width: taffy::prelude::Dimension::length(w),
-                        height: taffy::prelude::Dimension::length(h),
+                        width: if has_declared_len(&cs, crate::css::property::PropertyId::Width) {
+                            ts.size.width
+                        } else {
+                            taffy::prelude::Dimension::auto()
+                        },
+                        height: if has_declared_len(&cs, crate::css::property::PropertyId::Height) {
+                            ts.size.height
+                        } else {
+                            taffy::prelude::Dimension::length(h)
+                        },
                     };
                     let _ = self.taffy.set_style(tid, ts);
                 }
@@ -668,11 +678,26 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 if let Some(&tid) = self.taffy_node.get(&id) {
                     if let Some(cs) = self.styles.get(&id) {
                         let mut ts = map_style(cs, &self.media);
+                        // 第五批⑥：absolute shrink-to-fit（CSS 10.3.7）仅适
+                        // 用 width:auto——声明宽优先保留（含 min/max 夹紧由
+                        // taffy 消费）；测量高兜底 height:auto。
                         ts.size = taffy::prelude::Size {
-                            width: taffy::prelude::Dimension::length(width),
-                            height: taffy::prelude::Dimension::length(
-                                self.measures.get(&id).map(|m| m.1).unwrap_or(0.0),
-                            ),
+                            width: if has_declared_len(cs, crate::css::property::PropertyId::Width)
+                            {
+                                ts.size.width
+                            } else {
+                                taffy::prelude::Dimension::length(width)
+                            },
+                            height: if has_declared_len(
+                                cs,
+                                crate::css::property::PropertyId::Height,
+                            ) {
+                                ts.size.height
+                            } else {
+                                taffy::prelude::Dimension::length(
+                                    self.measures.get(&id).map(|m| m.1).unwrap_or(0.0),
+                                )
+                            },
                         };
                         let _ = self.taffy.set_style(tid, ts);
                     }
@@ -937,9 +962,27 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
         let mut ts = map_style(&cs, &self.media);
         if let Some((w, h)) = self.measures.get(&id) {
+            // 文本叶盒宽语义（第五批⑥契约）：声明宽度优先（CSS 显式 width
+            // 胜出测量，旧实现被测量值覆写为缺陷）；无声明时交 taffy auto——
+            // 块流拉伸到容器内容宽（与浏览器匿名块盒一致），flex/grid 子项
+            // 取内容宽，min/max 宽仍由 taffy 夹紧。absolute 例外：restyle 先
+            // 落显式测量宽（第三 pass 再夹紧——auto 时 taffy 绝对定位布局
+            // 不回退测量值，compute #1 即需可用）。测量高兜底 height:auto=
+            // 内容高；声明高优先。
+            let width_dim = if has_declared_len(&cs, crate::css::property::PropertyId::Width) {
+                ts.size.width
+            } else if self.is_absolute(id) {
+                taffy::prelude::Dimension::length(*w)
+            } else {
+                taffy::prelude::Dimension::auto()
+            };
             ts.size = taffy::prelude::Size {
-                width: taffy::prelude::Dimension::length(*w),
-                height: taffy::prelude::Dimension::length(*h),
+                width: width_dim,
+                height: if has_declared_len(&cs, crate::css::property::PropertyId::Height) {
+                    ts.size.height
+                } else {
+                    taffy::prelude::Dimension::length(*h)
+                },
             };
         }
         if let Some(&tid) = self.taffy_node.get(&id) {
@@ -1022,6 +1065,15 @@ fn used_h_inset(
         Some(crate::css::property::DeclValue::BorderWidth(Some(lp))) => lp.resolve(rctx, 0.0),
         _ => None,
     }
+}
+
+/// 声明长度检查（第五批⑥文本叶契约）：width/height 是否被显式声明
+/// （`LenAuto(Some)`；auto=None 不算声明）。声明值优先于文本测量。
+fn has_declared_len(cs: &ComputedStyle, pid: crate::css::property::PropertyId) -> bool {
+    matches!(
+        cs.get(pid),
+        Some(crate::css::property::DeclValue::LenAuto(Some(_)))
+    )
 }
 
 #[cfg(test)]
@@ -1421,8 +1473,10 @@ mod tests {
             mw
         };
         assert!((w3 - short_max).abs() < 0.5);
-        // wrap_widths 同步（绘制折行一致）
-        assert_eq!(engine.wrap_widths.get(&id2), Some(&Some(w2)));
+        // wrap_widths 同步（绘制折行一致）——第五批⑥后宿主声明宽（300）
+        // 不再被文本测量覆写，absolute 夹紧宽 = cb 内容宽 300（折行约束），
+        // 而 measures.0 = 该约束下的最宽行（283.97 类值）
+        assert_eq!(engine.wrap_widths.get(&id2), Some(&Some(300.0)));
     }
 
     #[test]
@@ -2091,6 +2145,40 @@ mod tests {
     }
 
     #[test]
+    fn text_leaf_block_stretch_and_declared_width() {
+        // 第五批⑥文本叶语义契约：无声明宽度的文本叶在块流中拉伸到容器
+        // 内容宽（与浏览器匿名块盒一致；旧实现=测量自然宽）；声明宽度
+        // 优先于测量；高度=测量内容高（有字形非零）。
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 220px; font-family: \"DejaVu Sans\"; font-size: 16px; } div.fix { width: 120px; font-family: \"DejaVu Sans\"; font-size: 16px; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p")).is_ok());
+        let mut stretch = node("auto");
+        stretch.text = Some("shrink wrap candidate".into());
+        assert!(engine.insert(Some(Key(1)), Key(2), stretch).is_ok());
+        let mut fixed = node("fix");
+        fixed.text = Some("shrink wrap candidate".into());
+        assert!(engine.insert(Some(Key(1)), Key(3), fixed).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let st = frame.find(Key(2)).unwrap();
+        // 自然宽 < 220：叶盒应 = 220（拉伸），而非测量自然宽
+        assert!((st.width - 220.0).abs() < 0.5, "leaf width {}", st.width);
+        let fx = frame.find(Key(3)).unwrap();
+        // 声明宽度优先：120 而非测量值
+        assert!((fx.width - 120.0).abs() < 0.5, "fixed width {}", fx.width);
+        assert!(st.height > 0.0, "内容高应非零");
+    }
+
+    #[test]
     fn wrap_two_phase_frame_layout() {
         // T5c-2：两阶段帧通路（无字体时 remeasure 集为空，验证不回归）
         let mut engine: StyleEngine<Key> = StyleEngine::new();
@@ -2337,7 +2425,9 @@ mod tests {
         assert!(engine.set_leaf_measure(Key(2), 100.0, 20.0).is_ok());
         let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
         let b = frame.find(Key(2)).unwrap();
-        assert_eq!((b.width, b.height), (100.0, 20.0));
+        // 第五批⑥契约：host 测量只供固有尺寸——列 flex 交叉轴 stretch 拉
+        // 伸到容器内容宽（浏览器 flex 项一致），主轴高 = 内容高 20
+        assert_eq!((b.width, b.height), (800.0, 20.0));
     }
 
     #[test]
