@@ -1,0 +1,11 @@
+/* 表格 Pixel 通道用例（二期④）：table-basic 的无文本变体——软 Sink v0
+   跳过 Text（⑦ 转正后 table-basic 才可并入 Pixel 通道）；
+   列语义同 table-basic：定宽 150（+内缩 16=166）/ 50%（300）/ auto（134）；
+   无文本 → 单元格高 = padding 16，行高 16、表高 32。 */
+body { margin: 0; }
+.table { display: table; width: 600px; }
+.row { display: table-row; }
+.cell { display: table-cell; padding: 8px; }
+.a { width: 150px; background-color: #0ea5e9; }
+.b { width: 50%; background-color: #f59e0b; }
+.c { background-color: #10b981; }

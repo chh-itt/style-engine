@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use style_engine::StyleEngine;
 use style_engine::tree::StyleNode;
 
+use crate::pixel::PixelBudget;
+
 /// fixture 节点：(data-key, 父下标, class 列表, 文本)。
 pub type FixtureNode = (u64, Option<usize>, Vec<String>, Option<String>);
 
@@ -53,6 +55,9 @@ pub struct CaseManifest {
     pub xfail: bool,
     #[serde(default)]
     pub tolerance: f64,
+    /// Pixel 通道预算（manifest `[pixel]` 段；缺省 = 该用例不跑 Pixel 通道）。
+    #[serde(default)]
+    pub pixel: Option<PixelBudget>,
 }
 
 impl Default for CaseManifest {
@@ -64,6 +69,7 @@ impl Default for CaseManifest {
             features: Vec::new(),
             xfail: false,
             tolerance: 0.5,
+            pixel: None,
         }
     }
 }
@@ -102,6 +108,12 @@ impl NumericCase {
 
     pub fn golden_path(&self) -> PathBuf {
         self.dir.join("golden").join("numeric.json")
+    }
+
+    /// Pixel 通道浏览器基准（tools/dump_rects.py 对声明 `[pixel]` 的用例
+    /// 追加整视口截图）。
+    pub fn pixel_golden_path(&self) -> PathBuf {
+        self.dir.join("golden").join("pixel.png")
     }
 }
 
@@ -148,8 +160,9 @@ impl fmt::Display for NumericDiff {
     }
 }
 
-/// 以敌意消费者标准（仅公共 API）从 case 文件构建引擎并取盒。
-pub fn run_case(case: &NumericCase) -> Result<Vec<EngineBox>, String> {
+/// 以敌意消费者标准（仅公共 API）从 case 文件构建引擎（Numeric 与 Pixel
+/// 通道共享同一构建路径——「同 case 驱动双通道」的一致性来源）。
+pub fn build_case_engine(case: &NumericCase) -> Result<StyleEngine<u64>, String> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     if !engine.set_stylesheet(&case.css).is_clean() {
         return Err(format!("case {} 的 CSS 未干净解析", case.name));
@@ -187,6 +200,12 @@ pub fn run_case(case: &NumericCase) -> Result<Vec<EngineBox>, String> {
             )
             .map_err(|e| format!("case {} key {key} 插入失败: {e}", case.name))?;
     }
+    Ok(engine)
+}
+
+/// 以敌意消费者标准（仅公共 API）从 case 文件构建引擎并取盒。
+pub fn run_case(case: &NumericCase) -> Result<Vec<EngineBox>, String> {
+    let mut engine = build_case_engine(case)?;
     let frame = engine.frame(
         (case.manifest.viewport[0], case.manifest.viewport[1]),
         case.manifest.scale,

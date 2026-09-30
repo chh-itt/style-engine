@@ -90,6 +90,10 @@ def dump_case(case_dir: Path, browser) -> None:
     (golden_dir / "numeric.json").write_text(
         json.dumps(out, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    # Pixel 通道（二期④）：manifest 声明 [pixel] 段的用例追加整视口截图
+    # golden/pixel.png（设备像素 = 视口 × scale，与引擎软 Sink 渲染对齐）。
+    if manifest.get("pixel") is not None:
+        page.screenshot(path=str(golden_dir / "pixel.png"))
     print(f"{case_dir.name}: {len(boxes)} boxes -> golden/numeric.json")
     page.close()
 

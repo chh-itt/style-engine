@@ -2115,6 +2115,7 @@ dependencies = [
  "serde",
  "serde_json",
  "style-engine",
+ "style-engine-soft",
  "toml",
 ]
 

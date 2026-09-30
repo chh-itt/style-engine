@@ -1,0 +1,15 @@
+# 表格 Pixel 通道用例（二期④）：table-basic 的无文本变体（软 Sink v0 跳过
+# Text，Pixel 用例须无文本，⑦ 转正后 table-basic 才可并入）——列语义同
+# table-basic：Length=content-box（+内缩 16=166）/ Percent=300 / auto=134；
+# 无文本 → 行高 16（纯 padding）、表高 32。
+viewport = [800.0, 600.0]
+scale = 1.0
+features = ["table", "background-color"]
+tolerance = 0.5
+
+# Pixel 通道（二期④）：同 case 驱动 Numeric+Pixel 一致性——引擎软 Sink
+# 渲染 vs Chromium 截图；全整数矩形（166/300/134×16），差异应为精确或
+# 零星 AA 边缘。
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 style-engine = { path = "../style-engine" }
+style-engine-soft = { path = "../style-engine-soft" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

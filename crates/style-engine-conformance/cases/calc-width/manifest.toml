@@ -5,6 +5,13 @@
 viewport = [800.0, 600.0]
 scale = 1.0
 fonts = []
-features = ["calc", "calc-percent"]
+features = ["calc", "calc-percent", "background-color"]
 xfail = false
 tolerance = 0.5
+
+# Pixel 通道（二期④）：同 case 驱动 Numeric+Pixel 一致性——引擎软 Sink
+# 渲染 vs Chromium 截图；全整数矩形（150×30/400×30、#222222 底），差异
+# 应为精确或零星 AA 边缘。
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

@@ -238,6 +238,24 @@ pub fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// 引擎侧用例渲染：与 numeric::run_case 共享 build_case_engine（同一 case
+/// 驱动双通道——Numeric 盒与 Pixel 像素出自同一次布局），frame.paint 经
+/// style-engine-soft 光栅化为 PNG 字节。底色白 = Chromium 默认画布；尺寸 =
+/// 视口 × scale（与 dumper 截图的设备像素对齐）。软 Sink v0 跳过 Text 与
+/// Transform——含文本/变换的用例不应声明 `[pixel]`（⑦ 转正后放开）。
+pub fn render_case_png(case: &crate::numeric::NumericCase) -> Result<Vec<u8>, String> {
+    let mut engine = crate::numeric::build_case_engine(case)?;
+    let w = (case.manifest.viewport[0] * case.manifest.scale) as u32;
+    let h = (case.manifest.viewport[1] * case.manifest.scale) as u32;
+    let frame = engine.frame(
+        (case.manifest.viewport[0], case.manifest.viewport[1]),
+        case.manifest.scale,
+        0.0,
+    );
+    let canvas = style_engine_soft::render(&frame.paint, w, h, [255, 255, 255, 255]);
+    Ok(encode_png(canvas.width, canvas.height, &canvas.pixels))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,3 +4,10 @@ viewport = [800.0, 600.0]
 scale = 1.0
 features = ["multicol", "column-count", "column-gap", "background-color"]
 tolerance = 0.5
+
+# Pixel 通道（二期④）：同 case 驱动 Numeric+Pixel 一致性——引擎软 Sink
+# 渲染 vs Chromium 截图；全整数矩形（容器 600×90、列 290×30），差异应为
+# 精确或零星 AA 边缘。
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]
