@@ -1,0 +1,5 @@
+body { margin: 0; }
+.host { position: relative; width: 600px; height: 200px; }
+.mix { position: absolute; top: 0px; left: 0px; font-family: "DejaVu Sans"; font-size: 16px; }
+.rtl { position: absolute; top: 30px; left: 0px; font-family: "DejaVu Sans"; font-size: 16px; }
+.wrap { position: absolute; top: 60px; left: 0px; width: 140px; font-family: "DejaVu Sans"; font-size: 16px; }

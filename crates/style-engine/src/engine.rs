@@ -722,18 +722,36 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     let Some(cs) = self.styles.get(&id).cloned() else {
                         continue;
                     };
+                    // 换行宽：声明宽优先（CSS 10.3.7 声明宽即内容可用宽，
+                    // 文本按声明宽折行——曾一律用 shrink 夹紧宽，声明 140
+                    // 被无界测量 233 盖过而漏折行，bidi-mixed key4 高超差
+                    // 根因）。percent 基准取夹紧宽（v1 近似）。
+                    let rctx = crate::css::value::ResolveCtx {
+                        em: cs.font_size_px(),
+                        rem: 16.0,
+                        viewport_w: self.media.viewport_w,
+                        viewport_h: self.media.viewport_h,
+                    };
+                    let wrap = match cs.get(crate::css::property::PropertyId::Width) {
+                        Some(crate::css::property::DeclValue::LenAuto(Some(lp))) => {
+                            lp.resolve(&rctx, width)
+                        }
+                        _ => None,
+                    }
+                    .map(|d| d.max(0.0))
+                    .unwrap_or(width);
                     let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
                     let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                         owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
                     let (w, h) =
                         self.text
-                            .measure_rich(&text, &cs, &span_refs, Some(width), &self.media);
+                            .measure_rich(&text, &cs, &span_refs, Some(wrap), &self.media);
                     if let Some(old) = self.measures.get(&id) {
                         reflow |=
                             (old.0 - w).abs() > f32::EPSILON || (old.1 - h).abs() > f32::EPSILON;
                     }
                     self.measures.insert(id, (w, h));
-                    self.wrap_widths.insert(id, Some(width));
+                    self.wrap_widths.insert(id, Some(wrap));
                 } else {
                     let h = self.measures.get(&id).map(|m| m.1).unwrap_or(0.0);
                     if let Some(old) = self.measures.get(&id) {
@@ -1669,7 +1687,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             // 内容高；声明高优先。
             let width_dim = if has_declared_len(&cs, crate::css::property::PropertyId::Width) {
                 ts.size.width
-            } else if self.is_absolute(id) {
+            } else if matches!(
+                cs.get(crate::css::property::PropertyId::Position),
+                Some(crate::css::property::DeclValue::Position(
+                    crate::css::property::Position::Absolute
+                ))
+            ) {
+                // absolute 例外查本地 cs 而非 is_absolute(id)——后者读
+                // self.styles，而本节点 cs 到函数尾才 insert，查表恒 None
+                // → auto 宽绝对文本叶丢测量宽，taffy 绝对布局对 auto 叶
+                // 无测量回退得 0（bidi-mixed key2/key3 宽超差根因）。
                 taffy::prelude::Dimension::length(*w)
             } else {
                 taffy::prelude::Dimension::auto()
@@ -3548,5 +3575,54 @@ mod tests {
         assert!(frame.boxes.is_empty());
         // 根槽位已释放，可重新声明
         assert!(engine.insert(None, Key(5), StyleNode::default()).is_ok());
+    }
+
+    #[test]
+    fn absolute_text_leaf_sizes() {
+        // ⑥ bidi-mixed 回归：auto 宽绝对文本叶取测量宽（restyle 的 absolute
+        // 例外须查本地 cs 的 position——self.styles 此刻尚未 insert，查表恒
+        // None 会把测量宽丢成 auto，taffy 绝对布局无测量回退得 0）；声明宽
+        // 叶按声明宽折行（T5d 换行宽声明优先，非 shrink 夹紧宽）；混排与
+        // 纯 RTL 测量宽均为正且与 Chromium golden 同容差。
+        let mut engine: StyleEngine<u32> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "body { margin: 0 } .host { position: relative; width: 600px; height: 200px } \
+                 .mix { position: absolute; top: 0px; left: 0px; font-family: \"DejaVu Sans\"; font-size: 16px } \
+                 .rtl { position: absolute; top: 30px; left: 0px; font-family: \"DejaVu Sans\"; font-size: 16px } \
+                 .wrap { position: absolute; top: 60px; left: 0px; width: 140px; font-family: \"DejaVu Sans\"; font-size: 16px }",
+            )
+            .is_clean());
+        let mk = |class: &str, text: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(class.to_string()).collect(),
+            text: Some(text.into()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, 1, mk("host", "")).is_ok());
+        assert!(
+            engine
+                .insert(Some(1), 2, mk("mix", "Hello שלום world עברית 42"))
+                .is_ok()
+        );
+        assert!(engine.insert(Some(1), 3, mk("rtl", "עברית")).is_ok());
+        assert!(
+            engine
+                .insert(Some(1), 4, mk("wrap", "Hello שלום world עברית 42 tail"))
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b2 = frame.find(2).unwrap();
+        assert_eq!((b2.x, b2.y), (0.0, 0.0));
+        // 测量宽经 taffy 舍入取整（与 conformance 0.5px 容差同源）
+        assert!((b2.width - 203.10938).abs() < 0.5, "w={}", b2.width);
+        assert_eq!(b2.height, 19.0);
+        let b3 = frame.find(3).unwrap();
+        assert!((b3.width - 42.390625).abs() < 0.5, "w={}", b3.width);
+        assert_eq!((b3.y, b3.height), (30.0, 19.0));
+        let b4 = frame.find(4).unwrap();
+        assert_eq!((b4.x, b4.y, b4.width), (0.0, 60.0, 140.0));
+        assert_eq!(b4.height, 38.0);
     }
 }

@@ -1,0 +1,6 @@
+body { margin: 0; }
+.root { width: 300px; }
+@keyframes pulse { from { background-color: #ff0000; } to { background-color: #0000ff; } }
+@keyframes fade { from { opacity: 1; } to { opacity: 0; } }
+.a { height: 60px; animation: pulse 1s linear infinite alternate; }
+.b { height: 60px; animation: fade 2s ease-in-out infinite alternate; }

@@ -1,0 +1,10 @@
+# @keyframes 布局不变性（二期⑥）：bg-color/opacity 动画持续运行（infinite
+# alternate），验收动画管线（@keyframes 解析 + animation 简写 + apply_animations
+# 采样）集成后盒几何与静态布局一致——rects 与采样时机无关（确定性）；transform
+# 动画不入选（getBoundingClientRect 含变换、截图时机非确定）；动画值的像素级采样
+# 验收待 ⑦ 软 Sink Text/Transform 后并入 Pixel 通道。
+viewport = [800.0, 600.0]
+scale = 1.0
+features = ["keyframes", "animation", "background-color", "opacity"]
+tolerance = 0.5
+xfail = false

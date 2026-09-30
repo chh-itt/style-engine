@@ -1,0 +1,9 @@
+# 双向文本混排一致性（二期⑥）：相对宿主内三个 absolute 文本叶——
+# LTR 基方向混排（拉丁+希伯来+数字）、纯 RTL 单 run、窄定宽混排折行——
+# 验收 parley first-strong 与 Chromium 一致的 run 分裂、整行测量与断行行数。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = ["DejaVu Sans=crates/style-engine-demo/assets/fonts/DejaVuSans.ttf"]
+features = ["bidi", "text", "absolute"]
+tolerance = 0.5
+xfail = false
