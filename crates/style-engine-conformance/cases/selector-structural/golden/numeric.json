@@ -1,5 +1,6 @@
 {
  "meta": {
+  "schema": 1,
   "generator": "tools/dump_rects.py",
   "browser": "chromium",
   "browser_version": "153.0.8010.12",

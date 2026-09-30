@@ -26,6 +26,22 @@ fn numeric_cases_match_golden() {
                 )
             }))
             .expect("golden 解析");
+        // ㉖ 基准版本化：schema 不匹配按超差失败——防格式漂移静默错比。
+        // 重生成协议：browser_version（浏览器侧升级）或 schema（golden 格式
+        // /对比语义变更）任一变化 → tools/dump_rects.py 全量重生成。
+        const GOLDEN_SCHEMA: u64 = 1;
+        let schema = golden
+            .meta
+            .get("schema")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(GOLDEN_SCHEMA);
+        if schema != GOLDEN_SCHEMA {
+            failures.push(format!(
+                "case {}：golden schema={} 不匹配（want {GOLDEN_SCHEMA}）——运行 tools/dump_rects.py 重生成",
+                case.name, schema
+            ));
+            continue;
+        }
         let t = case.manifest.tolerance;
         let tol = Tolerance {
             x: t,

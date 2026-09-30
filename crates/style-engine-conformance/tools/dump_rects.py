@@ -14,6 +14,9 @@ Chromium 无头打开 case.html，收集 [data-key] 元素的 getBoundingClientR
 - 字体注入（manifest.fonts）为后续文本用例预留：@font-face 以 file://
   指向仓库内字体文件；当前 v0 用例不含文本，fonts 留空。
 - golden 内含 browser_version——基准与 Chrome 版本绑定，升级需重生成。
+- 基准版本化（第五批㉖）：meta.schema 钉 golden 格式/对比语义版本
+  （SCHEMA_VERSION），runner 不匹配即超差失败；重生成协议 =
+  browser_version 或 schema 任一变化 → 本脚本全量重生成。
 """
 import json
 import sys
@@ -24,6 +27,10 @@ from playwright.sync_api import sync_playwright
 
 TOOLS = Path(__file__).resolve().parent
 CASES = TOOLS.parent / "cases"
+
+# 基准版本化（第五批㉖）：golden 格式/对比语义 schema——格式或语义任何
+# 变更必须递增并全量重生成（runner 侧 GOLDEN_SCHEMA 同步）。
+SCHEMA_VERSION = 1
 
 COLLECT_JS = """
 () => Array.from(document.querySelectorAll('[data-key]')).map(el => {
@@ -69,6 +76,7 @@ def dump_case(case_dir: Path, browser) -> None:
     inject_fonts(page, manifest)
     boxes = page.evaluate(COLLECT_JS)
     meta = {
+        "schema": SCHEMA_VERSION,
         "generator": "tools/dump_rects.py",
         "browser": "chromium",
         "browser_version": browser.version,
