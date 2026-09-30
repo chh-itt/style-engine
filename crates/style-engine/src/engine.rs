@@ -74,6 +74,10 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     calc_deferred: Vec<crate::layout::DeferredCalc>,
     /// taffy 父链（结算基准 = 父内容尺寸；build_taffy_subtree 填充）。
     taffy_parent: HashMap<taffy::NodeId, taffy::NodeId>,
+    /// ②table：display:table 节点注册表（restyle 收集，settle_tables 结算）。
+    tables: Vec<NodeId>,
+    /// ②table：上次结算列宽缓存（px；全等免重排——稳态帧零额外布局 pass）。
+    table_cols: HashMap<NodeId, Vec<f32>>,
     styles: HashMap<NodeId, ComputedStyle>,
     /// span 级样式（T5c）：NodeId → (字节起点, 字节终点, 覆盖后的 ComputedStyle)。
     span_styles: HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
@@ -127,6 +131,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             taffy_node: HashMap::new(),
             calc_deferred: Vec::new(),
             taffy_parent: HashMap::new(),
+            tables: Vec::new(),
+            table_cols: HashMap::new(),
             styles: HashMap::new(),
             span_styles: HashMap::new(),
             parents: HashMap::new(),
@@ -506,6 +512,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             // ①calc 直通：百分比 calc 结算（父尺寸就绪后回写固定值，收敛
             // 上限 3 遍；须在文本换行重排之前——文本折行宽度依赖结算值）。
             self.settle_calc(viewport);
+            // ②table：行级 Grid 列模板结算（表内容宽就绪后回写；同样须在
+            // 文本换行重排之前——单元格内折行宽依赖列宽）。
+            self.settle_tables(viewport);
         }
         // T5c-2：文本叶换行——pass1 布局给出包含块宽后，white-space: normal 的
         // 自动测量文本叶按 max_advance 重测量并按需二次布局。包含块内容宽 =
@@ -862,6 +871,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.taffy_root = None;
         self.calc_deferred.clear();
         self.taffy_parent.clear();
+        self.tables.clear();
+        self.table_cols.clear();
         if self.root_key.is_some() {
             let root = self.tree.root();
             let tid = self.build_taffy_subtree(root, None);
@@ -1131,12 +1142,123 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// ②table：列模板结算——首遍布局给出表内容宽后，按首行单元格声明宽
+    /// （定宽 px / 百分比 / auto）计算列模板回写各 table-row 的单行 Grid；
+    /// 全等缓存则免重排（稳态帧零额外布局 pass）。嵌套表外层先行：变更
+    /// 触发一次重排后二次迭代（上限 2 遍，内层表宽度取结算后值）。
+    fn settle_tables(&mut self, viewport: (f32, f32)) {
+        if self.tables.is_empty() {
+            return;
+        }
+        for _ in 0..2 {
+            let mut changed = false;
+            let tables = self.tables.clone();
+            for table in tables {
+                let Some(&ttid) = self.taffy_node.get(&table) else {
+                    continue;
+                };
+                let Ok(tl) = self.taffy.layout(ttid) else {
+                    continue;
+                };
+                // 表内容宽 = 边框盒 − border − padding（百分比列基准）。
+                let tw = (tl.size.width
+                    - tl.border.left
+                    - tl.border.right
+                    - tl.padding.left
+                    - tl.padding.right)
+                    .max(0.0);
+                let rows: Vec<NodeId> = self.tree.children(table).to_vec();
+                let mut n_cols = 0usize;
+                for r in &rows {
+                    n_cols = n_cols.max(self.tree.children(*r).len());
+                }
+                // 列声明取首行单元格（无 colspan v1）；列数取各行最大值。
+                // 水平内缩（padding+border）随声明一并收集：Length 贡献 =
+                // px + 内缩（content-box），Percent 列 = border-box 不加。
+                let mut declared: Vec<(taffy::prelude::Dimension, f32)> = Vec::new();
+                if let Some(first) = rows.first() {
+                    for c in self.tree.children(*first) {
+                        let Some(cs) = self.styles.get(c) else {
+                            declared.push((taffy::prelude::Dimension::auto(), 0.0));
+                            continue;
+                        };
+                        let d = map_style(cs, &self.media).size.width;
+                        let rctx = crate::css::value::ResolveCtx {
+                            em: cs.font_size_px(),
+                            rem: 16.0,
+                            viewport_w: self.media.viewport_w,
+                            viewport_h: self.media.viewport_h,
+                        };
+                        let inset: f32 = [
+                            (crate::css::property::PropertyId::PaddingLeft, None),
+                            (crate::css::property::PropertyId::PaddingRight, None),
+                            (
+                                crate::css::property::PropertyId::BorderLeftWidth,
+                                Some(crate::css::property::PropertyId::BorderLeftStyle),
+                            ),
+                            (
+                                crate::css::property::PropertyId::BorderRightWidth,
+                                Some(crate::css::property::PropertyId::BorderRightStyle),
+                            ),
+                        ]
+                        .iter()
+                        .filter_map(|(pid, style_pid)| used_h_inset(cs, *pid, *style_pid, &rctx))
+                        .sum();
+                        declared.push((d, inset));
+                    }
+                }
+                let cols = crate::layout::table_column_template(tw, &declared, n_cols);
+                if self
+                    .table_cols
+                    .get(&table)
+                    .is_some_and(|prev| *prev == cols)
+                {
+                    continue;
+                }
+                let template: Vec<_> = cols
+                    .iter()
+                    .map(|&px| {
+                        taffy::style::GridTemplateComponent::Single(taffy::style_helpers::length(
+                            px,
+                        ))
+                    })
+                    .collect();
+                for r in &rows {
+                    let Some(&rtid) = self.taffy_node.get(r) else {
+                        continue;
+                    };
+                    let Ok(mut rs) = self.taffy.style(rtid).cloned() else {
+                        continue;
+                    };
+                    rs.grid_template_columns = template.clone();
+                    let _ = self.taffy.set_style(rtid, rs);
+                }
+                self.table_cols.insert(table, cols);
+                changed = true;
+            }
+            if !changed {
+                return;
+            }
+            if let Some(root) = self.taffy_root {
+                let _ = self.taffy.compute_layout(
+                    root,
+                    taffy::prelude::Size {
+                        width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                        height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                    },
+                );
+            }
+        }
+    }
+
     fn restyle(&mut self) {
         self.styles.clear();
         self.span_styles.clear();
         self.parents.clear();
         self.wrap_widths.clear();
         self.calc_deferred.clear();
+        self.tables.clear();
+        self.table_cols.clear();
         #[cfg(feature = "text")]
         self.min_measures.clear();
         let root = self.tree.root();
@@ -1187,6 +1309,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             &self.media,
             parent_style.as_ref(),
         );
+        // ②table：display:table 节点登记（settle_tables 按表内容宽结算列模板）。
+        if cs.display() == crate::css::property::Display::Table {
+            self.tables.push(id);
+        }
         // T5c：span 级联求解——以节点基样式为 parent，复用 compute_node（空临时树）
         let spans = self.tree.node(id).spans.clone();
         let text_len = self
@@ -1272,6 +1398,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     taffy::prelude::Dimension::length(*h)
                 },
             };
+        }
+        // ②table：单元格宽度交列模板（映射后覆写）——首行声明宽已折入模板，
+        // 单元格一律拉伸至列宽（CSS 单元格 % 基准为表宽而非列宽；v1 契约：
+        // 模板唯一权威，单元格自身 width 声明不直接生效）。
+        if parent_style
+            .as_ref()
+            .is_some_and(|p| p.display() == crate::css::property::Display::TableRow)
+        {
+            ts.size.width = taffy::prelude::Dimension::auto();
         }
         if let Some(&tid) = self.taffy_node.get(&id) {
             let _ = self.taffy.set_style(tid, ts);
@@ -1601,6 +1736,57 @@ mod tests {
         assert_eq!(p1.width, 110.0, "一级链 1 遍结算");
         let p2 = frame.find(Key(3)).unwrap();
         assert_eq!(p2.width, 65.0, "二级链经第 2 遍结算收敛");
+    }
+
+    #[test]
+    fn table_two_stage_column_settlement() {
+        // 二期②：table→块容器、row→单行 Grid（共享列模板）、cell→Grid 项；
+        // settle_tables 以表内容宽结算列模板（150 定宽 + 50% + auto 均分），
+        // 第二遍重排后各单元格宽度/列位与 CSS 表模型一致。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "tab { display: table; width: 600px } \
+             row { display: table-row } \
+             ca { display: table-cell; width: 150px } \
+             cb { display: table-cell; width: 50% } \
+             cc { display: table-cell }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("tab")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("row")).is_ok());
+        for (parent, k, name) in [
+            (Key(2), Key(4), "ca"),
+            (Key(2), Key(5), "cb"),
+            (Key(2), Key(6), "cc"),
+            (Key(3), Key(7), "ca"),
+            (Key(3), Key(8), "cb"),
+            (Key(3), Key(9), "cc"),
+        ] {
+            assert!(engine.insert(Some(parent), k, mk(name)).is_ok());
+        }
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let row1 = frame.find(Key(2)).unwrap();
+        assert_eq!(row1.width, 600.0, "行宽=表内容宽");
+        let w = |k: Key| frame.find(k).unwrap().width;
+        let x = |k: Key| frame.find(k).unwrap().x;
+        assert_eq!(w(Key(4)), 150.0, "定宽列");
+        assert_eq!(w(Key(5)), 300.0, "50% 列 = 表内容宽×0.5");
+        assert_eq!(w(Key(6)), 150.0, "auto 列均分剩余");
+        assert_eq!(w(Key(7)), 150.0, "第二行共享模板");
+        assert_eq!(w(Key(8)), 300.0);
+        assert_eq!(w(Key(9)), 150.0);
+        assert_eq!(x(Key(4)), 0.0);
+        assert_eq!(x(Key(5)), 150.0);
+        assert_eq!(x(Key(6)), 450.0, "列位随模板推进");
+        // 稳态帧：模板缓存全等 → 不再触发额外重排（幂等）。
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let frame3 = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert_eq!(frame3.find(Key(5)).unwrap().width, 300.0);
     }
 
     #[test]

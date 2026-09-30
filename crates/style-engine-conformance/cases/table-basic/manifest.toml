@@ -1,0 +1,8 @@
+# 表格两阶段布局（二期②）：定宽表 600px、列型=定宽 150px + 50% + auto
+# 均分剩余（150px）、双行共享列模板、单元格 padding 8px——验收匿名表结构
+# 映射（表=块容器/行=单行 Grid/单元格=Grid 项）与 settle_tables 列模板结算。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = ["DejaVu Sans=crates/style-engine-demo/assets/fonts/DejaVuSans.ttf"]
+features = ["table", "background-color", "text", "line-height-normal"]
+tolerance = 0.5

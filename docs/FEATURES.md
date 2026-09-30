@@ -14,6 +14,7 @@
 - 第二 Sink（第五批㉛，契约验证）：`crates/style-engine-soft`——DisplayList 的纯软件绘制后端（零 GPU、零运行时第三方依赖，纯标准库光栅化；测试侧 peniko 仅用于构造输入色值），验证 sink 无关性这一核心架构承诺；合成语义与 ㉕ 探针对齐（sRGB 编码值直接 src-over=vello/Chromium 一致；渐变停点 sRGB 插值=CSS 默认）；v0 覆盖矩阵——FillRect（椭圆圆角逐像素覆盖）/Gradient（linear 角度+radial RadialGeom 椭圆；停点色仅 Absolute、位置 Px/Percent、None 自动均布）/Shadow（平移半透明矩形近似=与 vello MVP 同偏差，inset 与盒求交）/Image（最近邻）/Border（直边带，Dashed/Dotted 近似实线）/PushClip·PopClip（矩形+圆角裁剪栈）/PushOpacity·PopOpacity（有界组 alpha 快照回混，ADR-0008）/PushScroll·PopScroll（平移折叠嵌套累加）；v0 跳过——Transform 层与 Text（需 shaping=与 vello MVP 同注），未识别 op 忽略（非穷举演进契约）；6 项锁定测试含 ㉕ 交叉验证（红底+50% 白罩 → G=128 与 vello 实测同值——双 sink 合成一致性实证）与线性渐变逐像素精确值（t=1/16→16、t=15/16→239）
 - 级联：三 Origin 双键排序（normal 升序 Default < Stylesheet < Inline；important 升序 Stylesheet < Inline < Default；含 !important 交织用例，以浏览器为基准验证）
 - 布局：taffy 0.14 可用面 = flex / grid / block、absolute / relative 定位、min/max/aspect-ratio、gap、overflow 裁剪
+- 表格布局（二期②）：display:table/table-row/table-cell v1——表映射块容器、行映射单行 taffy Grid（列模板由结算期回写）、单元格映射 Grid 项拉伸至列宽；两阶段列宽结算（engine.rs settle_tables，settle_calc 同模式）：首遍布局得表内容宽后按首行单元格声明宽（定宽 px/百分比/auto）+ 单元格水平内缩（padding+border）经 layout::table_column_template 计算像素列模板，回写各行 grid_template_columns 并重排，上限 2 遍（嵌套表外层先行），全等缓存免重排（稳态帧零额外 pass）；浏览器语义对齐（Chromium 153.0.8010.12 实测，conformance table-basic 9 盒零超差）：Length 声明=content-box（列贡献=px+内缩）、百分比声明=border-box（列=p×表内容宽，不追加内缩——单元格百分比宽的已知非对称行为）、auto=均分剩余（CSS 规范按内容 max-content 比例分配，v1 记偏差；单 auto 列时与规范一致）；v1 边界：良构标记（table>row>cell 直系）、无 colspan/rowspan、行组/caption/匿名盒生成未做（此类标记回退块流语义）；锁定测试 table_column_template 4 项（含 Chromium 语义混合列 166/300/134）+ table_two_stage_column_settlement（两遍收敛稳态免重排）
 - 绘制：背景色、线性/径向渐变（sink 内 stop 加密对齐 sRGB 插值）、圆角、边框、阴影、opacity、图片、圆角矩形 clip
 - 文本：单 style run、断行、字体注册与基础 fallback（测量内置，见 ADR-0006）
 - 状态与动画：StateFlags、transition（可插值属性子集）
@@ -26,7 +27,7 @@
 
 ## T2 — 暂缓（记录重估条件）
 
-sticky / fixed（依赖滚动语义的完整所有权，滚动偏移已按 ADR-0005 归宿主，重估时补滚动容器模型）、float、table 布局、multi-column（taffy 无对应算法）、打印
+sticky / fixed（依赖滚动语义的完整所有权，滚动偏移已按 ADR-0005 归宿主，重估时补滚动容器模型）、float、multi-column（taffy 无对应算法）、打印
 - git-lfs（第五批㉗暂缓，记录重估条件）：字体基准资产（NotoSansSC.ttf/DejaVuSans.ttf 等 demo+conformance 双侧共享）暂以普通 git 对象入库；重估条件=仓库二进制总量显著增长（如新增多字重字体族/图片基准资产）或克隆体积成为协作痛点——届时迁 LFS 需同步改 CI checkout（lfs: true）与 dumper 路径无差（file 语义不变）
 
 ## MVP 实现偏差核对（T4/T6 落地后现状；分级冻结见各条【】标注）

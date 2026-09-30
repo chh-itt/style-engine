@@ -371,6 +371,13 @@ pub enum Display {
     Flex,
     Grid,
     None,
+    /// 二期②：display:table——映射为块容器（行=行级 Grid 纵向堆叠），
+    /// 列模板由引擎布局期结算（settle_tables）。
+    Table,
+    /// display:table-row——映射为单行 taffy Grid，列模板自所属表结算共享。
+    TableRow,
+    /// display:table-cell——映射为 Grid 项（块），宽度交列模板（拉伸）。
+    TableCell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -699,6 +706,11 @@ pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             "block" | "inline" | "inline-block" | "flow-root" => Display::Block,
             "flex" | "inline-flex" => Display::Flex,
             "grid" | "inline-grid" => Display::Grid,
+            // 二期②：表格三核心值（inline-table 归一 Block 级语义，同⑧契约）；
+            // 行组/列组/caption 未解析（容错回退初始值，v1 偏差记录）。
+            "table" | "inline-table" => Display::Table,
+            "table-row" => Display::TableRow,
+            "table-cell" => Display::TableCell,
             "none" => Display::None,
             _ => return None,
         ))

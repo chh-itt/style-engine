@@ -1,0 +1,12 @@
+/* 表格两阶段布局（二期②）：表→块容器、行→单行 Grid（共享列模板）、
+   单元格→Grid 项拉伸至列宽；列宽 = 定宽 150 + 50%（300）+ auto（150）。 */
+/* 注意：fixture 树只有 div 节点（run_case 从 case.html div 构建，无 body 元素），
+   font-family 必须放在类选择器上（.table 继承到行/单元格），两侧才对称；
+   body{margin:0} 仅浏览器侧生效（引擎默认 margin 即 0）。 */
+body { margin: 0; }
+.table { display: table; width: 600px; font-family: "DejaVu Sans"; font-size: 16px; }
+.row { display: table-row; }
+.cell { display: table-cell; padding: 8px; }
+.a { width: 150px; background-color: #0ea5e9; }
+.b { width: 50%; background-color: #f59e0b; }
+.c { background-color: #10b981; }

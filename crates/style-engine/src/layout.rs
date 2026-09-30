@@ -219,6 +219,11 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             crate::css::property::Display::Flex => taffy::prelude::Display::Flex,
             crate::css::property::Display::Grid => taffy::prelude::Display::Grid,
             crate::css::property::Display::None => taffy::prelude::Display::None,
+            // 二期②表格三值：表=块容器（行级 Grid 纵向堆叠）、行=单行 Grid
+            // （列模板由引擎 settle_tables 结算回写）、单元格=Grid 项。
+            crate::css::property::Display::Table => taffy::prelude::Display::Block,
+            crate::css::property::Display::TableRow => taffy::prelude::Display::Grid,
+            crate::css::property::Display::TableCell => taffy::prelude::Display::Block,
         },
         position: match cs.position() {
             crate::css::property::Position::Static | crate::css::property::Position::Relative => {
@@ -402,6 +407,48 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
     }
 }
 
+/// ②table v1 列宽分配（像素列宽序列，settle_tables 消费）：
+/// 定宽照抄、百分比按表内容宽解析、auto 均分剩余（CSS 规范按内容
+/// max-content 比例分配——v1 偏差：等分；单 auto 列时与规范一致）。
+/// 剩余为负时 auto 取 0；声明列数不足 n_cols 以 auto 补齐。
+/// 浏览器语义（Chromium 153 实测对齐）：Length 声明 = content-box，
+/// 列贡献 = px + 单元格水平内缩（padding+border）；Percent 声明 =
+/// border-box（列宽 = p×表内容宽，不追加内缩——单元格百分比宽的
+/// 已知非对称行为）。Auto 列取剩余 border-box 宽。
+/// 注：taffy 0.14 Dimension 为 CompactLength 编码结构体（非枚举），
+/// 分类用 is_auto/into_option/value。
+pub fn table_column_template(
+    table_content_width: f32,
+    declared: &[(taffy::prelude::Dimension, f32)],
+    n_cols: usize,
+) -> Vec<f32> {
+    let mut cols: Vec<(taffy::prelude::Dimension, f32)> =
+        vec![(taffy::prelude::Dimension::auto(), 0.0); n_cols.max(declared.len())];
+    for (slot, d) in cols.iter_mut().zip(declared.iter()) {
+        *slot = *d;
+    }
+    let mut used = 0.0f32;
+    let mut autos = 0usize;
+    for (d, inset) in &cols {
+        if let Some(px) = d.into_option() {
+            used += px + inset;
+        } else if d.is_auto() {
+            autos += 1;
+        } else {
+            used += d.value() * table_content_width;
+        }
+    }
+    let share = ((table_content_width - used) / autos as f32).max(0.0);
+    cols.into_iter()
+        .map(|(d, inset)| match d.into_option() {
+            // Length 列 = 声明 px + 内缩（单元格 border-box，Chromium 语义）。
+            Some(px) => px + inset,
+            None if d.is_auto() => share,
+            None => d.value() * table_content_width,
+        })
+        .collect()
+}
+
 /// 轨道项 → taffy GridTemplateComponent（repeat 展开为重复计数）。
 fn grid_component<S: taffy::style::CheapCloneStr>(
     ts: &crate::css::property::TrackSize,
@@ -542,5 +589,56 @@ fn map_overflow(o: crate::css::property::Overflow) -> taffy::Overflow {
         O::Hidden => taffy::Overflow::Hidden,
         O::Clip => taffy::Overflow::Clip,
         O::Scroll => taffy::Overflow::Scroll,
+    }
+}
+
+#[cfg(test)]
+mod table_template_tests {
+    use super::table_column_template;
+    use taffy::prelude::Dimension;
+
+    #[test]
+    fn fixed_percent_auto_mix() {
+        // Chromium 153 实测语义（conformance table-basic 同构）：Length
+        // 声明 content-box——贡献 = px + 内缩（150+16=166）；Percent
+        // 声明 border-box——列 = p×表宽（300，不追加内缩）；auto 取剩余
+        // border-box（134）。
+        let cols = table_column_template(
+            600.0,
+            &[
+                (Dimension::length(150.0), 16.0),
+                (Dimension::percent(0.5), 0.0),
+                (Dimension::auto(), 0.0),
+            ],
+            3,
+        );
+        assert_eq!(cols, vec![166.0, 300.0, 134.0]);
+    }
+
+    #[test]
+    fn auto_only_splits_equally() {
+        let cols = table_column_template(
+            600.0,
+            &[(Dimension::auto(), 0.0), (Dimension::auto(), 0.0)],
+            2,
+        );
+        assert_eq!(cols, vec![300.0, 300.0]);
+    }
+
+    #[test]
+    fn negative_remainder_clamps_auto_to_zero() {
+        let cols = table_column_template(
+            600.0,
+            &[(Dimension::length(700.0), 0.0), (Dimension::auto(), 0.0)],
+            2,
+        );
+        assert_eq!(cols, vec![700.0, 0.0]);
+    }
+
+    #[test]
+    fn missing_declarations_pad_as_auto() {
+        // 首行 1 列声明、后续行共 3 列：补齐 auto 均分。
+        let cols = table_column_template(600.0, &[(Dimension::length(150.0), 0.0)], 3);
+        assert_eq!(cols, vec![150.0, 225.0, 225.0]);
     }
 }
