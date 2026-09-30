@@ -1,0 +1,7 @@
+/* calc() 布局直通探针：.a 纯长度 calc（两侧一致 150px）；.b 含百分比
+   calc（Chromium 原生求值 = root 内容宽 780×50% + 10 = 400px；引擎按
+   0 折算 = 10px——偏差由 xfail 资产钉死，见 manifest 注）。 */
+body { margin: 0; }
+.root { padding: 10px; background-color: #222222; }
+.a { width: calc(100px + 50px); height: 30px; background-color: #bb0000; }
+.b { width: calc(50% + 10px); height: 30px; background-color: #005500; }

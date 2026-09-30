@@ -1,0 +1,9 @@
+# 结构伪类选择器布局用例（第五批㉓）：:first-child/:nth-child(odd)/
+# :nth-child(3)/:last-child 驱动宽高差——引擎侧选择器子集与 Chromium
+# 逐盒一致（⑮ 落地后收敛；同特异性先后序级联覆盖同步验证）。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["nth-child", "first-last-child", "auto-fill-width", "cascade-order"]
+xfail = false
+tolerance = 0.5

@@ -1,0 +1,11 @@
+<!-- fixture 子集（ADR-0003 输入中立性）：仅 div[class][data-key] 嵌套；
+     data-key 为引擎/浏览器两侧共享的盒标识。case.html + case.css 即完整输入。 -->
+<!doctype html>
+<html>
+<head>
+<link rel="stylesheet" href="case.css">
+</head>
+<body>
+<div class="root" data-key="1"><div class="a" data-key="2"></div><div class="b" data-key="3"></div></div>
+</body>
+</html>

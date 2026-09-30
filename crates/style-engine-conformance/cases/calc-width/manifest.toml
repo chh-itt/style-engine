@@ -1,0 +1,10 @@
+# calc() 布局直通用例（第五批⑤）：.a 纯长度 calc 两侧一致；.b 含百分比
+# calc 布局期引擎按 0 折算（taffy 0.14 TaffyTree::resolve_calc_value 默认
+# 0.0）——xfail 资产钉死该偏差（Chromium 原生求值 50%+10px），转正条件
+# = 自定义 LayoutPartialTree 或 taffy 上游暴露 resolver 注入点。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["calc", "calc-percent"]
+xfail = true
+tolerance = 0.5

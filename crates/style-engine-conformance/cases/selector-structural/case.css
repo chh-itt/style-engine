@@ -1,0 +1,10 @@
+/* 结构伪类驱动布局：四个同参行盒由 :first-child/:nth-child(odd)/
+   :nth-child(3)/:last-child 分别取得不同宽（与 root 内容宽 780 对照）；
+   同特异性规则按源序覆盖（nth-child(3) 后于 odd 声明 → 420 胜出）。 */
+body { margin: 0; }
+.root { padding: 10px; background-color: #222222; }
+.row { height: 30px; background-color: #005500; }
+.row:first-child { margin-top: 12px; }
+.row:nth-child(odd) { width: 300px; }
+.row:nth-child(3) { width: 420px; }
+.row:last-child { width: 260px; background-color: #555500; }
