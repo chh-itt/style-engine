@@ -80,6 +80,8 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     auto_text: std::collections::HashSet<NodeId>,
     /// 文本叶测量所用换行约束（T5c-2）：绘制与测量折行一致；缺席 = 无界。
     wrap_widths: HashMap<NodeId, Option<f32>>,
+    /// 背景图注册表（第五批⑨）：url() 引用 → 宿主预解码 RGBA。
+    images: HashMap<String, crate::paint::ImageRes>,
     /// 文本叶最小内容尺寸（T5d，shrink-to-fit 下限；restyle 期随自动测量产出）。
     #[cfg(feature = "text")]
     min_measures: HashMap<NodeId, (f32, f32)>,
@@ -125,6 +127,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             #[cfg(feature = "text")]
             auto_text: std::collections::HashSet::new(),
             wrap_widths: HashMap::new(),
+            images: HashMap::new(),
             #[cfg(feature = "text")]
             min_measures: HashMap::new(),
             intrinsics: HashMap::new(),
@@ -817,6 +820,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 env: &self.media,
                 spans: &self.span_styles,
                 wrap_widths: &self.wrap_widths,
+                images: &self.images,
             },
             self.tree.root(),
             self.generation,
@@ -893,6 +897,28 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.text.add_font(data);
         self.dirty_style = true;
         self.dirty_struct = true;
+    }
+
+    /// 注册背景图（第五批⑨）：background-image: url(ref) 引用 → 宿主
+    /// 预解码 RGBA（零副作用——引擎不取 URL、不解码位图格式）；注册于
+    /// 样式表设置前后皆可，未注册引用绘制期告警跳过；仅影响绘制
+    /// （DisplayList 每帧重建，无需脏标）。
+    pub fn add_image(&mut self, reference: &str, width: u32, height: u32, rgba: Vec<u8>) {
+        debug_assert_eq!(
+            width as usize * height as usize * 4,
+            rgba.len(),
+            "image rgba buffer must be width*height*4"
+        );
+        let buf: std::sync::Arc<dyn std::convert::AsRef<[u8]> + Send + Sync> =
+            std::sync::Arc::new(rgba);
+        self.images.insert(
+            reference.to_string(),
+            crate::paint::ImageRes {
+                width,
+                height,
+                rgba: buf,
+            },
+        );
     }
 
     fn restyle_node(&mut self, id: NodeId, parent_id: Option<NodeId>) {

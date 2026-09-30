@@ -58,6 +58,19 @@ pub enum PaintOp {
         /// 内阴影（盒内反转填充）。
         inset: bool,
     },
+    /// 背景图（第五批⑨）：宿主预解码 RGBA（零副作用——引擎不取 URL，
+    /// 引用经 add_image 注册）；源尺寸与像素自带（DisplayList 自足）。
+    Image {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        /// 每角 (横, 纵) 圆角（第五批⑪序）——sink 据此决定是否裁剪。
+        radius: [f32; 8],
+        source_w: u32,
+        source_h: u32,
+        pixels: ImageRes,
+    },
     /// 边框（四边独立：top/right/bottom/left；style none 或 width 0 的边由 sink 忽略）。
     Border {
         x: f32,
@@ -160,6 +173,45 @@ pub struct DisplayList {
     pub generation: u64,
 }
 
+/// 宿主注册的背景图（第五批⑨）：预解码 RGBA（引擎不取 URL、不解码位图
+/// 格式——零副作用）；DisplayList 自足携带像素。rgba 以
+/// `Arc<dyn AsRef<[u8]>>` 承载（peniko Blob 同型，免去去size化转换）。
+pub struct ImageRes {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: std::sync::Arc<dyn std::convert::AsRef<[u8]> + Send + Sync>,
+}
+
+impl std::fmt::Debug for ImageRes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ImageRes({}x{}, bytes={})",
+            self.width,
+            self.height,
+            self.rgba.as_ref().as_ref().len()
+        )
+    }
+}
+
+impl Clone for ImageRes {
+    fn clone(&self) -> Self {
+        Self {
+            width: self.width,
+            height: self.height,
+            rgba: std::sync::Arc::clone(&self.rgba),
+        }
+    }
+}
+
+impl PartialEq for ImageRes {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && std::sync::Arc::ptr_eq(&self.rgba, &other.rgba)
+    }
+}
+
 /// 绘制输入上下文（树镜像 + 布局 + 滚动 + 环境）。
 pub struct PaintCtx<'a> {
     pub tree: &'a StyleTree,
@@ -171,6 +223,8 @@ pub struct PaintCtx<'a> {
     pub spans: &'a HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
     /// 文本叶测量所用换行约束（T5c-2）：缺席 = 无界 / 宿主测量。
     pub wrap_widths: &'a HashMap<NodeId, Option<f32>>,
+    /// 背景图注册表（第五批⑨）：url() 引用 → 宿主预解码 RGBA。
+    pub images: &'a HashMap<String, ImageRes>,
 }
 
 /// 构建绘制清单（树序遍历；布局按节点给出 border-box）。
@@ -349,6 +403,45 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 gradient: resolved,
                 radial,
             });
+        }
+        Some(DeclValue::BackgroundImage(BackgroundImage::Url(reference))) => {
+            // 第五批⑨背景图：url() 引用 → 宿主 add_image 注册表解析；
+            // 未注册引用告警跳过（零副作用——引擎不取 URL 不解码）。
+            // MVP 语义：拉伸至 padding box、无 repeat/size 语义。
+            match ctx.images.get(reference) {
+                Some(img) => {
+                    let clipped = radius.iter().any(|r| *r > 0.0);
+                    if clipped {
+                        out.ops.push(PaintOp::PushClip {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                            radius,
+                        });
+                    }
+                    out.ops.push(PaintOp::Image {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                        radius,
+                        source_w: img.width,
+                        source_h: img.height,
+                        pixels: img.clone(),
+                    });
+                    if clipped {
+                        out.ops.push(PaintOp::PopClip);
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        target: "style_engine::css",
+                        reference = reference.as_str(),
+                        "background-image url not registered; skipped"
+                    );
+                }
+            }
         }
         _ => {
             let bg = resolve_color(&style.background_color(), style, env);
@@ -743,6 +836,7 @@ mod tests {
         let mut layout = HashMap::new();
         layout.insert(id, (10.0, 20.0, 100.0, 50.0));
         let mut out = DisplayList::default();
+        let images: HashMap<String, ImageRes> = HashMap::new();
         let ctx = PaintCtx {
             tree,
             styles: &styles,
@@ -751,6 +845,7 @@ mod tests {
             env: &MediaEnv::default(),
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
+            images: &images,
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
@@ -867,6 +962,7 @@ mod tests {
         layout.insert(b, (110.0, 0.0, 100.0, 100.0));
         layout.insert(c, (210.0, 0.0, 100.0, 100.0));
         let mut out = DisplayList::default();
+        let images: HashMap<String, ImageRes> = HashMap::new();
         let ctx = PaintCtx {
             tree: &tree,
             styles: &styles,
@@ -875,6 +971,7 @@ mod tests {
             env: &env,
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
+            images: &images,
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望顺序：b(z0,x=110) → c(z1,x=210) → a(z2,x=10)；根无背景不产生 FillRect
@@ -927,6 +1024,7 @@ mod tests {
             layout.insert(*id, (10.0 + i as f32 * 100.0, 0.0, 100.0, 100.0));
         }
         let mut out = DisplayList::default();
+        let images: HashMap<String, ImageRes> = HashMap::new();
         let ctx = PaintCtx {
             tree: &tree,
             styles: &styles,
@@ -935,6 +1033,7 @@ mod tests {
             env: &env,
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
+            images: &images,
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望：n1(Neg) → n2(Flow) → n3(auto) → n5(faded) → n4(z2)
@@ -1140,6 +1239,59 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn background_image_op() {
+        // 第五批⑨：url() → 注册表解析 → Image op（源尺寸/像素自足）；
+        // 未注册引用 → 告警跳过（无 op）
+        let (tree, id, style) = setup("background-image: url(res://hero)", None);
+        let mut images: HashMap<String, ImageRes> = HashMap::new();
+        images.insert(
+            "res://hero".to_string(),
+            ImageRes {
+                width: 2,
+                height: 2,
+                rgba: std::sync::Arc::new(vec![255u8; 16]),
+            },
+        );
+        let mut styles = HashMap::new();
+        styles.insert(id, style);
+        let mut layout = HashMap::new();
+        layout.insert(id, (10.0, 20.0, 100.0, 50.0));
+        let mut out = DisplayList::default();
+        let ctx = PaintCtx {
+            tree: &tree,
+            styles: &styles,
+            layout: &layout,
+            scroll: &HashMap::new(),
+            env: &MediaEnv::default(),
+            spans: &HashMap::new(),
+            wrap_widths: &HashMap::new(),
+            images: &images,
+        };
+        build_display_list(&ctx, id, 1, &mut out);
+        match &out.ops[0] {
+            PaintOp::Image {
+                x,
+                y,
+                width,
+                height,
+                source_w,
+                source_h,
+                pixels,
+                ..
+            } => {
+                assert_eq!((*x, *y, *width, *height), (10.0, 20.0, 100.0, 50.0));
+                assert_eq!((*source_w, *source_h), (2, 2));
+                assert_eq!(pixels.width, 2);
+            }
+            other => panic!("{other:?}"),
+        }
+        // 未注册引用 → 无 Image op（背景纯色臂接管→透明→零 op）
+        let (tree, id, style) = setup("background-image: url(res://missing)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        assert!(out.ops.is_empty(), "{:?}", out.ops);
     }
 
     #[test]

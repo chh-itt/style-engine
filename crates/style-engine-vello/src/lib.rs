@@ -515,6 +515,50 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 state.effective(),
             );
         }
+        PaintOp::Image {
+            x,
+            y,
+            width,
+            height,
+            radius,
+            source_w,
+            source_h,
+            pixels,
+        } => {
+            // 第五批⑨背景图：拉伸至盒（MVP 语义，无 repeat/size）；圆角
+            // 非零时先推裁剪层。vello 以 peniko::Image（Rgba8）直绘，
+            // 仿射=平移到盒原点后按盒/源比例缩放。
+            let clip_it = radius.iter().any(|r| *r > 0.0);
+            if clip_it {
+                let clip = rect_shape(
+                    *x + state.offset.x as f32,
+                    *y + state.offset.y as f32,
+                    *width,
+                    *height,
+                    *radius,
+                );
+                scene.push_layer(Fill::NonZero, Mix::Normal, 1.0, state.effective(), &clip);
+            }
+            // peniko 0.6：ImageData.data = Blob<u8>（Blob 内部为
+            // Arc<dyn AsRef<[u8]> + Send + Sync>——ImageRes.rgba 同型直通）
+            let brush = vello::peniko::ImageBrush::new(vello::peniko::ImageData {
+                data: vello::peniko::Blob::new(std::sync::Arc::clone(&pixels.rgba)),
+                format: vello::peniko::ImageFormat::Rgba8,
+                alpha_type: vello::peniko::ImageAlphaType::Alpha,
+                width: *source_w,
+                height: *source_h,
+            });
+            let sx = f64::from(*width) / f64::from(*source_w).max(1.0);
+            let sy = f64::from(*height) / f64::from(*source_h).max(1.0);
+            let xform = Affine::translate((
+                f64::from(*x) + state.offset.x,
+                f64::from(*y) + state.offset.y,
+            )) * Affine::scale_non_uniform(sx, sy);
+            scene.draw_image(&brush, xform);
+            if clip_it {
+                scene.pop_layer();
+            }
+        }
         PaintOp::Text { .. } => {
             // 偏差：字形 run 随 T5 落地
         }
