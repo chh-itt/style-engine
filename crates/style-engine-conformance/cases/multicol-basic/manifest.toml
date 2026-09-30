@@ -1,0 +1,6 @@
+# 多列布局（二期③）：column-count:2 + gap 20px 平衡填充分配——验收幻影列
+# 结算（settle_columns）、理想高贪心平衡与列位/列宽（(600−20)/2=290）。
+viewport = [800.0, 600.0]
+scale = 1.0
+features = ["multicol", "column-count", "column-gap", "background-color"]
+tolerance = 0.5

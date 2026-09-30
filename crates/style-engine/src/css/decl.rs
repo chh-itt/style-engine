@@ -9,8 +9,8 @@
 
 use crate::css::property::{
     BorderStyle, DeclValue, PropertyId, parse_border_style, parse_border_width, parse_color,
-    parse_declaration, parse_flex_direction, parse_flex_wrap, parse_len, parse_len_auto,
-    parse_overflow,
+    parse_column_count, parse_declaration, parse_flex_direction, parse_flex_wrap, parse_len,
+    parse_len_auto, parse_overflow,
 };
 use crate::css::value::{ColorValue, LengthPercentage, ValResult, parse_number};
 use crate::error::ParseReport;
@@ -319,6 +319,7 @@ fn shorthand_exists(name: &str) -> bool {
             | "inset"
             | "overflow"
             | "gap"
+            | "columns"
             | "animation"
             | "border-radius"
             | "border-width"
@@ -442,6 +443,44 @@ fn expand_shorthand(
             let row = parse_len(p)?;
             let col = p.try_parse(parse_len).unwrap_or(row.clone());
             vec![(P::RowGap, row), (P::ColumnGap, col)]
+        }
+        "columns" => {
+            // 二期③multi-column 简写：columns: <'column-width'> ||
+            // <'column-count'>（任一顺序、至少一项；未指定长手重置初始
+            // ——width→auto、count→auto）
+            let mut width: Option<Option<LengthPercentage>> = None;
+            let mut count: Option<Option<u16>> = None;
+            while !p.is_exhausted() {
+                let mut progressed = false;
+                if width.is_none() {
+                    if let Ok(v) = p.try_parse(parse_len_auto) {
+                        width = Some(as_len_auto(v).unwrap_or(None));
+                        progressed = true;
+                    }
+                }
+                if !progressed && count.is_none() {
+                    if let Ok(v) = p.try_parse(parse_column_count) {
+                        count = Some(match v {
+                            DeclValue::ColumnCount(c) => c,
+                            _ => None,
+                        });
+                        progressed = true;
+                    }
+                }
+                if !progressed {
+                    return Err(p.new_error_for_next_token());
+                }
+            }
+            if width.is_none() && count.is_none() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![
+                (P::ColumnWidth, DeclValue::LenAuto(width.unwrap_or(None))),
+                (
+                    P::ColumnCount,
+                    DeclValue::ColumnCount(count.unwrap_or(None)),
+                ),
+            ]
         }
         "animation" => {
             // 第五批⑰动画简写：单动画组 MVP——<time> 首现=duration、次现
@@ -939,6 +978,50 @@ mod tests {
         ));
         // flex-wrap 值族是 DeclValue::FlexWrap；此处只验证展开数量
         assert_eq!(b.decls.len(), 2);
+    }
+
+    #[test]
+    fn columns_shorthand_two_longhands() {
+        // 二期③columns 简写：<'column-width'> || <'column-count'> 任一顺序
+        // 至少一项；未指定长手重置初始（width→auto、count→auto）。
+        let (b, r) = block("columns: 2 300px");
+        assert!(r.is_clean());
+        assert_eq!(
+            b.decls.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![PropertyId::ColumnWidth, PropertyId::ColumnCount]
+        );
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::LenAuto(Some(LengthPercentage::Px(300.0)))
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ColumnCount(Some(2))
+        ));
+        // 反序：width 在后。
+        let (b, r) = block("columns: 300px 2");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::LenAuto(Some(LengthPercentage::Px(300.0)))
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ColumnCount(Some(2))
+        ));
+        // 单 auto → 两长手皆初始。
+        let (b, r) = block("columns: auto");
+        assert!(r.is_clean());
+        assert!(matches!(parsed(&b.decls[0]), DeclValue::LenAuto(None)));
+        assert!(matches!(parsed(&b.decls[1]), DeclValue::ColumnCount(None)));
+        // 仅 width → count 重置 auto。
+        let (b, r) = block("columns: 100px");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::LenAuto(Some(LengthPercentage::Px(100.0)))
+        ));
+        assert!(matches!(parsed(&b.decls[1]), DeclValue::ColumnCount(None)));
     }
 
     #[test]

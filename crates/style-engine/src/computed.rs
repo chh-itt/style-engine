@@ -95,6 +95,9 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         | P::Gap
         | P::RowGap
         | P::ColumnGap => DeclValue::Len(LengthPercentage::Px(0.0)),
+        // ③multi-column 初始：count/width 均 auto（缺席语义）
+        P::ColumnCount => DeclValue::ColumnCount(None),
+        P::ColumnWidth => DeclValue::LenAuto(None),
         P::FlexDirection => DeclValue::FlexDirection(FlexDirection::Row),
         P::FlexWrap => DeclValue::FlexWrap(FlexWrap::NoWrap),
         P::FlexGrow => DeclValue::Number(0.0),

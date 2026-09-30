@@ -1,0 +1,11 @@
+/* 多列布局（二期③）：column-count:2 + gap 20px 平衡填充分配——
+   列宽 =（600−20）/2 = 290；6 个等高块（30px）理想高贪心 → 每列 3 件；
+   列 1 x=0、列 2 x=310，容器高 = 3×30 = 90。 */
+/* 注意：fixture 树只有 div 节点（run_case 从 case.html div 构建，无 body 元素）；
+   body{margin:0} 仅浏览器侧生效（引擎默认 margin 即 0）。 */
+body { margin: 0; }
+.mc { column-count: 2; column-gap: 20px; width: 600px; }
+.it { height: 30px; }
+.a { background-color: #0ea5e9; }
+.b { background-color: #f59e0b; }
+.c { background-color: #10b981; }

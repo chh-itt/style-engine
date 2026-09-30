@@ -66,6 +66,12 @@ pub enum PropertyId {
     GridAutoFlow,
     GridAutoRows,
     GridAutoColumns,
+    /// 二期③multi-column：显式列数（auto|<integer≥1>）；无 count 时
+    /// column-width 声明即请求多列（列数布局期结算）。
+    ColumnCount,
+    /// 二期③multi-column：列理想宽（auto|<length>）——width 模式列数
+    /// n = max(1, ⌊(内容宽+gap)/(理想宽+gap)⌋)。
+    ColumnWidth,
     // 绘制
     BackgroundColor,
     BackgroundImage,
@@ -159,6 +165,8 @@ impl PropertyId {
         Self::GridAutoFlow,
         Self::GridAutoRows,
         Self::GridAutoColumns,
+        Self::ColumnCount,
+        Self::ColumnWidth,
         Self::BackgroundColor,
         Self::BackgroundImage,
         Self::BorderTopLeftRadius,
@@ -235,6 +243,8 @@ impl PropertyId {
             Self::Gap => "gap",
             Self::RowGap => "row-gap",
             Self::ColumnGap => "column-gap",
+            Self::ColumnCount => "column-count",
+            Self::ColumnWidth => "column-width",
             Self::FlexDirection => "flex-direction",
             Self::FlexWrap => "flex-wrap",
             Self::FlexGrow => "flex-grow",
@@ -342,6 +352,9 @@ pub enum DeclValue {
     /// z-index：auto → None（级联缺席等价；「有值且为 Some」是将来 ADR-0008
     /// 判定 stacking context 的依据），数字 → Some。
     ZIndex(Option<f32>),
+    /// column-count（二期③）：auto → None；<integer [1,∞]> → Some
+    /// （0/负/非整数为非法声明，解析期丢弃）。
+    ColumnCount(Option<u16>),
     // 动画描述符（第五批⑰）：不可动画、不参与 DeclValue 插值
     /// animation-name：none → None。
     AnimationName(Option<String>),
@@ -639,6 +652,21 @@ pub fn parse_len(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 
 pub fn parse_number_value(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_number(p).map(DeclValue::Number)
+}
+
+/// column-count（二期③）：auto → ColumnCount(None)；<integer [1,∞]> →
+/// ColumnCount(Some(n))（0/负/非整数为非法声明 → Err 丢弃）。
+pub fn parse_column_count(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) if id.eq_ignore_ascii_case("auto") => Ok(DeclValue::ColumnCount(None)),
+        Token::Number {
+            int_value: Some(n), ..
+        } if *n >= 1 => Ok(DeclValue::ColumnCount(Some(
+            (*n).min(u16::MAX as i32) as u16
+        ))),
+        _ => Err(p.new_error_for_next_token()),
+    }
 }
 
 /// z-index：auto → ZIndex(None)；数字 → ZIndex(Some(n))。
@@ -1661,7 +1689,8 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         | P::MarginTop
         | P::MarginRight
         | P::MarginBottom
-        | P::MarginLeft => {
+        | P::MarginLeft
+        | P::ColumnWidth => {
             // letter-spacing 的 normal → LenAuto(None)（0 尺寸）
             if matches!(id, P::LetterSpacing) {
                 len_auto_with(p, &["auto", "normal"]).map(DeclValue::LenAuto)
@@ -1673,15 +1702,17 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         | P::PaddingRight
         | P::PaddingBottom
         | P::PaddingLeft
-        | P::Gap
-        | P::RowGap
-        | P::ColumnGap
         | P::BorderTopLeftRadius
         | P::BorderTopRightRadius
         | P::BorderBottomRightRadius
         | P::BorderBottomLeftRadius => parse_corner_radius(p),
+        // gap 族（gap/row-gap/column-gap）：单一 <length-percentage> → Len；
+        // 不经 parse_corner_radius（其 Radius 值族无 gap 读者，会静默归零），
+        // `normal` 关键字同样被拒（multicol 语义 normal=1em 由声明缺席表达）。
+        P::Gap | P::RowGap | P::ColumnGap => parse_len(p),
         P::Opacity | P::FlexGrow | P::FlexShrink => parse_number_value(p),
         P::ZIndex => parse_z_index(p),
+        P::ColumnCount => parse_column_count(p),
         P::AnimationName => parse_animation_name(p),
         P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
         P::AnimationIterationCount => parse_iteration_count(p),

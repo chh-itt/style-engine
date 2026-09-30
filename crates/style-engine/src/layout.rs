@@ -213,7 +213,7 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
     let lp_auto = |id: PropertyId| cs.len_auto(id);
     let padding = cs.padding();
 
-    Style {
+    let mut ts = Style {
         display: match cs.display() {
             crate::css::property::Display::Block => taffy::prelude::Display::Block,
             crate::css::property::Display::Flex => taffy::prelude::Display::Flex,
@@ -404,6 +404,31 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
         grid_auto_rows: auto_tracks(cs.get(PropertyId::GridAutoRows), cs, env),
         grid_auto_columns: auto_tracks(cs.get(PropertyId::GridAutoColumns), cs, env),
         ..Style::default()
+    };
+    // ③multi-column：多列容器映射 taffy Flex Row——幻影列节点由
+    // settle_columns 布局期创建并承接真实子节点；column-gap 沿用上方
+    // gap 映射，缺席时按 multicol 语义 normal = 1em（flex/grid normal=0）。
+    if multicol_requested(cs) {
+        ts.display = taffy::prelude::Display::Flex;
+        ts.flex_direction = taffy::prelude::FlexDirection::Row;
+        if cs.get(PropertyId::ColumnGap).is_none() && cs.get(PropertyId::Gap).is_none() {
+            ts.gap.width = taffy::prelude::LengthPercentage::length(cs.font_size_px());
+        }
+    }
+    ts
+}
+
+/// ③multi-column 请求判定（map_style 与引擎登记共用）：column-count ≥2
+/// 显式多列；count 缺席/auto 时 column-width 声明即请求（列数布局期
+/// 结算，可能回退 1 列——引擎 deactivate 路径还原块流）。
+pub fn multicol_requested(cs: &ComputedStyle) -> bool {
+    match cs.get(PropertyId::ColumnCount) {
+        Some(DeclValue::ColumnCount(Some(n))) => *n >= 2,
+        Some(DeclValue::ColumnCount(None)) | None => matches!(
+            cs.get(PropertyId::ColumnWidth),
+            Some(DeclValue::LenAuto(Some(_)))
+        ),
+        _ => false,
     }
 }
 
