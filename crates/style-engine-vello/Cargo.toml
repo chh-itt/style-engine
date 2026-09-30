@@ -12,5 +12,8 @@ vello = { workspace = true }
 wgpu = { workspace = true }
 parley = { workspace = true }
 
+[dev-dependencies]
+pollster = "0.4"
+
 [lints]
 workspace = true

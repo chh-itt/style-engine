@@ -1,8 +1,9 @@
 //! `style-engine-vello` — style-engine DisplayList 的 Vello (wgpu) 绘制后端。
 //!
-//! ADR-0002：颜色为 sRGB 直传（vello 内部按线性混合，颜色空间语义由
-//! core 的 DisplayList 契约承接）；滚动偏移折叠为坐标平移；裁剪走
-//! vello 图层（Mix::Clip）。
+//! ADR-0002：颜色为 sRGB 直传（第五批㉕双预测探针实测：RGBA8Unorm 目标上
+//! vello 0.10 以 sRGB 编码值直接合成=G/CSS 默认，半透明叠加无色彩空间分歧；
+//! 宽色域/HDR 目标路径若引入线性合成需重测）；滚动偏移折叠为坐标平移；
+//! 裁剪走 vello 图层（Mix::Clip）。
 //!
 //! MVP 偏差（FEATURES.md 同步）：
 //! - Shadow 无模糊（vello 0.10 无内置高斯模糊），以半透明矩形近似；
@@ -14,6 +15,144 @@ use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point, Stroke, Vec2};
 use vello::peniko::color::{AlphaColor, Srgb};
 use vello::peniko::{Brush, Extend, Fill, Gradient, GradientKind, Mix, RadialGradientPosition};
+
+#[cfg(test)]
+mod tests {
+    //! ㉕ 色彩空间双预测探针（wgpu 离屏回读，64×64）：红底 + 50% 白罩
+    //! 全覆盖单像素。预测两档——
+    //!   sRGB 混合（Chromium/CSS 默认合成）：G = 0.5·0 + 0.5·255 = 127.5 → 127/128；
+    //!   线性混合：linear 0.5 → sRGB 编码 ≈ 187.5 → 187/188。
+    //! 实测分辨率（第五批㉕）：vello 0.10 render_to_texture 在 Rgba8Unorm
+    //! 目标上以 sRGB 编码值直接合成——实测 G=128 落 sRGB 档，与 Chromium/
+    //! CSS 默认一致，半透明叠加无色彩空间分歧（ADR-0002 旧注「vello 按
+    //! 线性混合」据此修正；宽色域/HDR 目标路径若引入线性合成需重测）。
+
+    use style_engine::StyleEngine;
+    use style_engine::tree::StyleNode;
+
+    #[test]
+    fn blend_space_srgb_matches_css_default() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
+        });
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))
+        else {
+            eprintln!("blend_space_linear_not_srgb: 无可用 GPU 适配器，环境受限跳过");
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("blend-probe"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        }))
+        .expect("device");
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("probe"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            // vello fine 阶段以 STORAGE_BINDING 直写目标纹理（非光栅化
+            // attachment），TEXTURE_BINDING 供内部 blit；COPY_SRC 供回读。
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        // 探针 DisplayList：引擎走完整管线（红根盒 + 白 50% 全覆盖子盒）
+        let mut engine: StyleEngine<u64> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "div { width: 64px; height: 64px; background-color: #ff0000 } \
+             .fg { width: 64px; height: 64px; background-color: rgba(255, 255, 255, 0.5) }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        engine.insert(None, 1, mk("div")).expect("root");
+        engine.insert(Some(1), 2, mk("div")).expect("child");
+        engine.set_classes(2, &["fg".to_string()]).expect("classes");
+        let frame = engine.frame((64.0, 64.0), 1.0, 0.0);
+        let mut scene = vello::Scene::new();
+        super::render_ops(&frame.paint, &mut scene);
+        let mut renderer =
+            vello::Renderer::new(&device, vello::RendererOptions::default()).expect("renderer");
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        renderer
+            .render_to_texture(
+                &device,
+                &queue,
+                &scene,
+                &view,
+                &vello::RenderParams {
+                    base_color: vello::peniko::color::AlphaColor::new([0.0, 0.0, 0.0, 1.0]),
+                    width: 64,
+                    height: 64,
+                    antialiasing_method: vello::AaConfig::Area,
+                },
+            )
+            .expect("render");
+        const BYTES_PER_ROW: u32 = 256; // 64px × 4B = 256（COPY 对齐）
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: BYTES_PER_ROW as u64 * 64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(BYTES_PER_ROW),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let data = slice.get_mapped_range();
+        let off = (32 * BYTES_PER_ROW + 32 * 4) as usize;
+        let (r, g, b) = (data[off], data[off + 1], data[off + 2]);
+        assert_eq!(data[off + 3], 255, "全覆盖后 alpha=255");
+        assert_eq!(r, 255, "红通道穿透（50% 白不降红）");
+        assert!(
+            (125..=130).contains(&g),
+            "sRGB 混合档 127/128（=Chromium/CSS 默认合成；线性混合档 187/188 未出现）实测 G={g}"
+        );
+        assert!((125..=130).contains(&b), "B 与 G 对称（白罩）实测 B={b}");
+    }
+}
 
 /// 将绘制清单写入 vello 场景（追加语义；调用方持有场景生命周期）。
 pub fn render_ops(list: &DisplayList, scene: &mut Scene) {
