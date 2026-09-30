@@ -7,7 +7,7 @@
 | Crate | 版本 | 层 | 角色 | 备注 |
 |---|---|---|---|---|
 | cssparser | 0.38.0 | L1 | CSS 词法/语法解析，错误恢复 | 2026-09-07 发布，MPL-2.0 |
-| cssparser-sel（package=cssparser） | 0.37.0 | L1 选择器 | selectors 0.40 的配对解析器；0.38 起解析器改单生命周期，二者类型不兼容，重命名依赖隔离于 src/selector.rs 内部（选择器预lude 以源文本形式跨界） | MPL-2.0 |
+| cssparser-sel（package=cssparser） | 0.37.0 | L1 选择器 | selectors 0.40 的配对解析器；0.38 起解析器改单生命周期，二者类型不兼容，重命名依赖隔离于 src/selector.rs 内部（选择器预lude 以源文本形式跨界）。**与 Cargo.toml/Cargo.lock 对齐核实（第五批①）：lock 中 cssparser 0.37.0 与 0.38.0 双版本共存为重命名依赖的预期形态，其余决定性依赖版本均与上表一致** | MPL-2.0 |
 | precomputed-hash | 0.1.1 | L1 选择器 | selectors 0.40 要求的选择器词哈希；SelString 包装实现（FNV-1a） | Apache-2.0/MIT |
 | selectors | 0.40.0 | L1 | 选择器解析/匹配/specificity | 需实现 SelectorImpl，MPL-2.0 |
 | color | 0.3.3 | L1 | CSS Color 4 颜色模型（oklch/color-mix）| linebender 出品 |
