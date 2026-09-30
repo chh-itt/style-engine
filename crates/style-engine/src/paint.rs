@@ -614,7 +614,14 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     //    Flow：in-flow 非定位、非 SC 触发（树序，含文本叶）；
     //    Pos：positioned（auto/0 树序在前、正 z 升序在后）+ 非定位 SC 触发者
     //    （opacity<1 或 transform ≠ none，键 0 树序——ADR-0008/0009）
-    //    残余偏差：flex/grid 子项的 z-index（无 position）不生效。
+    //    第五批㉑：flex/grid 子项的显式 z-index（≠ auto）无需 position——
+    //    与定位元素同等参与三带（CSS：flex/grid item 的 z-index ≠ auto
+    //    还创建 stacking context，按 ADR-0008 三带即可表达）
+    let is_flex_or_grid = matches!(
+        style.get(PropertyId::Display),
+        Some(DeclValue::Display(crate::css::property::Display::Flex))
+            | Some(DeclValue::Display(crate::css::property::Display::Grid))
+    );
     let mut neg: Vec<(f32, usize, NodeId)> = Vec::new();
     let mut flow: Vec<NodeId> = Vec::new();
     let mut pos: Vec<(f32, usize, NodeId)> = Vec::new();
@@ -623,14 +630,14 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             flow.push(*c);
             continue;
         };
-        let positioned = matches!(
-            cstyle.get(PropertyId::Position),
-            Some(DeclValue::Position(p)) if !matches!(p, crate::css::property::Position::Static)
-        );
         let z = match cstyle.get(PropertyId::ZIndex) {
             Some(DeclValue::ZIndex(Some(n))) => Some(*n),
             _ => None,
         };
+        let positioned = matches!(
+            cstyle.get(PropertyId::Position),
+            Some(DeclValue::Position(p)) if !matches!(p, crate::css::property::Position::Static)
+        ) || (is_flex_or_grid && z.is_some());
         let faded = matches!(
             cstyle.get(PropertyId::Opacity),
             Some(DeclValue::Number(n)) if *n < 1.0
@@ -933,6 +940,63 @@ mod tests {
         // 绝对定位锚：cx/cy 加盒子原点 (10, 20)
         let g = geom(RS::Ellipse, RZ::ClosestSide, 10.0, 20.0);
         assert!(near(g.cx, 20.0) && near(g.cy, 30.0));
+    }
+
+    #[test]
+    fn flex_grid_item_z_index_orders() {
+        // 第五批㉑：flex/grid 子项的显式 z-index 无需 position——与定位
+        // 元素同等参与三带排序（z=5 的 b 排到流带 a/c 之后）
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let mk = |extra: &str| StyleNode {
+            name: Some("div".into()),
+            declarations: crate::css::decl::parse_inline_declarations(&format!(
+                "background-color: #000001; {extra}"
+            ))
+            .0,
+            ..Default::default()
+        };
+        let a = tree.insert_child(root, mk(""));
+        let b = tree.insert_child(root, mk("z-index: 5"));
+        let c = tree.insert_child(root, mk(""));
+        // 父容器 = flex（子项判定基于父 display）
+        tree.node_mut(root).declarations =
+            crate::css::decl::parse_inline_declarations("display: flex").0;
+        let sheet = parse_stylesheet("");
+        let env = MediaEnv::default();
+        let mut styles = HashMap::new();
+        for id in [root, a, b, c] {
+            styles.insert(id, compute_node(&tree, id, &sheet, &env, None));
+        }
+        let mut layout = HashMap::new();
+        layout.insert(root, (0.0, 0.0, 310.0, 100.0));
+        layout.insert(a, (10.0, 0.0, 100.0, 100.0));
+        layout.insert(b, (110.0, 0.0, 100.0, 100.0));
+        layout.insert(c, (210.0, 0.0, 100.0, 100.0));
+        let mut out = DisplayList::default();
+        let images: HashMap<String, ImageRes> = HashMap::new();
+        let ctx = PaintCtx {
+            tree: &tree,
+            styles: &styles,
+            layout: &layout,
+            scroll: &HashMap::new(),
+            env: &env,
+            spans: &HashMap::new(),
+            wrap_widths: &HashMap::new(),
+            images: &images,
+        };
+        build_display_list(&ctx, root, 1, &mut out);
+        // 期望顺序：a(x=10) → c(x=210)（流带）→ b(x=110)（flex 子项 z=5 进
+        // Pos 带最后）；无 ㉑ 修复时 b 按树序落在 a/c 之间
+        let xs: Vec<f32> = out
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::FillRect { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs, vec![10.0, 210.0, 110.0], "{xs:?}");
     }
 
     #[test]
