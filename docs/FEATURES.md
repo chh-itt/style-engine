@@ -6,7 +6,7 @@
 
 - 语法层：真实 CSS 文本；选择器子集 = type / #id / class（class 属性为空格分隔 token，引擎归一）/ universal / 伪类（:hover :active :focus :disabled :checked）/ 结构伪类 :nth-child 系与 :first/:last/:only-child（selectors 兄弟遍历，天然支持）/ :is / :not / 属性选择器六操作符（第五批⑮：宿主经 StyleNode.attrs 供值——[attr] 存在即命中、[attr=v] 值匹配大小写敏感、~=/^=/$=/*= 全数支持，BTreeMap 确定序）/ 后代 / 子代 / 分组；简写展开（margin padding border background color font）；CSS 宽关键字（inherit/initial/unset/revert）；custom properties + var()
 - @media 子集：width/height、prefers-color-scheme、prefers-reduced-motion（条件值由 Environment 提供）；交互媒体特性 pointer/hover/any-pointer/any-hover（第五批⑱：MediaFeature 四变体 + MediaEnv 四字段（pointer: PointerKind{None,Coarse,Fine}、hover、any_pointer、any_hover——宿主每帧推送），any- 变体面向多输入设备独立评估）
-- 值与颜色：px/em/rem/%/vw/vh；calc() 基础四则；color crate 全谱（hex/rgb/hsl/oklch/color()/light-dark()）
+- 值与颜色：px/em/rem/%/vw/vh；calc() 基础四则（第五批⑤直通评估：值解析/嵌套/括号全解，paint/text 消费端 resolve_px 直通无偏差；布局端 calc 无百分比=正确解析、含百分比=映射期按 0 折算——taffy 0.14 原生 calc 为不透明指针运输层且 TaffyTree::resolve_calc_value 默认 0.0（taffy_tree.rs:387），真直通需自定义 LayoutPartialTree，偏差冻结+升级路径记录；锁定测试 calc_layout_resolution）；color crate 全谱（hex/rgb/hsl/oklch/color()/light-dark()）
 - 级联：三 Origin 双键排序（normal 升序 Default < Stylesheet < Inline；important 升序 Stylesheet < Inline < Default；含 !important 交织用例，以浏览器为基准验证）
 - 布局：taffy 0.14 可用面 = flex / grid / block、absolute / relative 定位、min/max/aspect-ratio、gap、overflow 裁剪
 - 绘制：背景色、线性/径向渐变（sink 内 stop 加密对齐 sRGB 插值）、圆角、边框、阴影、opacity、图片、圆角矩形 clip

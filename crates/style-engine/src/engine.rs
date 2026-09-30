@@ -1422,6 +1422,32 @@ mod tests {
     }
 
     #[test]
+    fn calc_layout_resolution() {
+        // 第五批⑤calc 直通评估：calc 无百分比 → resolve_px 全解（布局语义
+        // 正确）；calc 含百分比 → 布局映射期按 0 折算（taffy 0.14 的
+        // TaffyTree::resolve_calc_value 默认 0.0（taffy_tree.rs:387），原生
+        // calc = 不透明指针运输层——真直通需自定义 LayoutPartialTree 实现，
+        // 偏差冻结记录 FEATURES ⑤ 条）
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "div { width: calc(100px + 50px); height: 20px } \
+             p { width: calc(50% + 10px); height: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("div")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("p")).is_ok());
+        let frame = engine.frame((400.0, 100.0), 1.0, 0.0);
+        let d = frame.find(Key(1)).unwrap();
+        assert_eq!(d.width, 150.0, "纯长度 calc 应在布局期正确解析");
+        let p = frame.find(Key(2)).unwrap();
+        assert_eq!(p.width, 10.0, "含百分比 calc 布局期按 0 折算（偏差锁定）");
+    }
+
+    #[test]
     fn z_index_auto_not_materialized_as_number() {
         // z-index: auto → ZIndex(None)（不再物化为 Number(0)）；
         // 数字 → ZIndex(Some(n))，paint effective_z 仅认 Some。
