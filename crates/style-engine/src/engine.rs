@@ -2042,6 +2042,55 @@ mod tests {
     }
 
     #[test]
+    fn text_align_reaches_paint_op() {
+        // 第五批⑳：text-align 实际消费——测量不变宽（盒宽/折行与对齐无关），
+        // PaintOp::Text 携带声明值供 sink 折行后 align；默认 Start。
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let align_of = |css: &str| -> crate::css::property::TextAlign {
+            let mut engine: StyleEngine<Key> = StyleEngine::new();
+            assert!(
+                engine
+                    .set_stylesheet(&format!("div.b {{ width: 120px;{css} }}"))
+                    .is_clean()
+            );
+            assert!(engine.insert(None, Key(1), node("")).is_ok());
+            let mut leaf = node("b");
+            leaf.text = Some("wrap me".into());
+            assert!(engine.insert(Some(Key(1)), Key(2), leaf).is_ok());
+            engine
+                .frame((800.0, 600.0), 1.0, 0.0)
+                .paint
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    crate::paint::PaintOp::Text { text_align, .. } => Some(*text_align),
+                    _ => None,
+                })
+                .expect("text op 缺失")
+        };
+        assert!(matches!(
+            align_of(""),
+            crate::css::property::TextAlign::Start
+        ));
+        assert!(matches!(
+            align_of(" text-align: center;"),
+            crate::css::property::TextAlign::Center
+        ));
+        assert!(matches!(
+            align_of(" text-align: right;"),
+            crate::css::property::TextAlign::Right
+        ));
+        assert!(matches!(
+            align_of(" text-align: justify;"),
+            crate::css::property::TextAlign::Justify
+        ));
+    }
+
+    #[test]
     fn wrap_two_phase_frame_layout() {
         // T5c-2：两阶段帧通路（无字体时 remeasure 集为空，验证不回归）
         let mut engine: StyleEngine<Key> = StyleEngine::new();

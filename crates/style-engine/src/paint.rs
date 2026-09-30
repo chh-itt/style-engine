@@ -6,10 +6,10 @@
 //! 单节点内：阴影 → 背景 → 边框 → 文本。
 
 use crate::computed::ComputedStyle;
-use crate::css::property::FontFamilyList;
 use crate::css::property::{
     BackgroundImage, BorderStyle, DeclValue, FontStyle, Gradient, Overflow, PropertyId, TransformFn,
 };
+use crate::css::property::{FontFamilyList, TextAlign};
 use crate::css::stylesheet::MediaEnv;
 use crate::css::value::{ColorValue, LengthPercentage, ResolveCtx};
 use crate::tree::{NodeId, StyleTree};
@@ -80,6 +80,9 @@ pub enum PaintOp {
         line_height: Option<f32>,
         /// 字距 px（0 = 默认）。span 级行高/字距为已知近似（仅基样式生效）。
         letter_spacing: f32,
+        /// 行内对齐（第五批⑳）：测量不变宽（折行与盒宽与对齐无关），仅
+        /// sink 排版后 align 消费；Start = 排版器默认。
+        text_align: TextAlign,
     },
     /// 裁剪层开始（overflow 非 visible）。
     PushClip {
@@ -454,6 +457,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 max_advance: ctx.wrap_widths.get(&id).copied().flatten(),
                 line_height: style.resolved_line_height_px(env),
                 letter_spacing: style.resolved_letter_spacing_px(env),
+                text_align: style.text_align(),
             });
         }
     }

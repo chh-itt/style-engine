@@ -429,7 +429,7 @@ pub enum TextAlign {
     Center,
     Left,
     Right,
-    /// MVP：按 Start 渲染（偏差记录于 FEATURES.md）。
+    /// 按 parley align Justify 实际消费（第五批⑳，末行起始对齐）。
     Justify,
 }
 

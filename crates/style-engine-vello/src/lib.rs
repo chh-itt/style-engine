@@ -40,6 +40,7 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             max_advance,
             line_height,
             letter_spacing,
+            text_align,
         } = op
         {
             // 字形为局部簇坐标（positioned_glyphs 已含 advance 与基线）：
@@ -62,10 +63,24 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
                 *max_advance,
                 *line_height,
                 *letter_spacing,
+                *text_align,
             );
             continue;
         }
         apply_op(op, scene, &mut state);
+    }
+}
+
+/// text-align → parley Alignment（第五批⑳；变体一一对应）。
+fn map_align(a: style_engine::css::property::TextAlign) -> parley::layout::Alignment {
+    use style_engine::css::property::TextAlign as T;
+    match a {
+        T::Start => parley::layout::Alignment::Start,
+        T::End => parley::layout::Alignment::End,
+        T::Center => parley::layout::Alignment::Center,
+        T::Left => parley::layout::Alignment::Left,
+        T::Right => parley::layout::Alignment::Right,
+        T::Justify => parley::layout::Alignment::Justify,
     }
 }
 
@@ -134,6 +149,7 @@ impl VelloTextSystem {
         max_advance: Option<f32>,
         line_height: Option<f32>,
         letter_spacing: f32,
+        text_align: style_engine::css::property::TextAlign,
     ) {
         if content.is_empty() {
             return;
@@ -187,6 +203,15 @@ impl VelloTextSystem {
         let mut layout = builder.build(content);
         // 与测量共用同一 max_advance（T5c-2）：保证折行一致
         layout.break_all_lines(max_advance);
+        // text-align（第五批⑳）：折行后行内对齐；对齐宽 = 排版时记录的
+        // 可用宽（= max_advance，与 CSS 内容盒语义一致），不改盒宽（测量
+        // 侧无需对齐）。Start 跳过 = 排版器默认行为；Justify 末行起始对齐。
+        if !matches!(text_align, style_engine::css::property::TextAlign::Start) {
+            layout.align(
+                map_align(text_align),
+                parley::layout::AlignmentOptions::default(),
+            );
+        }
         for line in layout.lines() {
             for item in line.items() {
                 let parley::layout::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
