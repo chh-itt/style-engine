@@ -2179,6 +2179,48 @@ mod tests {
     }
 
     #[test]
+    fn margin_collapse_block_siblings() {
+        // 第五批⑦评估：taffy 0.14 block 算法内置纵向 margin collapsing
+        // （CollapsibleMarginSet/ strut）——相邻兄弟纵 margin 取 max
+        // （bottom 20 vs top 30 → 间距 30，非相加 50）；flex 子项不折叠
+        // （CSS 语义，flex 上下文无折叠）。
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 200px; } div.a { height: 40px; margin-bottom: 20px; background-color: #ff0000; } div.b { height: 40px; margin-top: 30px; background-color: #0000ff; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("a")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), node("b")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame.find(Key(2)).unwrap();
+        let b = frame.find(Key(3)).unwrap();
+        let gap = b.y - (a.y + a.height);
+        assert!((gap - 30.0).abs() < 0.5, "折叠间距应为 30，实测 {gap}");
+        // flex 上下文不折叠（CSS：flex 子项 margin 永不相邻，间距相加）
+        let mut engine2: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine2
+            .set_stylesheet(
+                "div.p { display: flex; flex-direction: column; width: 200px; } div.a { height: 40px; margin-bottom: 20px; } div.b { height: 40px; margin-top: 30px; }"
+            )
+            .is_clean());
+        assert!(engine2.insert(None, Key(1), node("p")).is_ok());
+        assert!(engine2.insert(Some(Key(1)), Key(2), node("a")).is_ok());
+        assert!(engine2.insert(Some(Key(1)), Key(3), node("b")).is_ok());
+        let frame2 = engine2.frame((800.0, 600.0), 1.0, 0.0);
+        let fa = frame2.find(Key(2)).unwrap();
+        let fb = frame2.find(Key(3)).unwrap();
+        let gap2 = fb.y - (fa.y + fa.height);
+        assert!((gap2 - 50.0).abs() < 0.5, "flex 间距应相加 50，实测 {gap2}");
+    }
+
+    #[test]
     fn wrap_two_phase_frame_layout() {
         // T5c-2：两阶段帧通路（无字体时 remeasure 集为空，验证不回归）
         let mut engine: StyleEngine<Key> = StyleEngine::new();
