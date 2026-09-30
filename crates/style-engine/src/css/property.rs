@@ -94,6 +94,8 @@ pub enum PropertyId {
     Isolation,
     /// mix-blend-mode（第五批㉒：非 normal 即触发 SC；混合效果实现不在范围）。
     MixBlendMode,
+    /// transform-origin（第五批⑬：paint 期 origin 环绕消费，2D 二维子集）。
+    TransformOrigin,
     // 文本
     Color,
     FontFamily,
@@ -177,6 +179,7 @@ impl PropertyId {
         Self::WillChange,
         Self::Isolation,
         Self::MixBlendMode,
+        Self::TransformOrigin,
         Self::Color,
         Self::FontFamily,
         Self::FontSize,
@@ -259,6 +262,7 @@ impl PropertyId {
             Self::WillChange => "will-change",
             Self::Isolation => "isolation",
             Self::MixBlendMode => "mix-blend-mode",
+            Self::TransformOrigin => "transform-origin",
             Self::Color => "color",
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
@@ -295,6 +299,9 @@ pub enum DeclValue {
     Overflow(Overflow),
     BoxSizing(BoxSizing),
     Transform(Vec<TransformFn>),
+    /// transform-origin（第五批⑬）：水平/垂直两组件（length-percentage，
+    /// 关键字解析期归一为百分比），初始 50% 50%。
+    TransformOrigin(LengthPercentage, LengthPercentage),
     Align(Align),
     FlexDirection(FlexDirection),
     FlexWrap(FlexWrap),
@@ -898,6 +905,72 @@ fn parse_mix_blend_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             _ => return None,
         ))
     })
+}
+
+/// transform-origin（第五批⑬）：v1 二维子集——1~2 个组件（length-percentage
+/// 或 left/center/right/top/bottom 关键字），第二组件缺省 = center（50%）；
+/// 第三组件（z 轴，3D 场景用）不解析、随终止符宽容吞下。关键字按语义轴
+/// 归类：left/right 仅横向、top/bottom 仅纵向、center 两轴皆可——`top left`
+/// ≡ `left top`；单组件语义 = 横向在前（CSS 单值语法），top/bottom 单值时
+/// 横向缺省 center。
+pub fn parse_transform_origin(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    enum Axis {
+        X(LengthPercentage),
+        Y(LengthPercentage),
+        Any(LengthPercentage),
+    }
+    // 关键字优先（带轴语义，try_parse 失败回退重放），否则按 LP 解析（Any）
+    fn comp_ident(p: &mut Parser<'_>) -> ValResult<Axis> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) => Ok(match_ignore_ascii_case!(name,
+                "left" => Axis::X(LengthPercentage::Percent(0.0)),
+                "center" => Axis::Any(LengthPercentage::Percent(0.5)),
+                "right" => Axis::X(LengthPercentage::Percent(1.0)),
+                "top" => Axis::Y(LengthPercentage::Percent(0.0)),
+                "bottom" => Axis::Y(LengthPercentage::Percent(1.0)),
+                _ => return Err(p.new_error_for_next_token()),
+            )),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    }
+    fn component(p: &mut Parser<'_>) -> ValResult<Axis> {
+        if let Ok(a) = p.try_parse(comp_ident) {
+            return Ok(a);
+        }
+        Ok(Axis::Any(parse_length_percentage(p)?))
+    }
+    fn put_axis(c: Axis, x: &mut Option<LengthPercentage>, y: &mut Option<LengthPercentage>) {
+        match c {
+            Axis::X(v) => *x = Some(v),
+            Axis::Y(v) => *y = Some(v),
+            // Any：首个占横向（CSS 单值语法），双组件时补空位
+            Axis::Any(v) => {
+                if x.is_none() {
+                    *x = Some(v);
+                } else if y.is_none() {
+                    *y = Some(v);
+                }
+            }
+        }
+    }
+    let mut x: Option<LengthPercentage> = None;
+    let mut y: Option<LengthPercentage> = None;
+    put_axis(component(p)?, &mut x, &mut y);
+    if let Ok(c2) = p.try_parse(component) {
+        put_axis(c2, &mut x, &mut y);
+    }
+    // 终止符/余量（z 轴长度等）吞下交回声明循环
+    loop {
+        match p.next() {
+            Ok(Token::Semicolon) | Err(_) => break,
+            _ => {}
+        }
+    }
+    Ok(DeclValue::TransformOrigin(
+        x.unwrap_or(LengthPercentage::Percent(0.5)),
+        y.unwrap_or(LengthPercentage::Percent(0.5)),
+    ))
 }
 
 /// 吞掉一个嵌套块的全部内容（递归处理内嵌函数）——满足 parse_nested_block
@@ -1549,6 +1622,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::WillChange => parse_will_change(p),
         P::Isolation => parse_isolation(p),
         P::MixBlendMode => parse_mix_blend_mode(p),
+        P::TransformOrigin => parse_transform_origin(p),
         P::FontStyle => parse_font_style(p),
         P::LineHeight => parse_line_height(p),
         P::FontFamily => parse_font_family(p),

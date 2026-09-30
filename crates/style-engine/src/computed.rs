@@ -114,6 +114,11 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         // CSS 默认 content-box（width 只含内容盒）；box-model 用例约束该语义
         P::BoxSizing => DeclValue::BoxSizing(crate::css::property::BoxSizing::ContentBox),
         P::Transform => DeclValue::Transform(Vec::new()),
+        // transform-origin 初始 50% 50%（第五批⑬：paint 期 origin 环绕消费）
+        P::TransformOrigin => DeclValue::TransformOrigin(
+            LengthPercentage::Percent(0.5),
+            LengthPercentage::Percent(0.5),
+        ),
         // filter/clip-path/will-change/isolation/mix-blend-mode 初始缺席
         // （第四批④ + 第五批㉒：仅存在性语义位触发 SC）
         P::Filter | P::ClipPath | P::WillChange | P::Isolation | P::MixBlendMode => {

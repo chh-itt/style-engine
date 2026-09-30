@@ -1965,6 +1965,83 @@ mod tests {
     }
 
     #[test]
+    fn transform_origin_parse_and_affine() {
+        // 第五批⑬：transform-origin 解析（关键字/LP/单值缺省 center/关键字
+        // 轴归类顺序宽容）+ paint 期 origin 环绕消费（A = T(o)·M·T(−o)）。
+        // rotate(90deg) 盒 100×50：R = [0,1,−1,0,0,0]；
+        // e = ox − (a·ox + c·oy)、f = oy − (b·ox + d·oy)。
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let affine =
+            |css: &str| -> [f32; 6] {
+                let mut engine: StyleEngine<Key> = StyleEngine::new();
+                assert!(engine
+                .set_stylesheet(&format!(
+                    "div.b {{ width: 100px; height: 50px; transform: rotate(90deg); {css} }}"
+                ))
+                .is_clean());
+                assert!(engine.insert(None, Key(1), node("")).is_ok());
+                assert!(engine.insert(Some(Key(1)), Key(2), node("b")).is_ok());
+                for op in engine.frame((800.0, 600.0), 1.0, 0.0).paint.ops.iter() {
+                    if let crate::paint::PaintOp::PushTransform { affine } = op {
+                        return *affine;
+                    }
+                }
+                panic!("PushTransform 缺失");
+            };
+        let near = |got: [f32; 6], want: [f32; 6]| {
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert!((g - w).abs() < 1e-4, "got {got:?} want {want:?}");
+            }
+        };
+        // 默认 = 50% 50%（o=(50,25)）：e = 50 − (0·50 + (−1)·25) = 75、
+        // f = 25 − (1·50 + 0·25) = −25
+        near(affine(""), [0.0, 1.0, -1.0, 0.0, 75.0, -25.0]);
+        near(
+            affine(" transform-origin: center;"),
+            [0.0, 1.0, -1.0, 0.0, 75.0, -25.0],
+        );
+        near(
+            affine(" transform-origin: 50% 50%;"),
+            [0.0, 1.0, -1.0, 0.0, 75.0, -25.0],
+        );
+        // 0 0 → 纯旋转
+        near(
+            affine(" transform-origin: 0 0;"),
+            [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+        );
+        near(
+            affine(" transform-origin: left top;"),
+            [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+        );
+        // 顺序宽容：top left ≡ left top
+        near(
+            affine(" transform-origin: top left;"),
+            [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+        );
+        // 单值 top → (50%, 0%)：e = 50 − (0·50 + (−1)·0) = 50、f = 0 − (1·50) = −50
+        near(
+            affine(" transform-origin: top;"),
+            [0.0, 1.0, -1.0, 0.0, 50.0, -50.0],
+        );
+        // 10px 20px：e = 10 − (0·10 + (−1)·20) = 30、f = 20 − (1·10 + 0·20) = 10
+        near(
+            affine(" transform-origin: 10px 20px;"),
+            [0.0, 1.0, -1.0, 0.0, 30.0, 10.0],
+        );
+        // 无效值：声明丢弃（warn → 非 clean）
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            !engine
+                .set_stylesheet("div.b { transform-origin: red; }")
+                .is_clean()
+        );
+    }
+
+    #[test]
     fn wrap_two_phase_frame_layout() {
         // T5c-2：两阶段帧通路（无字体时 remeasure 集为空，验证不回归）
         let mut engine: StyleEngine<Key> = StyleEngine::new();

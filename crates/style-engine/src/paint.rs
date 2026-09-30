@@ -610,7 +610,15 @@ fn resolve_transform_affine(style: &ComputedStyle, w: f32, h: f32, env: &MediaEn
         };
         m = mul_affine(&m, &t);
     }
-    let (ox, oy) = (w * 0.5, h * 0.5);
+    // transform-origin（第五批⑬）：解析入库并消费于此——A = T(o)·M·T(−o)；
+    // 百分比基 = 自身 border-box（与 CSS 一致）；缺席回退 50% 50%
+    let (ox, oy) = match style.get(PropertyId::TransformOrigin) {
+        Some(DeclValue::TransformOrigin(x, y)) => (
+            x.resolve(&ctx, w).unwrap_or(w * 0.5),
+            y.resolve(&ctx, h).unwrap_or(h * 0.5),
+        ),
+        _ => (w * 0.5, h * 0.5),
+    };
     let pre = [1.0, 0.0, 0.0, 1.0, ox, oy];
     let post = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
     mul_affine(&mul_affine(&pre, &m), &post)
