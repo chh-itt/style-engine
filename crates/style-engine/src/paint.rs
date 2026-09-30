@@ -508,10 +508,16 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             cstyle.get(PropertyId::Opacity),
             Some(DeclValue::Number(n)) if *n < 1.0
         );
-        // SC 触发（ADR-0008 全集 / ADR-0009）：transform ≠ none 或
-        // filter/clip-path ≠ none（第四批④：仅触发、无效果实现、不产生
-        // 任何 PaintOp）；非定位触发者进 Pos 带键 0
-        let sc = cstyle.has_transform() || cstyle.has_filter() || cstyle.has_clip_path();
+        // SC 触发（ADR-0008 全集 / ADR-0009）：transform ≠ none、
+        // filter/clip-path ≠ none（第四批④）或 will-change 含触发属性 /
+        // isolation: isolate / mix-blend-mode ≠ normal（第五批㉒）——均仅
+        // 触发、无效果实现、不产生任何 PaintOp；非定位触发者进 Pos 带键 0
+        let sc = cstyle.has_transform()
+            || cstyle.has_filter()
+            || cstyle.has_clip_path()
+            || cstyle.has_will_change_sc()
+            || cstyle.has_isolation()
+            || cstyle.has_mix_blend();
         match (positioned, sc, z, faded) {
             (true, _, Some(n), _) if n < 0.0 => neg.push((n, idx, *c)),
             (true, _, _, _) | (_, true, _, _) | (_, _, _, true) => {

@@ -87,6 +87,13 @@ pub enum PropertyId {
     Filter,
     /// clip-path（同上）。
     ClipPath,
+    /// will-change（第五批㉒ SC 触发全集：列表含「非初始即生成 SC」的属性
+    /// 时触发；纯语义位，无提示优化实现）。
+    WillChange,
+    /// isolation（第五批㉒：`isolate` 即触发 SC）。
+    Isolation,
+    /// mix-blend-mode（第五批㉒：非 normal 即触发 SC；混合效果实现不在范围）。
+    MixBlendMode,
     // 文本
     Color,
     FontFamily,
@@ -167,6 +174,9 @@ impl PropertyId {
         Self::Transform,
         Self::Filter,
         Self::ClipPath,
+        Self::WillChange,
+        Self::Isolation,
+        Self::MixBlendMode,
         Self::Color,
         Self::FontFamily,
         Self::FontSize,
@@ -246,6 +256,9 @@ impl PropertyId {
             Self::Transform => "transform",
             Self::Filter => "filter",
             Self::ClipPath => "clip-path",
+            Self::WillChange => "will-change",
+            Self::Isolation => "isolation",
+            Self::MixBlendMode => "mix-blend-mode",
             Self::Color => "color",
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
@@ -826,6 +839,65 @@ fn parse_sc_effect(p: &mut Parser) -> ValResult<DeclValue> {
         }
     }
     Ok(DeclValue::Effect(present))
+}
+
+/// will-change 的 v0 解析（第五批㉒ SC 触发全集）：列表含「非初始即生成
+/// SC」的属性（transform/filter/opacity/mix-blend-mode/clip-path/isolation/
+/// perspective）时置位 Effect(true)；auto、其他属性或空 → false。宽容接受
+/// 任意 ident（提示优化属性，未知 ident 不构成无效声明）；不实现优化本身。
+fn parse_will_change(p: &mut Parser) -> ValResult<DeclValue> {
+    let mut triggers = false;
+    loop {
+        match p.next() {
+            Ok(Token::Ident(name)) => {
+                if matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "transform"
+                        | "filter"
+                        | "opacity"
+                        | "mix-blend-mode"
+                        | "clip-path"
+                        | "isolation"
+                        | "perspective"
+                ) {
+                    triggers = true;
+                }
+            }
+            Ok(Token::Comma) => {}
+            Ok(Token::Semicolon) => break,
+            Ok(_) => {}
+            Err(_) => break, // EOF：值流尽
+        }
+    }
+    Ok(DeclValue::Effect(triggers))
+}
+
+/// isolation（第五批㉒）：`isolate` 置位（属性仅 auto|isolate 两值，
+/// isolate 即创建 SC）；auto → false。
+fn parse_isolation(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "auto" => DeclValue::Effect(false),
+            "isolate" => DeclValue::Effect(true),
+            _ => return None,
+        ))
+    })
+}
+
+/// mix-blend-mode（第五批㉒）：非 normal 置位（SC 触发）；混合效果实现
+/// 不在范围（vello sink 后续票）。16 标准混合模式 + plus-lighter/darker
+/// 全部接受。
+fn parse_mix_blend_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "normal" => DeclValue::Effect(false),
+            "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color-dodge"
+            | "color-burn" | "hard-light" | "soft-light" | "difference" | "exclusion"
+            | "hue" | "saturation" | "color" | "luminosity" | "plus-lighter"
+            | "plus-darker" => DeclValue::Effect(true),
+            _ => return None,
+        ))
+    })
 }
 
 /// 吞掉一个嵌套块的全部内容（递归处理内嵌函数）——满足 parse_nested_block
@@ -1474,6 +1546,9 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         }
         P::TextAlign => parse_text_align(p),
         P::WhiteSpace => parse_white_space(p),
+        P::WillChange => parse_will_change(p),
+        P::Isolation => parse_isolation(p),
+        P::MixBlendMode => parse_mix_blend_mode(p),
         P::FontStyle => parse_font_style(p),
         P::LineHeight => parse_line_height(p),
         P::FontFamily => parse_font_family(p),

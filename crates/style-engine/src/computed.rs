@@ -114,8 +114,11 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         // CSS 默认 content-box（width 只含内容盒）；box-model 用例约束该语义
         P::BoxSizing => DeclValue::BoxSizing(crate::css::property::BoxSizing::ContentBox),
         P::Transform => DeclValue::Transform(Vec::new()),
-        // filter/clip-path 初始缺席（第四批④：仅存在性语义位触发 SC）
-        P::Filter | P::ClipPath => DeclValue::Effect(false),
+        // filter/clip-path/will-change/isolation/mix-blend-mode 初始缺席
+        // （第四批④ + 第五批㉒：仅存在性语义位触发 SC）
+        P::Filter | P::ClipPath | P::WillChange | P::Isolation | P::MixBlendMode => {
+            DeclValue::Effect(false)
+        }
         P::Color => DeclValue::Color(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 1.0]))),
         P::FontFamily => DeclValue::FontFamily(FontFamilyList(smallvec![FamilyName::SansSerif])),
         P::FontSize => DeclValue::Len(LengthPercentage::Px(16.0)), // medium
@@ -277,6 +280,30 @@ impl ComputedStyle {
     pub fn has_clip_path(&self) -> bool {
         matches!(
             self.get(PropertyId::ClipPath),
+            Some(DeclValue::Effect(true))
+        )
+    }
+
+    /// will-change 含可触发 SC 的属性（第五批㉒ SC 触发全集）。
+    pub fn has_will_change_sc(&self) -> bool {
+        matches!(
+            self.get(PropertyId::WillChange),
+            Some(DeclValue::Effect(true))
+        )
+    }
+
+    /// isolation: isolate（第五批㉒）。
+    pub fn has_isolation(&self) -> bool {
+        matches!(
+            self.get(PropertyId::Isolation),
+            Some(DeclValue::Effect(true))
+        )
+    }
+
+    /// mix-blend-mode ≠ normal（第五批㉒：仅触发，无混合效果实现）。
+    pub fn has_mix_blend(&self) -> bool {
+        matches!(
+            self.get(PropertyId::MixBlendMode),
             Some(DeclValue::Effect(true))
         )
     }

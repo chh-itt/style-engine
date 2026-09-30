@@ -1895,10 +1895,72 @@ mod tests {
         for (label, ops) in [
             ("filter", build(" filter: blur(0px);")),
             ("clip-path", build(" clip-path: inset(0);")),
+            ("will-change", build(" will-change: transform;")),
+            ("isolation", build(" isolation: isolate;")),
+            ("mix-blend-mode", build(" mix-blend-mode: multiply;")),
         ] {
             let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
             assert!(blue > red, "{label} SC 应后画（blue={blue:?} red={red:?}）");
             assert_eq!(ops.len(), plain.len(), "{label} 不应产生额外 PaintOp");
+        }
+    }
+
+    #[test]
+    fn sc_trigger_full_set_parse_semantics() {
+        // 第五批㉒：SC 触发全集解析语义——will-change 按列表成员判定
+        // （含触发属性才置位）、isolation/mix-blend-mode 按值判定；
+        // 观测量 = 带序（触发 → 蓝(树序后)盖红；未触发 → 红盖蓝树序）
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let build = |trigger: &str| -> Vec<crate::paint::PaintOp> {
+            let mut engine: StyleEngine<Key> = StyleEngine::new();
+            assert!(engine
+                .set_stylesheet(&format!(
+                    "div.a {{ width: 40px; height: 40px; background-color: #ff0000; }} div.b {{ width: 40px; height: 40px; background-color: #0000ff;{trigger} }}"
+                ))
+                .is_clean());
+            assert!(engine.insert(None, Key(1), node("")).is_ok());
+            assert!(engine.insert(Some(Key(1)), Key(2), node("b")).is_ok());
+            assert!(engine.insert(Some(Key(1)), Key(3), node("a")).is_ok());
+            engine.frame((800.0, 600.0), 1.0, 0.0).paint.ops.to_vec()
+        };
+        let find = |ops: &[crate::paint::PaintOp], rgb: [f32; 3]| {
+            ops.iter().position(|op| {
+                matches!(op, crate::paint::PaintOp::FillRect { color, .. }
+                    if color.components[0] == rgb[0]
+                        && color.components[1] == rgb[1]
+                        && color.components[2] == rgb[2])
+            })
+        };
+        // 触发（b 应后画：blue > red），且不产生任何效果 PaintOp
+        for (css, label) in [
+            (" will-change: transform;", "will-change 触发属性"),
+            (" will-change: transform, color;", "will-change 混合列表"),
+            (" will-change: color, opacity;", "will-change 尾部触发"),
+            (" isolation: isolate;", "isolation"),
+            (" mix-blend-mode: multiply;", "mix-blend-mode"),
+        ] {
+            let ops = build(css);
+            let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
+            assert!(blue > red, "{label} 应触发 SC（blue={blue:?} red={red:?}）");
+            assert_eq!(ops.len(), build("").len(), "{label} 不应产生额外 PaintOp");
+        }
+        // 不触发（树序：blue < red）
+        for (css, label) in [
+            (" will-change: color;", "will-change color"),
+            (" will-change: auto;", "will-change auto"),
+            (" isolation: auto;", "isolation auto"),
+            (" mix-blend-mode: normal;", "mix-blend-mode normal"),
+        ] {
+            let ops = build(css);
+            let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
+            assert!(
+                blue < red,
+                "{label} 不应触发 SC（blue={blue:?} red={red:?}）"
+            );
         }
     }
 
