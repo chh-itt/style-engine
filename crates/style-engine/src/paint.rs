@@ -42,7 +42,7 @@ pub enum PaintOp {
         /// 径向几何（T4c）：圆心与半径已按盒子解析为绝对 px（线性渐变为 None）。
         radial: Option<RadialGeom>,
     },
-    /// 外阴影（MVP：矩形阴影；inset 阴影暂缺）。
+    /// 阴影（第五批⑩：模糊=sink 多环近似；inset=盒内反转填充）。
     Shadow {
         x: f32,
         y: f32,
@@ -53,6 +53,10 @@ pub enum PaintOp {
         offset_x: f32,
         offset_y: f32,
         blur: f32,
+        /// 外扩/内缩（px）。
+        spread: f32,
+        /// 内阴影（盒内反转填充）。
+        inset: bool,
     },
     /// 边框（四边独立：top/right/bottom/left；style none 或 width 0 的边由 sink 忽略）。
     Border {
@@ -295,7 +299,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
 
     // 1) 外阴影（CSS 绘制顺序：先于背景）
     if let Some(DeclValue::BoxShadows(shadows)) = style.get(PropertyId::BoxShadow) {
-        for sh in shadows.iter() {
+        for sh in shadows.iter().filter(|s| !s.inset) {
             let color = resolve_color(&sh.color, style, env);
             if color.components[3] <= 0.0 {
                 continue;
@@ -310,6 +314,8 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 offset_x: px(&sh.offset_x, style, env),
                 offset_y: px(&sh.offset_y, style, env),
                 blur: px(&sh.blur, style, env),
+                spread: px(&sh.spread, style, env),
+                inset: false,
             });
         }
     }
@@ -356,6 +362,29 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                     color: bg,
                 });
             }
+        }
+    }
+
+    // 2b) 内阴影（第五批⑩：CSS 绘制序=背景之上、边框之下）
+    if let Some(DeclValue::BoxShadows(shadows)) = style.get(PropertyId::BoxShadow) {
+        for sh in shadows.iter().filter(|s| s.inset) {
+            let color = resolve_color(&sh.color, style, env);
+            if color.components[3] <= 0.0 {
+                continue;
+            }
+            out.ops.push(PaintOp::Shadow {
+                x,
+                y,
+                width: w,
+                height: h,
+                radius,
+                color,
+                offset_x: px(&sh.offset_x, style, env),
+                offset_y: px(&sh.offset_y, style, env),
+                blur: px(&sh.blur, style, env),
+                spread: px(&sh.spread, style, env),
+                inset: true,
+            });
         }
     }
 
@@ -1082,6 +1111,32 @@ mod tests {
                 ..
             } => {
                 assert_eq!((*offset_x, *offset_y, *blur), (0.0, 4.0, 8.0));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn shadow_inset_and_spread_op() {
+        // 第五批⑩：inset 标志与 spread 进入 Shadow op
+        let (tree, id, style) = setup("box-shadow: inset 0px 4px 8px 2px rgba(0, 0, 0, 0.5)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        match &out.ops[0] {
+            PaintOp::Shadow {
+                blur,
+                spread,
+                inset,
+                ..
+            } => {
+                assert_eq!((*blur, *spread, *inset), (8.0, 2.0, true));
+            }
+            other => panic!("{other:?}"),
+        }
+        let (tree, id, style) = setup("box-shadow: 0px 4px 8px 2px rgba(0, 0, 0, 0.5)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        match &out.ops[0] {
+            PaintOp::Shadow { spread, inset, .. } => {
+                assert_eq!((*spread, *inset), (2.0, false));
             }
             other => panic!("{other:?}"),
         }

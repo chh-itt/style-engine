@@ -729,6 +729,35 @@ mod tests {
     }
 
     #[test]
+    fn box_shadow_inset_and_spread() {
+        // 第五批⑩：inset 关键字前置/尾随两形皆许 + spread 第四长度；
+        // 重复 inset 或未知尾随 token → 整条容错丢弃
+        let (b, r) = block("box-shadow: inset 0 2px 4px 1px red");
+        assert!(r.is_clean(), "{r:?}");
+        match parsed(&b.decls[0]) {
+            DeclValue::BoxShadows(list) => {
+                assert_eq!(list.len(), 1);
+                assert!(list[0].inset);
+                assert!(matches!(&list[0].blur, LengthPercentage::Px(v) if *v == 4.0));
+                assert!(matches!(&list[0].spread, LengthPercentage::Px(v) if *v == 1.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        let (b, r) = block("box-shadow: 0 2px 4px red inset, 1px 1px blue");
+        assert!(r.is_clean(), "{r:?}");
+        match parsed(&b.decls[0]) {
+            DeclValue::BoxShadows(list) => {
+                assert_eq!(list.len(), 2);
+                assert!(list[0].inset);
+                assert!(!list[1].inset);
+            }
+            other => panic!("{other:?}"),
+        }
+        let (b, r) = block("box-shadow: inset 0 2px inset red");
+        assert!(!r.is_clean(), "重复 inset 应整条丢弃");
+    }
+
+    #[test]
     fn margin_shorthand_trbl() {
         let (b, r) = block("margin: 1px 2% auto");
         assert!(r.is_clean());

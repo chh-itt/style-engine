@@ -429,17 +429,71 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             color,
             offset_x,
             offset_y,
-            ..
+            blur,
+            spread,
+            inset,
         } => {
-            // 偏差：无模糊，半透明矩形近似
-            let shape = rect_shape(
-                *x + state.offset.x as f32 + offset_x,
-                *y + state.offset.y as f32 + offset_y,
-                *width,
-                *height,
-                *radius,
-            );
-            scene.fill(Fill::NonZero, state.effective(), *color, None, &shape);
+            // 第五批⑩阴影：模糊=多重同心圆环近似——单环 alpha 取
+            // 1−(1−a)^(1/N) 使 N 层复合恰为 a（同心叠涂）；内阴影=盒裁剪
+            // 后反转填充（EvenOdd：盒路径−影框路径），模糊=影框逐环外扩
+            // （孔变大、影带变薄）。spread 外扩/内缩影框。
+            let n = 6.0f32;
+            let ring_alpha = 1.0 - (1.0 - color.components[3]).powf(1.0 / n);
+            let ring_color = color.with_alpha(ring_alpha);
+            if *inset {
+                let bx = *x + state.offset.x as f32;
+                let by = *y + state.offset.y as f32;
+                let clip = rect_shape(bx, by, *width, *height, *radius);
+                scene.push_layer(Fill::NonZero, Mix::Normal, 1.0, state.effective(), &clip);
+                let sx = bx + offset_x + spread;
+                let sy = by + offset_y + spread;
+                let sw = (*width - 2.0 * spread).max(0.0);
+                let sh = (*height - 2.0 * spread).max(0.0);
+                for i in 1..=6 {
+                    let ex = blur * (i as f32) / n;
+                    let hole = rect_shape(
+                        sx - ex,
+                        sy - ex,
+                        sw + 2.0 * ex,
+                        sh + 2.0 * ex,
+                        [
+                            (radius[0] - spread + ex).max(0.0),
+                            (radius[1] - spread + ex).max(0.0),
+                            (radius[2] - spread + ex).max(0.0),
+                            (radius[3] - spread + ex).max(0.0),
+                            (radius[4] - spread + ex).max(0.0),
+                            (radius[5] - spread + ex).max(0.0),
+                            (radius[6] - spread + ex).max(0.0),
+                            (radius[7] - spread + ex).max(0.0),
+                        ],
+                    );
+                    let mut inv = clip.clone();
+                    inv.extend(hole);
+                    scene.fill(Fill::EvenOdd, state.effective(), ring_color, None, &inv);
+                }
+                scene.pop_layer();
+            } else {
+                for i in 1..=6 {
+                    let ex = spread + blur * (i as f32) / n;
+                    let shape = rect_shape(
+                        *x + state.offset.x as f32 + offset_x - ex,
+                        *y + state.offset.y as f32 + offset_y - ex,
+                        *width + 2.0 * ex,
+                        *height + 2.0 * ex,
+                        [
+                            (radius[0] + ex).max(0.0),
+                            (radius[1] + ex).max(0.0),
+                            (radius[2] + ex).max(0.0),
+                            (radius[3] + ex).max(0.0),
+                            (radius[4] + ex).max(0.0),
+                            (radius[5] + ex).max(0.0),
+                            (radius[6] + ex).max(0.0),
+                            (radius[7] + ex).max(0.0),
+                        ],
+                    );
+                    scene.fill(Fill::NonZero, state.effective(), ring_color, None, &shape);
+                }
+            }
         }
         PaintOp::Border {
             x,

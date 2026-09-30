@@ -547,7 +547,7 @@ pub struct ColorStop {
     pub position: Option<LengthPercentage>,
 }
 
-/// 外阴影（MVP：不支持 inset；inset 声明整条容错丢弃）。
+/// 阴影（第五批⑩：inset 关键字支持——内/外阴影按 CSS 绘制序分别发射）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoxShadow {
     pub offset_x: LengthPercentage,
@@ -555,6 +555,8 @@ pub struct BoxShadow {
     pub blur: LengthPercentage,
     pub spread: LengthPercentage,
     pub color: ColorValue,
+    /// inset 关键字：内阴影（绘制序=背景之上、边框之下）。
+    pub inset: bool,
 }
 
 pub type BoxShadowList = SmallVec<[BoxShadow; 2]>;
@@ -1543,7 +1545,23 @@ pub fn parse_box_shadow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     loop {
         let mut lens: SmallVec<[LengthPercentage; 4]> = SmallVec::new();
         let mut color: Option<ColorValue> = None;
+        let mut inset = false;
         loop {
+            // inset 关键字（第五批⑩）：前置或尾随皆许（CSS 文法两端）；
+            // 重复 inset 落入长度/颜色均失败 → 尾随 token 错误 → 整条丢弃
+            if !inset {
+                let kw = p.try_parse(|p| -> ValResult<()> {
+                    let t = p.next()?.clone();
+                    match &t {
+                        Token::Ident(name) if name.eq_ignore_ascii_case("inset") => Ok(()),
+                        _ => Err(p.new_error_for_next_token()),
+                    }
+                });
+                if kw.is_ok() {
+                    inset = true;
+                    continue;
+                }
+            }
             // 长度优先，其次颜色
             if let Ok(l) = p.try_parse(parse_length_percentage) {
                 if lens.len() == 4 {
@@ -1574,6 +1592,7 @@ pub fn parse_box_shadow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             blur: lens.get(2).cloned().unwrap_or_else(LengthPercentage::zero),
             spread: lens.get(3).cloned().unwrap_or_else(LengthPercentage::zero),
             color,
+            inset,
         });
         let more = p.try_parse(|p| p.expect_comma());
         if more.is_err() {
