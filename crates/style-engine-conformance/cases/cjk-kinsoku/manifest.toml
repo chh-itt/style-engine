@@ -1,15 +1,13 @@
-# CJK 混排断行 xfail 哨兵（第四批⑥建，第五批㉓复核）：窄容器（140px）内
+# CJK 混排断行（第四批⑥建 xfail 哨兵，第五批㉔转正）：窄容器（140px）内
 # CJK+Latin 混排文本，两侧同源 Noto Sans SC（dumper @font-face 注入 /
-# 引擎 add_font）。钉死「现状不可达 Chromium 一致性」的差异（复核后）：
-# ①normal 行高度量：引擎 23.25px vs 浏览器 24px（度量来源/取整差异，
-#   4 行总高 93 vs 96）——修复需度量接入样式解析（字体相关化），列待办㉔；
-# ②文本叶不拉伸至包含块宽——已解决（第五批⑥文本叶契约，叶宽差消失）。
-# 断行选择本身在此探针上两侧一致（标准禁则经 UAX#14 已覆盖）；自定义
-# 禁则不可达属上游限制（parley LineBreakOverrideFn 仅 ASCII，见
-# DEPENDENCIES）。㉔ 度量修复后转正重生成预算。
+# 引擎 add_font）。㉔ normal 行高度量 Chromium 对齐（round(asc)+round(desc)
+# 不含 lineGap/leading）落地后逐盒一致（4 行总高 96=96），原 93 vs 96 与
+# 文本叶不拉伸（131 vs 140，⑥ 契约消除）两差异均闭环。断行选择两侧一致
+# （标准禁则经 UAX#14 已覆盖）；自定义禁则不可达属上游限制（parley
+# LineBreakOverrideFn 仅 ASCII，见 DEPENDENCIES）。
 viewport = [800.0, 600.0]
 scale = 1.0
 fonts = ["Noto Sans SC=crates/style-engine-demo/assets/fonts/NotoSansSC.ttf"]
 features = ["text-wrap", "cjk", "line-height-normal"]
-xfail = true
+xfail = false
 tolerance = 0.5

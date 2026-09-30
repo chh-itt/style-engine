@@ -1,14 +1,11 @@
-# Latin 单 run 折行（第五批③）——xfail 资产（实测）：
-# ①normal 行高度量：引擎 parley 逐行 16.25px（4 行总高 65）vs Chromium
-#   逐字体取整 16px（64）——断行点一致（4 行=4 行、词边界同断），差异纯为
-#   行高度量来源（parley 浮点 metrics 相对值 vs Chromium 逐字体整数化）；
-#   修复需度量接入样式解析（字体相关化），列待办㉔。
-# ②文本叶不拉伸至包含块宽（198 vs 220）——已解决（第五批⑥文本叶契约：
-#   叶盒无声明宽时拉伸到容器内容宽，叶宽差消失；余差仅 ①）。
-#   字形两侧同源（DejaVuSans.ttf 经 @font-face ∥ add_font）。
+# Latin 单 run 折行（第五批③建 xfail 资产，第五批㉔转正）：①normal 行高
+# 度量差已由㉔修复（round(asc)+round(desc) 不含 lineGap：Chromium 64 =
+# 引擎 64，原 65 vs 64）；②文本叶不拉伸（198 vs 220）已由⑥文本叶契约
+# 消除。断行点两侧一致（4 行=4 行、词边界同断）；字形两侧同源
+# （DejaVuSans.ttf 经 @font-face ∥ add_font）。
 viewport = [800.0, 600.0]
 scale = 1.0
 fonts = ["DejaVu Sans=crates/style-engine-demo/assets/fonts/DejaVuSans.ttf"]
 features = ["text-wrap", "fonts", "line-height-normal"]
-xfail = true
+xfail = false
 tolerance = 0.5
