@@ -26,8 +26,9 @@ pub enum PaintOp {
         y: f32,
         width: f32,
         height: f32,
-        /// 四角圆角（左上、右上、右下、左下）。
-        radius: [f32; 4],
+        /// 每角 (横, 纵) 圆角 px（第五批⑪椭圆圆角；序 tl.x tl.y tr.x tr.y
+        /// br.x br.y bl.x bl.y）。
+        radius: [f32; 8],
         color: AlphaColor<Srgb>,
     },
     /// 渐变背景（linear/radial，语义同 CSS）。
@@ -36,7 +37,7 @@ pub enum PaintOp {
         y: f32,
         width: f32,
         height: f32,
-        radius: [f32; 4],
+        radius: [f32; 8],
         gradient: Gradient,
         /// 径向几何（T4c）：圆心与半径已按盒子解析为绝对 px（线性渐变为 None）。
         radial: Option<RadialGeom>,
@@ -47,7 +48,7 @@ pub enum PaintOp {
         y: f32,
         width: f32,
         height: f32,
-        radius: [f32; 4],
+        radius: [f32; 8],
         color: AlphaColor<Srgb>,
         offset_x: f32,
         offset_y: f32,
@@ -59,7 +60,7 @@ pub enum PaintOp {
         y: f32,
         width: f32,
         height: f32,
-        radius: [f32; 4],
+        radius: [f32; 8],
         sides: [BorderSide; 4],
     },
     /// 文本（T5 转换为字形 run；spans 为 T5c 富文本覆盖，可为空）。
@@ -90,7 +91,7 @@ pub enum PaintOp {
         y: f32,
         width: f32,
         height: f32,
-        radius: [f32; 4],
+        radius: [f32; 8],
     },
     PopClip,
     /// 透明度层开始（opacity < 1，ADR-0008）：整节点子树以 alpha 合成。
@@ -653,14 +654,29 @@ fn px(lp: &LengthPercentage, style: &ComputedStyle, env: &MediaEnv) -> f32 {
     .unwrap_or(0.0)
 }
 
-fn resolve_radius(style: &ComputedStyle, env: &MediaEnv) -> [f32; 4] {
-    [
+fn resolve_radius(style: &ComputedStyle, env: &MediaEnv) -> [f32; 8] {
+    // 第五批⑪椭圆圆角：每角 (横, 纵)——tl.x tl.y tr.x tr.y br.x br.y
+    // bl.x bl.y；Len 旧值按圆形角处理
+    let per: [[f32; 2]; 4] = [
         PropertyId::BorderTopLeftRadius,
         PropertyId::BorderTopRightRadius,
         PropertyId::BorderBottomRightRadius,
         PropertyId::BorderBottomLeftRadius,
     ]
-    .map(|pid| style.len(pid).map(|lp| px(lp, style, env)).unwrap_or(0.0))
+    .map(|pid| match style.get(pid) {
+        Some(DeclValue::Radius(h, v)) => [px(h, style, env), px(v, style, env)],
+        Some(DeclValue::Len(lp)) => {
+            let r = px(lp, style, env);
+            [r, r]
+        }
+        _ => [0.0, 0.0],
+    });
+    let mut out = [0.0f32; 8];
+    for (i, pair) in per.iter().enumerate() {
+        out[i * 2] = pair[0];
+        out[i * 2 + 1] = pair[1];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -709,6 +725,23 @@ mod tests {
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
+    }
+
+    #[test]
+    fn elliptical_radius_pairs_resolved() {
+        // 第五批⑪：resolve_radius 产出每角 (横, 纵)——tl.x tl.y tr.x tr.y
+        // br.x br.y bl.x bl.y（斜杠简写横/纵分组独立解析）
+        let (_, _, cs) = setup("border-radius: 10px 20px / 5px 8px", None);
+        let env = MediaEnv {
+            viewport_w: 1280.0,
+            viewport_h: 800.0,
+            dark: false,
+            reduced_motion: false,
+        };
+        assert_eq!(
+            resolve_radius(&cs, &env),
+            [10.0, 5.0, 20.0, 8.0, 10.0, 5.0, 20.0, 8.0]
+        );
     }
 
     #[test]

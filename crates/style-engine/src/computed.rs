@@ -98,7 +98,9 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::BorderTopLeftRadius
         | P::BorderTopRightRadius
         | P::BorderBottomRightRadius
-        | P::BorderBottomLeftRadius => DeclValue::Len(LengthPercentage::Px(0.0)),
+        | P::BorderBottomLeftRadius => {
+            DeclValue::Radius(LengthPercentage::Px(0.0), LengthPercentage::Px(0.0))
+        }
         P::BorderTopWidth | P::BorderRightWidth | P::BorderBottomWidth | P::BorderLeftWidth => {
             DeclValue::BorderWidth(Some(LengthPercentage::Px(3.0))) // medium
         }

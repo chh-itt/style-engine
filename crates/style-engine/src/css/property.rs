@@ -302,6 +302,9 @@ pub enum DeclValue {
     /// transform-origin（第五批⑬）：水平/垂直两组件（length-percentage，
     /// 关键字解析期归一为百分比），初始 50% 50%。
     TransformOrigin(LengthPercentage, LengthPercentage),
+    /// 圆角（第五批⑪椭圆圆角）：每角 (横, 纵) 两组件——border-radius
+    /// 斜杠语法 `/` 前后各为横向/纵向半径，缺省纵=横（圆形角）。
+    Radius(LengthPercentage, LengthPercentage),
     Align(Align),
     FlexDirection(FlexDirection),
     FlexWrap(FlexWrap),
@@ -908,6 +911,16 @@ fn parse_isolation(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 /// mix-blend-mode（第五批㉒）：非 normal 置位（SC 触发）；混合效果实现
 /// 不在范围（vello sink 后续票）。16 标准混合模式 + plus-lighter/darker
 /// 全部接受。
+/// border-*-radius（第五批⑪椭圆圆角）：长手文法 `<lp>{1,2}`——第二值=
+/// 纵向半径，缺省=横向（圆形角）。（斜杠语法仅属简写，见 decl.rs。）
+fn parse_corner_radius(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let h = parse_length_percentage(p)?;
+    let v = p
+        .try_parse(parse_length_percentage)
+        .unwrap_or_else(|_| h.clone());
+    Ok(DeclValue::Radius(h, v))
+}
+
 fn parse_mix_blend_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1609,7 +1622,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         | P::BorderTopLeftRadius
         | P::BorderTopRightRadius
         | P::BorderBottomRightRadius
-        | P::BorderBottomLeftRadius => parse_len(p),
+        | P::BorderBottomLeftRadius => parse_corner_radius(p),
         P::Opacity | P::FlexGrow | P::FlexShrink => parse_number_value(p),
         P::ZIndex => parse_z_index(p),
         P::FontWeight => parse_font_weight(p),

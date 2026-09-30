@@ -11,7 +11,7 @@
 use style_engine::css::value::ColorValue;
 use style_engine::{DisplayList, PaintOp};
 use vello::Scene;
-use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Stroke, Vec2};
+use vello::kurbo::{Affine, BezPath, Point, Stroke, Vec2};
 use vello::peniko::color::{AlphaColor, Srgb};
 use vello::peniko::{Brush, Extend, Fill, Gradient, GradientKind, Mix, RadialGradientPosition};
 
@@ -289,24 +289,73 @@ impl RenderState {
     }
 }
 
-fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radius: [f32; 4]) -> RoundedRect {
-    let rect = Rect::new(
-        f64::from(x),
-        f64::from(y),
-        f64::from(x + w),
-        f64::from(y + h),
+/// 圆角矩形路径（第五批⑪椭圆圆角）：radius = 每角 (横, 纵)——tl.x tl.y
+/// tr.x tr.y br.x br.y bl.x bl.y；x==y 时即圆形角。四分之一椭圆以 kappa
+/// cubic 逼近；半径按 CSS 重叠规则等比缩放（任一边上相邻两角半径和超过
+/// 边长时全组乘 f），负值截断。
+fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radius: [f32; 8]) -> BezPath {
+    let raw = [
+        (radius[0], radius[1]),
+        (radius[2], radius[3]),
+        (radius[4], radius[5]),
+        (radius[6], radius[7]),
+    ];
+    let nonneg: Vec<(f64, f64)> = raw
+        .iter()
+        .map(|(a, b)| (f64::from(a.max(0.0)), f64::from(b.max(0.0))))
+        .collect();
+    let (tl, tr_, br_, bl) = (nonneg[0], nonneg[1], nonneg[2], nonneg[3]);
+    // CSS 重叠缩放：f = min(1, 各边 边长/相邻两角半径和 的最小值)
+    let mut f = 1.0f64;
+    for (edge, sum) in [
+        (f64::from(w), tl.0 + tr_.0),
+        (f64::from(w), bl.0 + br_.0),
+        (f64::from(h), tl.1 + bl.1),
+        (f64::from(h), tr_.1 + br_.1),
+    ] {
+        if sum > edge && sum > 0.0 {
+            f = f.min(edge / sum);
+        }
+    }
+    let (tl, tr_, br_, bl) = (
+        (tl.0 * f, tl.1 * f),
+        (tr_.0 * f, tr_.1 * f),
+        (br_.0 * f, br_.1 * f),
+        (bl.0 * f, bl.1 * f),
     );
-    // kurbo 顺序：左上、右上、右下、左下（与 DisplayList 约定一致）
-    let radii = RoundedRectRadii::new(
-        f64::from(radius[0]),
-        f64::from(radius[1]),
-        f64::from(radius[2]),
-        f64::from(radius[3]),
+    let (x, y, w, h) = (f64::from(x), f64::from(y), f64::from(w), f64::from(h));
+    let k = 0.552_284_749_830_793_6_f64; // 4/3·tan(π/8)：四分之一椭圆 cubic 逼近
+    let mut p = BezPath::new();
+    p.move_to((x + tl.0, y));
+    p.line_to((x + w - tr_.0, y));
+    p.curve_to(
+        (x + w - tr_.0 + k * tr_.0, y),
+        (x + w, y + tr_.1 - k * tr_.1),
+        (x + w, y + tr_.1),
     );
-    RoundedRect::from_rect(rect, radii)
+    p.line_to((x + w, y + h - br_.1));
+    p.curve_to(
+        (x + w, y + h - br_.1 + k * br_.1),
+        (x + w - br_.0 + k * br_.0, y + h),
+        (x + w - br_.0, y + h),
+    );
+    p.line_to((x + bl.0, y + h));
+    p.curve_to(
+        (x + bl.0 - k * bl.0, y + h),
+        (x, y + h - bl.1 + k * bl.1),
+        (x, y + h - bl.1),
+    );
+    p.line_to((x, y + tl.1));
+    p.curve_to(
+        (x, y + tl.1 - k * tl.1),
+        (x + tl.0 - k * tl.0, y),
+        (x + tl.0, y),
+    );
+    p.close_path();
+    p
 }
 
-fn rect_shape(x: f32, y: f32, w: f32, h: f32, radius: [f32; 4]) -> RoundedRect {
+fn rect_shape(x: f32, y: f32, w: f32, h: f32, radius: [f32; 8]) -> BezPath {
     rounded_rect(x, y, w, h, radius)
 }
 
@@ -406,7 +455,8 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *y + state.offset.y as f32,
                 *width,
                 *height,
-                *radius,
+                // 第五批⑪：边框条角部取横半径（椭圆圆角的边框条暂以圆形角近似）
+                [radius[0], radius[2], radius[4], radius[6]],
                 sides,
                 state.effective(),
             );
@@ -446,7 +496,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *y + state.offset.y as f32,
                 *width,
                 *height,
-                [0.0; 4],
+                [0.0; 8],
             );
             scene.push_layer(
                 Fill::NonZero,

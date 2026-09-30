@@ -359,6 +359,25 @@ where
     expand_sides(&vals).ok_or_else(|| p.new_error_for_next_token())
 }
 
+/// border-radius 分量组（第五批⑪椭圆圆角）：1~4 个 lp；遇 `/` 即止
+/// （状态回卷前瞻，`/` 留待斜杠检测消费）。
+fn collect_radius_sides(p: &mut Parser<'_>) -> ValResult<[LengthPercentage; 4]> {
+    let mut vals: SmallVec<[LengthPercentage; 4]> = SmallVec::new();
+    loop {
+        vals.push(as_len(parse_len(p)?).ok_or_else(|| p.new_error_for_next_token())?);
+        if vals.len() == 4 || p.is_exhausted() {
+            break;
+        }
+        let mark = p.state();
+        let slash = matches!(p.next(), Ok(Token::Delim(d)) if *d == '/');
+        p.reset(&mark);
+        if slash {
+            break;
+        }
+    }
+    expand_sides(&vals).ok_or_else(|| p.new_error_for_next_token())
+}
+
 fn expand_sides<T: Clone>(vals: &[T]) -> Option<[T; 4]> {
     Some(match vals {
         [a] => [a.clone(), a.clone(), a.clone(), a.clone()],
@@ -424,18 +443,48 @@ fn expand_shorthand(
             vec![(P::RowGap, row), (P::ColumnGap, col)]
         }
         "border-radius" => {
-            let v = collect_sides(p, |p| -> ValResult<LengthPercentage> {
-                as_len(parse_len(p)?).ok_or_else(|| p.new_error_for_next_token())
-            })?;
-            sides_decls(
-                [
-                    P::BorderTopLeftRadius,
-                    P::BorderTopRightRadius,
-                    P::BorderBottomRightRadius,
-                    P::BorderBottomLeftRadius,
-                ],
-                v.map(DeclValue::Len),
-            )
+            // 第五批⑪椭圆圆角：`<lp>{1,4} [ '/' <lp>{1,4} ]?`（tl tr br bl
+            // 各按 CSS 1-4 展开）；无斜杠=圆形角（纵=横），带斜杠但纵组
+            // 文法错 → 整条声明容错丢弃
+            let ids = [
+                P::BorderTopLeftRadius,
+                P::BorderTopRightRadius,
+                P::BorderBottomRightRadius,
+                P::BorderBottomLeftRadius,
+            ];
+            let horizontal = collect_radius_sides(p)?;
+            let slash = p.try_parse(|p| -> ValResult<()> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Delim(d) if *d == '/' => Ok(()),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            let vertical = if slash.is_ok() {
+                Some(collect_radius_sides(p)?)
+            } else {
+                None
+            };
+            match vertical {
+                Some(v) => sides_decls(
+                    ids,
+                    [
+                        DeclValue::Radius(horizontal[0].clone(), v[0].clone()),
+                        DeclValue::Radius(horizontal[1].clone(), v[1].clone()),
+                        DeclValue::Radius(horizontal[2].clone(), v[2].clone()),
+                        DeclValue::Radius(horizontal[3].clone(), v[3].clone()),
+                    ],
+                ),
+                None => sides_decls(
+                    ids,
+                    [
+                        DeclValue::Radius(horizontal[0].clone(), horizontal[0].clone()),
+                        DeclValue::Radius(horizontal[1].clone(), horizontal[1].clone()),
+                        DeclValue::Radius(horizontal[2].clone(), horizontal[2].clone()),
+                        DeclValue::Radius(horizontal[3].clone(), horizontal[3].clone()),
+                    ],
+                ),
+            }
         }
         "border-width" => {
             let v = collect_sides(p, parse_border_width)?;
@@ -647,6 +696,35 @@ mod tests {
         assert!(matches!(
             parsed(&b.decls[1]),
             DeclValue::Display(Display::Flex)
+        ));
+    }
+
+    #[test]
+    fn border_radius_slash_elliptical() {
+        // 第五批⑪椭圆圆角：斜杠语法横/纵分组各按 1-4 展开（tl tr br bl）；
+        // 长手 `a b` = (横 a, 纵 b)；无斜杠 = 圆形角（纵=横）
+        let (b, r) = block("border-radius: 10px 20px / 5px 8px");
+        assert!(r.is_clean(), "{r:?}");
+        assert_eq!(b.decls.len(), 4);
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::Radius(h, v) if *h == LengthPercentage::Px(20.0) && *v == LengthPercentage::Px(8.0)
+        ));
+        assert!(matches!(
+            parsed(&b.decls[3]),
+            DeclValue::Radius(h, v) if *h == LengthPercentage::Px(20.0) && *v == LengthPercentage::Px(8.0)
+        ));
+        let (b, r) = block("border-top-left-radius: 4px 6px");
+        assert!(r.is_clean(), "{r:?}");
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::Radius(h, v) if *h == LengthPercentage::Px(4.0) && *v == LengthPercentage::Px(6.0)
+        ));
+        let (b, r) = block("border-radius: 12px");
+        assert!(r.is_clean(), "{r:?}");
+        assert!(matches!(
+            parsed(&b.decls[3]),
+            DeclValue::Radius(h, v) if *h == LengthPercentage::Px(12.0) && *v == LengthPercentage::Px(12.0)
         ));
     }
 
