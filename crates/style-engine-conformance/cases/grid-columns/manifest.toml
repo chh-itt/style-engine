@@ -1,0 +1,5 @@
+# grid 轨道 + fr + gap（第五批③）
+viewport = [800.0, 600.0]
+scale = 1.0
+features = ["grid", "gap", "background-color"]
+tolerance = 0.5

@@ -1,0 +1,6 @@
+/* 尺寸约束（第五批③）：min/max-width 夹紧（300px 声明 → 120px 上限）
+   + aspect-ratio 2/1 由 width 80px 推高 40px。 */
+body { margin: 0; }
+.outer { width: 400px; }
+.m { min-width: 50px; max-width: 120px; width: 300px; height: 20px; background-color: #6366f1; }
+.ar { aspect-ratio: 2 / 1; width: 80px; background-color: #14b8a6; }

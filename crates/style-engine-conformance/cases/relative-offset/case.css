@@ -1,0 +1,6 @@
+/* position: relative 偏移（第五批③）：盒随 top/left 平移绘制位、
+   流内占位槽不动（后续兄弟 y 不变）——相对定位语义验收。 */
+body { margin: 0; }
+.host { width: 200px; }
+.rel { position: relative; top: 10px; left: 15px; width: 60px; height: 20px; background-color: #d946ef; }
+.after { width: 40px; height: 20px; background-color: #475569; }

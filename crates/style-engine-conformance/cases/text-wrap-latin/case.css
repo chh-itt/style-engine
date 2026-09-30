@@ -1,0 +1,6 @@
+/* Latin 文本折行（第五批③）：窄容器 220px、DejaVu Sans 14px、单 run——
+   首个非 xfail 文本用例：两侧同源 DejaVuSans.ttf（@font-face ∥ add_font），
+   词边界 UAX#14 断点应一致；normal 行高度量取齐与否由实测裁决。 */
+body { margin: 0; }
+.wrap { width: 220px; }
+.txt { font-family: "DejaVu Sans"; font-size: 14px; white-space: normal; }

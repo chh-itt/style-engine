@@ -275,7 +275,147 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             x: map_overflow(cs.overflow_x()),
             y: map_overflow(cs.overflow_y()),
         },
+        // grid 显式轨道（第五批③ grid-columns 用例驱动）：此前解析入库但
+        // 零消费——taffy 落入隐式单列、行高 0；接通后轨道语义直达 taffy。
+        // 百分比保留原生（taffy 按容器解析）；calc/em/rem 沿用 resolve_px 扁平化。
+        grid_template_columns: cs
+            .get(PropertyId::GridTemplateColumns)
+            .and_then(|v| match v {
+                DeclValue::GridTracks(t) => Some(
+                    t.tracks
+                        .iter()
+                        .map(|ts| grid_component(ts, cs, env))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        grid_template_rows: cs
+            .get(PropertyId::GridTemplateRows)
+            .and_then(|v| match v {
+                DeclValue::GridTracks(t) => Some(
+                    t.tracks
+                        .iter()
+                        .map(|ts| grid_component(ts, cs, env))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        // grid-auto-flow（解析子集 Row|Column）；auto 行/列轨道为单长度子集
+        grid_auto_flow: match cs.get(PropertyId::GridAutoFlow) {
+            Some(DeclValue::GridAutoFlow(k)) => match k {
+                crate::css::property::GridAutoFlowKind::Row => taffy::style::GridAutoFlow::Row,
+                crate::css::property::GridAutoFlowKind::Column => {
+                    taffy::style::GridAutoFlow::Column
+                }
+            },
+            _ => taffy::style::GridAutoFlow::Row,
+        },
+        grid_auto_rows: auto_tracks(cs.get(PropertyId::GridAutoRows), cs, env),
+        grid_auto_columns: auto_tracks(cs.get(PropertyId::GridAutoColumns), cs, env),
         ..Style::default()
+    }
+}
+
+/// 轨道项 → taffy GridTemplateComponent（repeat 展开为重复计数）。
+fn grid_component<S: taffy::style::CheapCloneStr>(
+    ts: &crate::css::property::TrackSize,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+) -> taffy::style::GridTemplateComponent<S> {
+    match ts {
+        crate::css::property::TrackSize::Repeat(n, list) => taffy::style_helpers::repeat(
+            *n,
+            list.iter()
+                .map(|t| track_sizing(t, cs, env))
+                .collect::<Vec<_>>(),
+        ),
+        other => taffy::style::GridTemplateComponent::Single(track_sizing(other, cs, env)),
+    }
+}
+
+/// 轨道尺寸 → taffy TrackSizingFunction。极小侧 fr / 嵌套 minmax / 嵌套
+/// repeat 属解析容错场景（CSS 禁止），防御性归 auto。
+fn track_sizing(
+    ts: &crate::css::property::TrackSize,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+) -> taffy::prelude::TrackSizingFunction {
+    use taffy::style_helpers;
+    match ts {
+        crate::css::property::TrackSize::Len(lp) => track_lp(lp, cs, env),
+        crate::css::property::TrackSize::Fr(v) => style_helpers::fr(*v),
+        crate::css::property::TrackSize::Auto => style_helpers::auto(),
+        crate::css::property::TrackSize::MaxContent => style_helpers::max_content(),
+        crate::css::property::TrackSize::MinContent => style_helpers::min_content(),
+        crate::css::property::TrackSize::MinMax(min, max) => {
+            style_helpers::minmax(min_side(min, cs, env), max_side(max, cs, env))
+        }
+        crate::css::property::TrackSize::Repeat(_, _) => style_helpers::auto(),
+    }
+}
+
+fn track_lp(
+    lp: &LengthPercentage,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+) -> taffy::prelude::TrackSizingFunction {
+    use taffy::style_helpers;
+    match lp {
+        LengthPercentage::Percent(f) => style_helpers::percent(*f),
+        other => style_helpers::length(resolve_px(other, cs, env).unwrap_or(0.0)),
+    }
+}
+
+fn min_side(
+    ts: &crate::css::property::TrackSize,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+) -> taffy::prelude::MinTrackSizingFunction {
+    use taffy::style_helpers;
+    match ts {
+        crate::css::property::TrackSize::Len(lp) => match lp {
+            LengthPercentage::Percent(f) => style_helpers::percent(*f),
+            other => style_helpers::length(resolve_px(other, cs, env).unwrap_or(0.0)),
+        },
+        crate::css::property::TrackSize::MinContent => style_helpers::min_content(),
+        crate::css::property::TrackSize::MaxContent => style_helpers::max_content(),
+        // 极小侧无 fr（CSS 禁止）；嵌套 minmax/repeat 容错归 auto
+        _ => style_helpers::auto(),
+    }
+}
+
+fn max_side(
+    ts: &crate::css::property::TrackSize,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+) -> taffy::prelude::MaxTrackSizingFunction {
+    use taffy::style_helpers;
+    match ts {
+        crate::css::property::TrackSize::Len(lp) => match lp {
+            LengthPercentage::Percent(f) => style_helpers::percent(*f),
+            other => style_helpers::length(resolve_px(other, cs, env).unwrap_or(0.0)),
+        },
+        crate::css::property::TrackSize::Fr(v) => style_helpers::fr(*v),
+        crate::css::property::TrackSize::MinContent => style_helpers::min_content(),
+        crate::css::property::TrackSize::MaxContent => style_helpers::max_content(),
+        _ => style_helpers::auto(),
+    }
+}
+
+/// grid-auto-rows/columns（单长度解析子集）→ taffy 自动轨道列表；
+/// 缺席 → 空（taffy 默认 = auto 行为）。
+fn auto_tracks(
+    v: Option<&crate::css::property::DeclValue>,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+) -> Vec<taffy::prelude::TrackSizingFunction> {
+    match v {
+        Some(DeclValue::LenAuto(Some(lp))) => {
+            vec![track_lp(lp, cs, env)]
+        }
+        _ => Vec::new(),
     }
 }
 

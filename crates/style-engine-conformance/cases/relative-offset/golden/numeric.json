@@ -1,0 +1,42 @@
+{
+ "meta": {
+  "generator": "tools/dump_rects.py",
+  "browser": "chromium",
+  "browser_version": "153.0.8010.12",
+  "viewport": [
+   800.0,
+   600.0
+  ],
+  "device_scale_factor": 1.0,
+  "fonts": []
+ },
+ "boxes": [
+  {
+   "key": 1,
+   "rect": [
+    0,
+    0,
+    200,
+    40
+   ]
+  },
+  {
+   "key": 2,
+   "rect": [
+    15,
+    10,
+    60,
+    20
+   ]
+  },
+  {
+   "key": 3,
+   "rect": [
+    0,
+    20,
+    40,
+    20
+   ]
+  }
+ ]
+}

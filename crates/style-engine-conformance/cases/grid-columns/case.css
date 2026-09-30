@@ -1,0 +1,8 @@
+/* grid 双列轨道 + gap（第五批③）：100px 1fr 双列、固定双行 40px、
+   gap 6px——验收轨道解析、fr 分配、gap 消费与二维放置。 */
+body { margin: 0; }
+.grid { display: grid; grid-template-columns: 100px 1fr; grid-template-rows: 40px 40px; gap: 6px; width: 260px; }
+.c1 { background-color: #0ea5e9; }
+.c2 { background-color: #f59e0b; }
+.c3 { background-color: #10b981; }
+.c4 { background-color: #ef4444; }

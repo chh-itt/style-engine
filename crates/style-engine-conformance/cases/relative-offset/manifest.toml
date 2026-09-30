@@ -1,0 +1,5 @@
+# position:relative 偏移、流槽不动（第五批③）
+viewport = [800.0, 600.0]
+scale = 1.0
+features = ["position-relative", "background-color"]
+tolerance = 0.5

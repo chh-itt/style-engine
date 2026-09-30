@@ -1,0 +1,5 @@
+# flex + gap（第五批③）：主轴 gap 消费、默认 stretch、padding 收缩
+viewport = [800.0, 600.0]
+scale = 1.0
+features = ["flex", "gap", "background-color"]
+tolerance = 0.5

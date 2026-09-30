@@ -1,0 +1,7 @@
+/* flex 行向 + gap（第五批③）：三子项定宽、容器 padding 8px、gap 10px——
+   验收 flex 主轴排布、gap 消费、align-items 默认 stretch（子项高=内容高）。 */
+body { margin: 0; }
+.row { display: flex; flex-direction: row; gap: 10px; padding: 8px; width: 300px; height: 50px; }
+.a { width: 60px; background-color: #7c3aed; }
+.b { width: 80px; background-color: #059669; }
+.c { width: 100px; background-color: #db2777; }
