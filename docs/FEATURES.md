@@ -19,6 +19,7 @@
 - 绘制：背景色、线性/径向渐变（sink 内 stop 加密对齐 sRGB 插值）、圆角、边框、阴影、opacity、图片、圆角矩形 clip
 - 文本：单 style run、断行、字体注册与基础 fallback（测量内置，见 ADR-0006）
 - 状态与动画：StateFlags、transition（可插值属性子集）
+- T0 零容忍收敛（二期⑤）：conformance 全量绿且零 xfail——Numeric 16 用例（仅存 xfail 项 calc-width 已于二期①转正）+ Pixel 3 用例（二期④通道转正）；9 manifest 显式 xfail=false、其余 serde 默认 false，零 xfail 资产存续，T0 范围内 Class 3–5 零违规；含文本/变换用例暂不入 Pixel 通道属 ⑦ 能力缺口（非 xfail，⑦ 转正后并入）
 
 ## T1 — v0.2+
 
