@@ -49,6 +49,12 @@ impl std::ops::Deref for SelString {
     }
 }
 
+impl AsRef<str> for SelString {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 impl std::borrow::Borrow<str> for SelString {
     fn borrow(&self) -> &str {
         &self.0
@@ -319,11 +325,20 @@ impl<'a> ElementTrait for TreeNode<'a> {
     fn attr_matches(
         &self,
         _ns: &NamespaceConstraint<&SelString>,
-        _local_name: &SelString,
-        _operation: &AttrSelectorOperation<&SelString>,
+        local_name: &SelString,
+        operation: &AttrSelectorOperation<&SelString>,
     ) -> bool {
-        // MVP：无属性模型，属性选择器恒不匹配（偏差记录 FEATURES.md）
-        false
+        // 第五批⑮属性选择器：宿主经 StyleNode.attrs 供属性（BTreeMap）。
+        // [attr]（Exists）=存在即命中；带值操作（=、~=、^= 等）经
+        // eval_str（大小写敏感性已随选择器文法封装在操作里）。GUI 树无
+        // 命名空间。
+        let attrs = &self.0.node(self.1).attrs;
+        match operation {
+            AttrSelectorOperation::Exists => attrs.contains_key(local_name.as_str()),
+            op => attrs
+                .get(local_name.as_str())
+                .is_some_and(|v| op.eval_str(v)),
+        }
     }
 
     fn match_non_ts_pseudo_class(
@@ -513,6 +528,45 @@ mod tests {
         assert!(parse_selector_list(":::bad").is_err());
         assert!(parse_selector_list(".a >> .b").is_err());
         assert!(parse_selector_list("div.card > h1").is_ok());
+    }
+
+    #[test]
+    fn attribute_selectors() {
+        // 第五批⑮：属性选择器——宿主经 StyleNode.attrs 供属性（BTreeMap）；
+        // [attr]=存在即命中（空值也算），带值操作=、、~=、^=、$=、*=
+        // 大小写敏感（GUI 树无命名空间）
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let mk = |attrs: &[(&str, &str)]| StyleNode {
+            name: Some("button".to_string()),
+            attrs: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let a = tree.insert_child(
+            root,
+            mk(&[("data-kind", "primary"), ("data-tags", "a b c")]),
+        );
+        let b = tree.insert_child(root, mk(&[("data-on", "")]));
+        let c = tree.insert_child(root, mk(&[]));
+
+        assert!(matched(&tree, a, "button[data-kind]"));
+        assert!(matched(&tree, a, "button[data-kind=primary]"));
+        assert!(matched(&tree, a, "button[data-kind^=prim]"));
+        assert!(matched(&tree, a, "button[data-kind$=ary]"));
+        assert!(matched(&tree, a, "button[data-kind*=imar]"));
+        assert!(
+            matched(&tree, a, "button[data-kind~=primary]"),
+            "单词表包含"
+        );
+        assert!(matched(&tree, a, "button[data-tags~=b]"), "多词表包含");
+        assert!(!matched(&tree, a, "button[data-tags~=d]"));
+        assert!(!matched(&tree, a, "button[data-kind=Primary]"));
+        assert!(matched(&tree, b, "[data-on]"), "空值属性存在即命中");
+        assert!(!matched(&tree, c, "[data-kind]"));
+        assert!(!matched(&tree, c, "button[data-x=y]"));
     }
 
     #[test]

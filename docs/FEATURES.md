@@ -4,7 +4,7 @@
 
 ## T0 — v0.1（conformance 零容忍覆盖）
 
-- 语法层：真实 CSS 文本；选择器子集 = type / class（class 属性为空格分隔 token，引擎归一）/ universal / 伪类（:hover :active :focus :disabled :checked）/ 后代 / 子代 / 分组；简写展开（margin padding border background color font）；CSS 宽关键字（inherit/initial/unset/revert）；custom properties + var()
+- 语法层：真实 CSS 文本；选择器子集 = type / #id / class（class 属性为空格分隔 token，引擎归一）/ universal / 伪类（:hover :active :focus :disabled :checked）/ 结构伪类 :nth-child 系与 :first/:last/:only-child（selectors 兄弟遍历，天然支持）/ :is / :not / 属性选择器六操作符（第五批⑮：宿主经 StyleNode.attrs 供值——[attr] 存在即命中、[attr=v] 值匹配大小写敏感、~=/^=/$=/*= 全数支持，BTreeMap 确定序）/ 后代 / 子代 / 分组；简写展开（margin padding border background color font）；CSS 宽关键字（inherit/initial/unset/revert）；custom properties + var()
 - @media 子集：width/height、prefers-color-scheme、prefers-reduced-motion（条件值由 Environment 提供）
 - 值与颜色：px/em/rem/%/vw/vh；calc() 基础四则；color crate 全谱（hex/rgb/hsl/oklch/color()/light-dark()）
 - 级联：三 Origin 双键排序（normal 升序 Default < Stylesheet < Inline；important 升序 Stylesheet < Inline < Default；含 !important 交织用例，以浏览器为基准验证）
@@ -15,7 +15,7 @@
 
 ## T1 — v0.2+
 
-:nth-child 系、属性选择器、keyframes 动画、@font-face、媒体查询扩展（pointer/hover 类）、容器查询、bidi 与多 run 混排、flex/grid 子项 z-index（无 position）、text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter/clip-path 触发的 stacking context 已落地（第四批④：仅 SC 触发、不做滤镜/裁剪效果，见偏差核对 filter/clip-path 条）
+keyframes 动画、媒体查询扩展（pointer/hover 类）、容器查询、bidi 与多 run 混排、flex/grid 子项 z-index（无 position）、text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter/clip-path 触发的 stacking context 已落地（第四批④：仅 SC 触发、不做滤镜/裁剪效果，见偏差核对 filter/clip-path 条）
 
 ## T2 — 暂缓（记录重估条件）
 

@@ -49,6 +49,9 @@ pub struct StyleNode {
     pub declarations: DeclarationBlock,
     /// 文本内容（叶节点；:empty 判定与 T5 文本布局用）。
     pub text: Option<String>,
+    /// 属性表（第五批⑮属性选择器数据源）：宿主供 [attr]/[attr=value] 匹配；
+    /// BTreeMap 保证遍历序确定。GUI 树无命名空间、值大小写敏感。
+    pub attrs: std::collections::BTreeMap<String, String>,
     /// 富文本 span（T5c）：声明覆盖文本的字节区间 [range.0, range.1)。
     pub spans: SmallVec<[TextSpan; 2]>,
 }

@@ -753,7 +753,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        let (b, r) = block("box-shadow: inset 0 2px inset red");
+        let (_b, r) = block("box-shadow: inset 0 2px inset red");
         assert!(!r.is_clean(), "重复 inset 应整条丢弃");
     }
 
