@@ -2221,6 +2221,33 @@ mod tests {
     }
 
     #[test]
+    fn display_inline_contractual_block_participation() {
+        // 第五批⑧契约：display:inline* 解析接受并归一（无 IFC）——inline
+        // / inline-block 元素按 block 参与布局（纵向堆叠，无行盒并排），
+        // 声明不丢弃（is_clean 保持 true，归一化走 tracing 告警非报告失败）。
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 300px; } div.a { display: inline; height: 40px; background-color: #ff0000; } div.b { display: inline-block; height: 40px; background-color: #0000ff; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("a")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), node("b")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame.find(Key(2)).unwrap();
+        let b = frame.find(Key(3)).unwrap();
+        // 纵向堆叠：b 顶 = a 底（block 参与），而非行盒并排
+        assert!((b.y - (a.y + a.height)).abs() < 0.5, "inline 应块化堆叠");
+        assert!(a.width > 0.0 && b.width > 0.0);
+    }
+
+    #[test]
     fn wrap_two_phase_frame_layout() {
         // T5c-2：两阶段帧通路（无字体时 remeasure 集为空，验证不回归）
         let mut engine: StyleEngine<Key> = StyleEngine::new();

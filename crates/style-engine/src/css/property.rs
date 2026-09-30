@@ -336,7 +336,8 @@ pub enum GridAutoFlowKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Display {
-    /// taffy 无 inline formatting context；`inline*` 块化并告警（偏差已记录）。
+    /// taffy 无 IFC；inline* 解析期归一并 tracing 告警（第五批⑧契约）：
+    /// inline/inline-block→Block、inline-flex→Flex、inline-grid→Grid。
     Block,
     Flex,
     Grid,
@@ -650,6 +651,19 @@ pub fn parse_border_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 
 pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
+        // display:inline* 归一化告警（第五批⑧契约）：taffy 无 IFC——
+        // inline/inline-block 参与 Block、inline-flex/inline-grid 参与
+        // Flex/Grid；inline 内容经文本叶承载（语义契约见 FEATURES 布局映射条）
+        if matches!(
+            s.to_ascii_lowercase().as_str(),
+            "inline" | "inline-block" | "inline-flex" | "inline-grid"
+        ) {
+            tracing::warn!(
+                target: "style_engine::css",
+                display = s,
+                "display:inline* normalized: no IFC, participates as block-level"
+            );
+        }
         Some(match_ignore_ascii_case!(s,
             "block" | "inline" | "inline-block" | "flow-root" => Display::Block,
             "flex" | "inline-flex" => Display::Flex,
