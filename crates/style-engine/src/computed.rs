@@ -11,9 +11,9 @@
 use crate::cascade::cascade_declarations;
 use crate::css::decl::{DeclSource, token_buf_to_string};
 use crate::css::property::{
-    Align, BackgroundImage, DeclValue, Display, FamilyName, FlexDirection, FlexWrap,
-    FontFamilyList, FontStyle, GridAutoFlowKind, GridTemplate, LineHeight, Overflow, Position,
-    PropertyId, TextAlign, WhiteSpace,
+    Align, AnimDirection, AnimFillMode, BackgroundImage, DeclValue, Display, FamilyName,
+    FlexDirection, FlexWrap, FontFamilyList, FontStyle, GridAutoFlowKind, GridTemplate, LineHeight,
+    Overflow, Position, PropertyId, TextAlign, TimingFn, WhiteSpace,
 };
 use crate::css::stylesheet::{MediaEnv, Stylesheet};
 use crate::css::value::{ColorValue, LengthPercentage, ResolveCtx};
@@ -28,6 +28,13 @@ pub struct ComputedStyle {
     values: BTreeMap<PropertyId, DeclValue>,
     /// 已解析 custom properties（终值文本）。
     custom: BTreeMap<String, String>,
+}
+
+impl ComputedStyle {
+    /// 动画覆盖（第五批⑰）：级联后按关键帧采样覆写单个属性。
+    pub fn set_value(&mut self, id: PropertyId, v: DeclValue) {
+        self.values.insert(id, v);
+    }
 }
 
 /// 属性继承性（CSS 级联继承语义：文本/字体类继承，盒模型不继承）。
@@ -67,6 +74,14 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         | P::GridAutoColumns => DeclValue::LenAuto(None),
         // z-index 初始 auto → ZIndex(None)；显式数字 → Some（auto 不再物化为 0）
         P::ZIndex => DeclValue::ZIndex(None),
+        // 动画描述符（第五批⑰）：不可动画、不参与插值
+        P::AnimationName => DeclValue::AnimationName(None),
+        P::AnimationDuration => DeclValue::AnimationTime(0.0),
+        P::AnimationDelay => DeclValue::AnimationTime(0.0),
+        P::AnimationIterationCount => DeclValue::AnimationIteration(1.0),
+        P::AnimationTimingFunction => DeclValue::AnimationTiming(TimingFn::Ease),
+        P::AnimationDirection => DeclValue::AnimationDirection(AnimDirection::Normal),
+        P::AnimationFillMode => DeclValue::AnimationFillMode(AnimFillMode::None),
         P::MinWidth | P::MinHeight => DeclValue::Len(LengthPercentage::Px(0.0)),
         P::AspectRatio => DeclValue::AspectRatio(None),
         // margin 初始值为 0（CSS）；显式 auto 仍解析为 LenAuto(None) → 居中语义保留

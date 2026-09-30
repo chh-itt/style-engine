@@ -4,7 +4,9 @@
 //! height、prefers-color-scheme、prefers-reduced-motion）。其余 at-rule
 //! 按容错跳过并告警。
 
-use crate::css::decl::{TokenBuf, capture_tokens, parse_declaration_block, token_buf_to_string};
+use crate::css::decl::{
+    DeclarationBlock, TokenBuf, capture_tokens, parse_declaration_block, token_buf_to_string,
+};
 use crate::css::value::{ResolveCtx, parse_length_percentage};
 use crate::error::ParseReport;
 use crate::selector::{StyleSelectorList, parse_selector_list};
@@ -25,7 +27,24 @@ pub struct Rule {
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    pub keyframes: Vec<KeyframesRule>,
     pub report: ParseReport,
+}
+
+// ---------- @keyframes（第五批⑰） ----------
+
+/// @keyframes 规则：动画名 + 帧序表（offset 升序由采样端排序消费）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyframesRule {
+    pub name: String,
+    pub frames: Vec<Keyframe>,
+}
+
+/// 单帧：offset ∈ [0,1]（from=0、to=1、百分比/100）+ 声明块。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keyframe {
+    pub offset: f32,
+    pub declarations: DeclarationBlock,
 }
 
 // ---------- @media 子集 ----------
@@ -337,6 +356,7 @@ fn parse_feature_body(p: &mut Parser<'_>) -> Result<MediaFeature, ParseError<Bas
 struct StylesheetParser {
     report: ParseReport,
     rules: Vec<Rule>,
+    keyframes: Vec<KeyframesRule>,
     media: Option<MediaQuery>,
     order: u32,
 }
@@ -384,7 +404,7 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
 }
 
 impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
-    type Prelude = Option<MediaQuery>;
+    type Prelude = AtPrelude;
     type AtRule = ();
     type Error = ();
 
@@ -396,7 +416,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
         if name.eq_ignore_ascii_case("media") {
             let loc = input.current_source_location();
             match parse_media_query(input) {
-                Ok(q) => Ok(Some(q)),
+                Ok(q) => Ok(AtPrelude::Media(q)),
                 Err(_) => {
                     self.report.push(
                         loc.line + 1,
@@ -410,8 +430,33 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
             // @font-face 静默跳过（第五批⑯契约）：字体资源=宿主经 add_font
             // 推送字节（零副作用，引擎不取 src() URL），家族名按字体内部名
             // 匹配；良性已知规则不产生报告警告（真实世界 CSS 常携带之，
-            // 告警应留给影响渲染的事）。Ok(None) → parse_block 消费整块。
-            Ok(None)
+            // 告警应留给影响渲染的事）。Skip → parse_block 消费整块。
+            Ok(AtPrelude::Skip)
+        } else if name.eq_ignore_ascii_case("keyframes")
+            || name.eq_ignore_ascii_case("-webkit-keyframes")
+        {
+            // @keyframes（第五批⑰）：prelude = 动画名（ident 或字符串）
+            let loc = input.current_source_location();
+            let ok = input.try_parse(|p| -> Result<String, ParseError<()>> {
+                p.skip_whitespace();
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(id) if !id.starts_with("--") => Ok(id.to_string()),
+                    Token::QuotedString(s) => Ok(s.to_string()),
+                    _ => Err(ParseError::unexpected_token()),
+                }
+            });
+            match ok {
+                Ok(n) => Ok(AtPrelude::Keyframes(n)),
+                Err(_) => {
+                    self.report.push(
+                        loc.line + 1,
+                        loc.column + 1,
+                        format!("invalid @keyframes name '{name}'"),
+                    );
+                    Err(ParseError::unexpected_token())
+                }
+            }
         } else {
             // @import/@supports/@container…：MVP 跳过整条规则并告警
             let loc = input.current_source_location();
@@ -430,29 +475,158 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
         _start: &cssparser::ParserState,
         input: &mut Parser<'i>,
     ) -> Result<(), ParseError<()>> {
-        let Some(query) = prelude else {
-            // @font-face（第五批⑯）：整块静默消费——无规则产出、无告警
-            // （块 token 自包含，next() 逐 token 推进至块尾即整块耗尽）
-            while input.next().is_ok() {}
-            return Ok(());
-        };
-        // 递归解析媒体块内规则（继承 media 上下文与源顺序）
-        let mut sub = StylesheetParser {
-            report: ParseReport::new(),
-            rules: Vec::new(),
-            media: Some(query),
-            order: self.order,
-        };
-        {
-            let iter = cssparser::RuleBodyParser::new(input, &mut sub);
-            for item in iter {
-                let _ = item; // 错误已在 sub 内报告
+        match prelude {
+            AtPrelude::Skip => {
+                // @font-face（第五批⑯）：整块静默消费——无规则产出、无告警
+                // （块 token 自包含，next() 逐 token 推进至块尾即整块耗尽）
+                while input.next().is_ok() {}
+                Ok(())
+            }
+            AtPrelude::Media(query) => {
+                // 递归解析媒体块内规则（继承 media 上下文与源顺序）
+                let mut sub = StylesheetParser {
+                    report: ParseReport::new(),
+                    rules: Vec::new(),
+                    keyframes: Vec::new(),
+                    media: Some(query),
+                    order: self.order,
+                };
+                {
+                    let iter = cssparser::RuleBodyParser::new(input, &mut sub);
+                    for item in iter {
+                        let _ = item; // 错误已在 sub 内报告
+                    }
+                }
+                self.order = sub.order;
+                self.rules.extend(sub.rules);
+                self.report.extend(sub.report);
+                Ok(())
+            }
+            AtPrelude::Keyframes(name) => {
+                // 第五批⑰：帧体解析——帧选择器（from/to/百分比，逗号分组）
+                // + 声明块
+                let mut sub = KeyframesParser::default();
+                {
+                    let iter = cssparser::RuleBodyParser::new(input, &mut sub);
+                    for item in iter {
+                        let _ = item; // 错误已在 sub 内报告
+                    }
+                }
+                self.report.extend(sub.report);
+                self.keyframes.push(KeyframesRule {
+                    name,
+                    frames: sub.frames,
+                });
+                Ok(())
             }
         }
-        self.order = sub.order;
-        self.rules.extend(sub.rules);
-        self.report.extend(sub.report);
+    }
+}
+
+/// at-rule prelude 分类（第五批⑰扩展：media / keyframes / 静默跳过）。
+#[derive(Debug, Clone)]
+enum AtPrelude {
+    Media(MediaQuery),
+    Keyframes(String),
+    /// @font-face（第五批⑯）：整块静默消费。
+    Skip,
+}
+
+/// @keyframes 块体解析器：帧选择器 → 声明块。
+#[derive(Default)]
+struct KeyframesParser {
+    report: ParseReport,
+    frames: Vec<Keyframe>,
+}
+
+impl<'i> cssparser::QualifiedRuleParser<'i> for KeyframesParser {
+    type Prelude = Vec<f32>;
+    type QualifiedRule = ();
+    type Error = ();
+
+    fn parse_prelude(&mut self, input: &mut Parser<'i>) -> Result<Self::Prelude, ParseError<()>> {
+        let loc = input.current_source_location();
+        let mut offsets = Vec::new();
+        loop {
+            let ok = input.try_parse(|p| -> Result<f32, ParseError<()>> {
+                p.skip_whitespace();
+                let t = p.next()?.clone();
+                match &t {
+                    // cssparser Percentage.unit_value = 值/100（50% → 0.5）
+                    Token::Percentage { unit_value, .. } => Ok(unit_value.clamp(0.0, 1.0)),
+                    Token::Ident(id) if id.eq_ignore_ascii_case("from") => Ok(0.0),
+                    Token::Ident(id) if id.eq_ignore_ascii_case("to") => Ok(1.0),
+                    _ => Err(ParseError::unexpected_token()),
+                }
+            });
+            match ok {
+                Ok(v) => offsets.push(v),
+                Err(_) => break,
+            }
+            // 逗号分组（"0%, 50% { … }"）；无逗号则收束
+            let has_comma = input
+                .try_parse(|p| -> Result<(), ParseError<()>> {
+                    p.skip_whitespace();
+                    let t = p.next()?.clone();
+                    match t {
+                        Token::Comma => Ok(()),
+                        _ => Err(ParseError::unexpected_token()),
+                    }
+                })
+                .is_ok();
+            if !has_comma {
+                break;
+            }
+        }
+        if offsets.is_empty() {
+            self.report.push(
+                loc.line + 1,
+                loc.column + 1,
+                "invalid keyframe selector".to_string(),
+            );
+            return Err(ParseError::unexpected_token());
+        }
+        Ok(offsets)
+    }
+
+    fn parse_block(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &cssparser::ParserState,
+        input: &mut Parser<'i>,
+    ) -> Result<(), ParseError<()>> {
+        let (block, report) = parse_declaration_block(input);
+        self.report.extend(report);
+        for offset in prelude {
+            self.frames.push(Keyframe {
+                offset,
+                declarations: block.clone(),
+            });
+        }
         Ok(())
+    }
+}
+
+impl<'i> cssparser::AtRuleParser<'i> for KeyframesParser {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = ();
+    // 帧体内不允许嵌套 at-rule（默认实现拒绝——RuleBodyItemParser 的
+    // trait bound 要求本实现存在）
+}
+
+impl<'i> cssparser::DeclarationParser<'i> for KeyframesParser {
+    type Declaration = ();
+    type Error = ();
+    // 帧块内不允许裸声明（漏写帧选择器）；默认实现容错拒绝
+}
+
+impl<'i> cssparser::RuleBodyItemParser<'i, (), ()> for KeyframesParser {
+    fn parse_declarations(&self) -> bool {
+        false
+    }
+    fn parse_qualified(&self) -> bool {
+        true
     }
 }
 
@@ -490,6 +664,7 @@ pub fn parse_stylesheet(source: &str) -> Stylesheet {
     }
     Stylesheet {
         rules: sp.rules,
+        keyframes: sp.keyframes,
         report: sp.report,
     }
 }
@@ -596,6 +771,32 @@ mod tests {
             any_hover: false,
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn keyframes_parse() {
+        // 第五批⑰：@keyframes 解析——from/to/百分比帧、逗号分组帧选择、
+        // -webkit-keyframes 别名、坏帧选择器整帧容错丢弃
+        let sheet = parse_stylesheet(
+            "@keyframes grow { from { width: 100px } 50% { width: 150px } \
+             to { width: 200px } } @-webkit-keyframes fade { from { opacity: 1 } }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.keyframes.len(), 2);
+        let grow = &sheet.keyframes[0];
+        assert_eq!(grow.name, "grow");
+        assert_eq!(grow.frames.len(), 3);
+        assert_eq!(grow.frames[0].offset, 0.0);
+        assert_eq!(grow.frames[1].offset, 0.5);
+        assert_eq!(grow.frames[2].offset, 1.0);
+        // 逗号分组：0%, 50% { … } 产出两帧
+        let sheet2 = parse_stylesheet("@keyframes pulse { 0%, 50% { opacity: 0.5 } }");
+        assert!(sheet2.report.is_clean(), "{:?}", sheet2.report);
+        assert_eq!(sheet2.keyframes[0].frames.len(), 2);
+        // 坏帧选择器：整帧容错丢弃 + 告警
+        let bad = parse_stylesheet("@keyframes bad { nope { width: 1px } }");
+        assert!(!bad.report.is_clean());
+        assert!(bad.keyframes[0].frames.is_empty());
     }
 
     #[test]

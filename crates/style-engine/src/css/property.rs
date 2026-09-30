@@ -21,6 +21,15 @@ pub enum PropertyId {
     Bottom,
     Left,
     ZIndex,
+    // 动画（第五批⑰）：描述符属性——不可动画、不参与插值，仅驱动
+    // @keyframes 采样
+    AnimationName,
+    AnimationDuration,
+    AnimationDelay,
+    AnimationIterationCount,
+    AnimationTimingFunction,
+    AnimationDirection,
+    AnimationFillMode,
     // 布局：盒子
     Width,
     Height,
@@ -201,6 +210,13 @@ impl PropertyId {
             Self::Bottom => "bottom",
             Self::Left => "left",
             Self::ZIndex => "z-index",
+            Self::AnimationName => "animation-name",
+            Self::AnimationDuration => "animation-duration",
+            Self::AnimationDelay => "animation-delay",
+            Self::AnimationIterationCount => "animation-iteration-count",
+            Self::AnimationTimingFunction => "animation-timing-function",
+            Self::AnimationDirection => "animation-direction",
+            Self::AnimationFillMode => "animation-fill-mode",
             Self::Width => "width",
             Self::Height => "height",
             Self::MinWidth => "min-width",
@@ -326,6 +342,16 @@ pub enum DeclValue {
     /// z-index：auto → None（级联缺席等价；「有值且为 Some」是将来 ADR-0008
     /// 判定 stacking context 的依据），数字 → Some。
     ZIndex(Option<f32>),
+    // 动画描述符（第五批⑰）：不可动画、不参与 DeclValue 插值
+    /// animation-name：none → None。
+    AnimationName(Option<String>),
+    /// animation-duration / animation-delay（秒；负延迟合法）。
+    AnimationTime(f32),
+    /// animation-iteration-count：infinite → f32::INFINITY。
+    AnimationIteration(f32),
+    AnimationTiming(TimingFn),
+    AnimationDirection(AnimDirection),
+    AnimationFillMode(AnimFillMode),
     /// filter/clip-path 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
     /// 语义位（ADR-0008 全集），不携带也不实现滤镜/裁剪效果。
     Effect(bool),
@@ -1644,6 +1670,12 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         | P::BorderBottomLeftRadius => parse_corner_radius(p),
         P::Opacity | P::FlexGrow | P::FlexShrink => parse_number_value(p),
         P::ZIndex => parse_z_index(p),
+        P::AnimationName => parse_animation_name(p),
+        P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
+        P::AnimationIterationCount => parse_iteration_count(p),
+        P::AnimationTimingFunction => parse_timing_fn(p),
+        P::AnimationDirection => parse_anim_direction(p),
+        P::AnimationFillMode => parse_anim_fill_mode(p),
         P::FontWeight => parse_font_weight(p),
         P::Color
         | P::BackgroundColor
@@ -1691,4 +1723,282 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
             parse_border_width(p)
         }
     }
+}
+
+// ---------- 动画（第五批⑰）：缓动/方向/fill 与关键帧采样插值 ----------
+
+/// timing function（第五批⑰）：linear/ease 系三次贝塞尔 + steps()。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TimingFn {
+    Linear,
+    Ease,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    /// (n, jump_end)：jump_end=true → 阶跃发生在段尾（CSS steps 默认 end）。
+    Steps(u32, bool),
+}
+
+impl TimingFn {
+    /// 缓动求值：t ∈ [0,1] → 进度 ∈ [0,1]。
+    pub fn sample(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::Steps(n, jump_end) => {
+                let n = n.max(1) as f32;
+                if jump_end {
+                    (t * n).ceil() / n
+                } else {
+                    (t * n).floor() / n
+                }
+            }
+            Self::Ease => Self::bezier(0.25, 0.1, 0.25, 1.0, t),
+            Self::EaseIn => Self::bezier(0.42, 0.0, 1.0, 1.0, t),
+            Self::EaseOut => Self::bezier(0.0, 0.0, 0.58, 1.0, t),
+            Self::EaseInOut => Self::bezier(0.42, 0.0, 0.58, 1.0, t),
+        }
+    }
+
+    /// 三次贝塞尔 (x1,y1,x2,y2) 求解：二分 x→参数 24 轮（CSS 时序函数 x
+    /// 严格单调于 [0,1]，二分稳定），再取 y。
+    fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+        fn at(p1: f32, p2: f32, t: f32) -> f32 {
+            // B(t) = 3(1-t)²t·p1 + 3(1-t)t²·p2 + t³（端点 0/1）
+            3.0 * (1.0 - t) * (1.0 - t) * t * p1 + 3.0 * (1.0 - t) * t * t * p2 + t * t * t
+        }
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..24 {
+            let mid = (lo + hi) * 0.5;
+            if at(x1, x2, mid) < x {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        at(y1, y2, (lo + hi) * 0.5)
+    }
+}
+
+/// animation-direction（第五批⑰）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnimDirection {
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+/// animation-fill-mode（第五批⑰）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnimFillMode {
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+fn parse_animation_name(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    // none | <ident>（自定义标识 --* 与 CSS 宽关键字拒绝为动画名）
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) if id.eq_ignore_ascii_case("none") => Ok(DeclValue::AnimationName(None)),
+        Token::Ident(id)
+            if !id.starts_with("--")
+                && !matches!(
+                    id.to_ascii_lowercase().as_str(),
+                    "initial" | "inherit" | "unset" | "revert"
+                ) =>
+        {
+            Ok(DeclValue::AnimationName(Some(id.to_string())))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// <time>（s/ms）→ 秒。负值合法（animation-delay 的提前段语义）。
+fn parse_time_seconds(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("s") => {
+            Ok(DeclValue::AnimationTime(*value))
+        }
+        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("ms") => {
+            Ok(DeclValue::AnimationTime(value / 1000.0))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+fn parse_iteration_count(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) if id.eq_ignore_ascii_case("infinite") => {
+            Ok(DeclValue::AnimationIteration(f32::INFINITY))
+        }
+        Token::Number { value, .. } if *value >= 0.0 => Ok(DeclValue::AnimationIteration(*value)),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+fn parse_timing_fn(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    // steps(n[, start|end]) 函数形优先（缺省第二参=end；try_parse 失败
+    // 自动回滚落回关键字形）
+    let is_steps = p.try_parse(|p| -> ValResult<()> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Function(f) if f.eq_ignore_ascii_case("steps") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if is_steps.is_ok() {
+        return timing_fn_steps_body(p);
+    }
+    keyword(p, |k| match k.to_ascii_lowercase().as_str() {
+        "linear" => Some(DeclValue::AnimationTiming(TimingFn::Linear)),
+        "ease" => Some(DeclValue::AnimationTiming(TimingFn::Ease)),
+        "ease-in" => Some(DeclValue::AnimationTiming(TimingFn::EaseIn)),
+        "ease-out" => Some(DeclValue::AnimationTiming(TimingFn::EaseOut)),
+        "ease-in-out" => Some(DeclValue::AnimationTiming(TimingFn::EaseInOut)),
+        _ => None,
+    })
+}
+
+/// steps() 块体（Function token 已消费——animation 简写复用同一入口）。
+pub(crate) fn timing_fn_steps_body(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    p.parse_nested_block(|p| {
+        p.skip_whitespace();
+        let t = p.next()?.clone();
+        let Token::Number { value, .. } = &t else {
+            return Err(p.new_error_for_next_token());
+        };
+        let n = (*value as u32).max(1);
+        p.skip_whitespace();
+        let jump_end = p
+            .try_parse(|p| -> ValResult<bool> {
+                let c = p.next()?.clone();
+                match c {
+                    Token::Comma => {}
+                    _ => return Err(p.new_error_for_next_token()),
+                }
+                p.skip_whitespace();
+                let t = p.next()?.clone();
+                let Token::Ident(id) = &t else {
+                    return Err(p.new_error_for_next_token());
+                };
+                if id.eq_ignore_ascii_case("end") {
+                    Ok(true)
+                } else if id.eq_ignore_ascii_case("start") {
+                    Ok(false)
+                } else {
+                    Err(p.new_error_for_next_token())
+                }
+            })
+            .unwrap_or(true);
+        Ok(DeclValue::AnimationTiming(TimingFn::Steps(n, jump_end)))
+    })
+}
+
+fn parse_anim_direction(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |k| match k.to_ascii_lowercase().as_str() {
+        "normal" => Some(DeclValue::AnimationDirection(AnimDirection::Normal)),
+        "reverse" => Some(DeclValue::AnimationDirection(AnimDirection::Reverse)),
+        "alternate" => Some(DeclValue::AnimationDirection(AnimDirection::Alternate)),
+        "alternate-reverse" => Some(DeclValue::AnimationDirection(
+            AnimDirection::AlternateReverse,
+        )),
+        _ => None,
+    })
+}
+
+fn parse_anim_fill_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |k| match k.to_ascii_lowercase().as_str() {
+        "none" => Some(DeclValue::AnimationFillMode(AnimFillMode::None)),
+        "forwards" => Some(DeclValue::AnimationFillMode(AnimFillMode::Forwards)),
+        "backwards" => Some(DeclValue::AnimationFillMode(AnimFillMode::Backwards)),
+        "both" => Some(DeclValue::AnimationFillMode(AnimFillMode::Both)),
+        _ => None,
+    })
+}
+
+/// 关键帧插值（第五批⑰）：可插值对 → 中间值；不可插值 → None（采样端
+/// 按 CSS 离散规则取段首帧值）。颜色经 pick_scheme 终结为 sRGB 后直排
+/// 混合（含 alpha）；长度同变体线性（跨单位离散）；transform 同名函数
+/// 逐参数插值（函数序列长度不同离散）。
+pub fn lerp_decl(a: &DeclValue, b: &DeclValue, t: f32, dark: bool) -> Option<DeclValue> {
+    use DeclValue as D;
+    let color = |x: &ColorValue, y: &ColorValue| -> Option<ColorValue> {
+        use peniko::color::AlphaColor;
+        // 先终解（light-dark → 单色），仅 Absolute 对可插值
+        let (ColorValue::Absolute(c0), ColorValue::Absolute(c1)) =
+            (x.pick_scheme(dark), y.pick_scheme(dark))
+        else {
+            return None;
+        };
+        let mix: [f32; 4] =
+            std::array::from_fn(|i| c0.components[i] + (c1.components[i] - c0.components[i]) * t);
+        Some(ColorValue::Absolute(AlphaColor::new(mix)))
+    };
+    let transforms = |x: &[TransformFn], y: &[TransformFn]| -> Option<Vec<TransformFn>> {
+        if x.len() != y.len() {
+            return None;
+        }
+        x.iter()
+            .zip(y.iter())
+            .map(|(a, b)| match (a, b) {
+                (TransformFn::Translate(x, y), TransformFn::Translate(u, v)) => {
+                    let ix = lerp_lenp(x, u, t)?;
+                    let iy = lerp_lenp(y, v, t)?;
+                    Some(TransformFn::Translate(ix, iy))
+                }
+                (TransformFn::Rotate(x), TransformFn::Rotate(u)) => {
+                    Some(TransformFn::Rotate(x + (u - x) * t))
+                }
+                (TransformFn::Scale(x, y), TransformFn::Scale(u, v)) => {
+                    Some(TransformFn::Scale(x + (u - x) * t, y + (v - y) * t))
+                }
+                (TransformFn::Matrix(a, b, c, d, e, f), TransformFn::Matrix(u, v, w, z, s, q)) => {
+                    Some(TransformFn::Matrix(
+                        a + (u - a) * t,
+                        b + (v - b) * t,
+                        c + (w - c) * t,
+                        d + (z - d) * t,
+                        e + (s - e) * t,
+                        f + (q - f) * t,
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    Some(match (a, b) {
+        (D::Number(x), D::Number(y)) => D::Number(x + (y - x) * t),
+        (D::Color(x), D::Color(y)) => D::Color(color(x, y)?),
+        (D::Len(x), D::Len(y)) => D::Len(lerp_lenp(x, y, t)?),
+        (D::LenAuto(Some(x)), D::LenAuto(Some(y))) => D::LenAuto(Some(lerp_lenp(x, y, t)?)),
+        (D::Radius(x1, y1), D::Radius(x2, y2)) => {
+            D::Radius(lerp_lenp(x1, x2, t)?, lerp_lenp(y1, y2, t)?)
+        }
+        (D::TransformOrigin(x1, y1), D::TransformOrigin(x2, y2)) => {
+            D::TransformOrigin(lerp_lenp(x1, x2, t)?, lerp_lenp(y1, y2, t)?)
+        }
+        (D::Transform(x), D::Transform(y)) => D::Transform(transforms(x, y)?),
+        _ => return None,
+    })
+}
+
+fn lerp_lenp(x: &LengthPercentage, y: &LengthPercentage, t: f32) -> Option<LengthPercentage> {
+    Some(match (x, y) {
+        (LengthPercentage::Px(u), LengthPercentage::Px(v)) => LengthPercentage::Px(u + (v - u) * t),
+        (LengthPercentage::Em(u), LengthPercentage::Em(v)) => LengthPercentage::Em(u + (v - u) * t),
+        (LengthPercentage::Rem(u), LengthPercentage::Rem(v)) => {
+            LengthPercentage::Rem(u + (v - u) * t)
+        }
+        (LengthPercentage::Percent(u), LengthPercentage::Percent(v)) => {
+            LengthPercentage::Percent(u + (v - u) * t)
+        }
+        (LengthPercentage::Vw(u), LengthPercentage::Vw(v)) => LengthPercentage::Vw(u + (v - u) * t),
+        (LengthPercentage::Vh(u), LengthPercentage::Vh(v)) => LengthPercentage::Vh(u + (v - u) * t),
+        _ => return None,
+    })
 }

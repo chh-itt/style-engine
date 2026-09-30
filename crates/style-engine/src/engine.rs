@@ -486,6 +486,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if self.dirty_style {
             self.restyle();
         }
+        // 第五批⑰：@keyframes 动画采样——每帧级联后、布局前覆写（布局与
+        // 绘制消费动画值；布局每帧全量重算，动画值变更无需独立失效标）
+        self.apply_animations();
         if let Some(root) = self.taffy_root {
             let _ = self.taffy.compute_layout(
                 root,
@@ -878,6 +881,133 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         tid
     }
 
+    /// @keyframes 动画采样（第五批⑰）：对声明了 animation-name 且命中
+    /// @keyframes 的节点，按 now（宿主帧推进，秒）采样关键帧轨道并覆写
+    /// 计算样式。动画层高于作者级联（CSS：动画覆盖普通声明，仅
+    /// !important 更高——分层为残余偏差）；缓动按关键帧段施加（CSS 时序
+    /// 函数语义）；不可插值对按离散规则（段进度<0.5 取前帧）。
+    fn apply_animations(&mut self) {
+        use crate::css::property::{AnimDirection, AnimFillMode, DeclValue, PropertyId};
+        use std::collections::BTreeMap;
+        let dark = self.media.dark;
+        let now = self.now as f32;
+        let sheet = &self.sheet;
+        let styles = &mut self.styles;
+        for cs in styles.values_mut() {
+            let name = match cs.get(PropertyId::AnimationName) {
+                Some(DeclValue::AnimationName(Some(n))) => n.clone(),
+                _ => continue,
+            };
+            let Some(rule) = sheet.keyframes.iter().find(|r| r.name == name) else {
+                continue;
+            };
+            let duration = match cs.get(PropertyId::AnimationDuration) {
+                Some(DeclValue::AnimationTime(s)) => *s,
+                _ => 0.0,
+            };
+            if duration <= 0.0 || rule.frames.is_empty() {
+                continue;
+            }
+            let delay = match cs.get(PropertyId::AnimationDelay) {
+                Some(DeclValue::AnimationTime(s)) => *s,
+                _ => 0.0,
+            };
+            let iterations = match cs.get(PropertyId::AnimationIterationCount) {
+                Some(DeclValue::AnimationIteration(n)) => *n,
+                _ => 1.0,
+            };
+            let timing = match cs.get(PropertyId::AnimationTimingFunction) {
+                Some(DeclValue::AnimationTiming(t)) => *t,
+                _ => crate::css::property::TimingFn::Ease,
+            };
+            let direction = match cs.get(PropertyId::AnimationDirection) {
+                Some(DeclValue::AnimationDirection(d)) => *d,
+                _ => crate::css::property::AnimDirection::Normal,
+            };
+            let fill = match cs.get(PropertyId::AnimationFillMode) {
+                Some(DeclValue::AnimationFillMode(f)) => *f,
+                _ => crate::css::property::AnimFillMode::None,
+            };
+            let local = now - delay;
+            // 采样点：未开始（backwards/both → 0）/进行中/已结束
+            // （forwards/both → 1）；其余阶段用底层值（不覆写）
+            let total = duration * iterations.max(0.0);
+            let p_eff: Option<f32> = if local < 0.0 {
+                matches!(fill, AnimFillMode::Backwards | AnimFillMode::Both).then_some(0.0)
+            } else if iterations.is_infinite() || local < total {
+                let raw = local / duration;
+                let cycle_index = raw.floor();
+                let seg = raw - cycle_index;
+                // 方向折叠（缓动在段内施加）
+                let folded = match direction {
+                    AnimDirection::Normal => seg,
+                    AnimDirection::Reverse => 1.0 - seg,
+                    AnimDirection::Alternate => {
+                        if (cycle_index as i64) % 2 == 0 {
+                            seg
+                        } else {
+                            1.0 - seg
+                        }
+                    }
+                    AnimDirection::AlternateReverse => {
+                        if (cycle_index as i64) % 2 == 0 {
+                            1.0 - seg
+                        } else {
+                            seg
+                        }
+                    }
+                };
+                Some(folded)
+            } else {
+                matches!(fill, AnimFillMode::Forwards | AnimFillMode::Both).then_some(1.0)
+            };
+            let Some(p_eff) = p_eff else { continue };
+            // 轨道收集（Parsed 声明；var() 载体不入轨——MVP 偏差）
+            let mut tracks: BTreeMap<PropertyId, Vec<(f32, &DeclValue)>> = BTreeMap::new();
+            for f in &rule.frames {
+                for d in &f.declarations.decls {
+                    if let crate::css::decl::DeclSource::Parsed(v) = &d.value {
+                        tracks.entry(d.id).or_default().push((f.offset, v));
+                    }
+                }
+            }
+            for (pid, mut track) in tracks {
+                track.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                // p < 首帧 offset 或 > 末帧 offset → 合成帧取 underlying
+                //（CSS：缺 0%/100% 关键帧时以底层值补帧）→ 不覆写
+                if p_eff < track[0].0 || p_eff > track[track.len() - 1].0 {
+                    continue;
+                }
+                let sampled = track
+                    .iter()
+                    .find(|(o, _)| *o == p_eff)
+                    .map(|(_, v)| (*v).clone())
+                    .or_else(|| {
+                        // 区间括位插值；不可插值 → 离散（段进度<0.5 取前帧）
+                        let mut seg_pair: Option<(&f32, &DeclValue, &f32, &DeclValue)> = None;
+                        for w in track.windows(2) {
+                            if w[0].0 <= p_eff && p_eff <= w[1].0 {
+                                seg_pair = Some((&w[0].0, w[0].1, &w[1].0, w[1].1));
+                                break;
+                            }
+                        }
+                        let (o0, v0, o1, v1) = seg_pair?;
+                        let local_t = if o1 > o0 {
+                            (p_eff - o0) / (o1 - o0)
+                        } else {
+                            0.0
+                        };
+                        let eased = timing.sample(local_t);
+                        crate::css::property::lerp_decl(v0, v1, eased, dark)
+                            .or_else(|| Some(if eased < 0.5 { v0.clone() } else { v1.clone() }))
+                    });
+                if let Some(v) = sampled {
+                    cs.set_value(pid, v);
+                }
+            }
+        }
+    }
+
     fn restyle(&mut self) {
         self.styles.clear();
         self.span_styles.clear();
@@ -1244,6 +1374,51 @@ mod tests {
         let id5 = *engine.key_to_node.get(&Key(5)).unwrap();
         assert_eq!(engine.wrap_widths.get(&id3), Some(&Some(780.0)));
         assert_eq!(engine.wrap_widths.get(&id5), Some(&Some(770.0)));
+    }
+
+    #[test]
+    fn keyframes_animation_sampling() {
+        // 第五批⑰：动画采样——线性插值、fill both 端点保持、无 fill 回
+        // 底层值；缓动按段施加（linear 下数值即线性）
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "@keyframes grow { from { width: 100px } to { width: 200px } } \
+             div { width: 50px; animation: grow 1s linear both; }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("div")).is_ok());
+        let idn = *engine.key_to_node.get(&Key(1)).unwrap();
+        let width_at = |engine: &mut StyleEngine<Key>, t: f64| -> f32 {
+            let _ = engine.frame((400.0, 100.0), 1.0, t);
+            match engine
+                .styles
+                .get(&idn)
+                .unwrap()
+                .get(crate::css::property::PropertyId::Width)
+            {
+                Some(crate::css::property::DeclValue::LenAuto(Some(
+                    crate::css::value::LengthPercentage::Px(v),
+                ))) => *v,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(width_at(&mut engine, 0.0), 100.0);
+        assert_eq!(width_at(&mut engine, 0.5), 150.0);
+        assert_eq!(width_at(&mut engine, 0.25), 125.0);
+        assert_eq!(width_at(&mut engine, 1.0), 200.0);
+        // fill both：结束后停在终点
+        assert_eq!(width_at(&mut engine, 2.0), 200.0);
+        // 无 fill：结束后回底层值
+        let report = engine.set_stylesheet(
+            "@keyframes grow { from { width: 100px } to { width: 200px } } \
+             div { width: 50px; animation: grow 1s linear; }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(width_at(&mut engine, 2.0), 50.0);
     }
 
     #[test]

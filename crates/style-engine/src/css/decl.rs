@@ -319,6 +319,7 @@ fn shorthand_exists(name: &str) -> bool {
             | "inset"
             | "overflow"
             | "gap"
+            | "animation"
             | "border-radius"
             | "border-width"
             | "border-style"
@@ -441,6 +442,127 @@ fn expand_shorthand(
             let row = parse_len(p)?;
             let col = p.try_parse(parse_len).unwrap_or(row.clone());
             vec![(P::RowGap, row), (P::ColumnGap, col)]
+        }
+        "animation" => {
+            // 第五批⑰动画简写：单动画组 MVP——<time> 首现=duration、次现
+            // =delay；关键字先行消歧（infinite/方向/fill/timing/steps()），
+            // 余下 ident=动画名；<number>=iteration-count。多动画组（逗号
+            // 分隔）为残余偏差（遇逗号报错→整条容错丢弃）
+            let mut duration: Option<DeclValue> = None;
+            let mut delay: Option<DeclValue> = None;
+            let mut iteration: Option<DeclValue> = None;
+            let mut timing: Option<DeclValue> = None;
+            let mut direction: Option<DeclValue> = None;
+            let mut fill: Option<DeclValue> = None;
+            let mut name: Option<DeclValue> = None;
+            let mut times = 0u32;
+            while let Ok(t) = p.next() {
+                let t = t.clone();
+                match &t {
+                    Token::Dimension { value, unit, .. }
+                        if unit.eq_ignore_ascii_case("s") || unit.eq_ignore_ascii_case("ms") =>
+                    {
+                        let secs = if unit.eq_ignore_ascii_case("ms") {
+                            value / 1000.0
+                        } else {
+                            *value
+                        };
+                        times += 1;
+                        if times == 1 {
+                            duration = Some(DeclValue::AnimationTime(secs));
+                        } else if times == 2 {
+                            delay = Some(DeclValue::AnimationTime(secs));
+                        } else {
+                            return Err(p.new_error_for_next_token());
+                        }
+                    }
+                    Token::Number { value, .. } => {
+                        if *value < 0.0 {
+                            return Err(p.new_error_for_next_token());
+                        }
+                        iteration = Some(DeclValue::AnimationIteration(*value));
+                    }
+                    Token::Function(f) if f.eq_ignore_ascii_case("steps") => {
+                        timing = Some(crate::css::property::timing_fn_steps_body(p)?);
+                    }
+                    Token::Ident(id) => {
+                        let lower = id.to_ascii_lowercase();
+                        match lower.as_str() {
+                            "infinite" => {
+                                iteration = Some(DeclValue::AnimationIteration(f32::INFINITY));
+                            }
+                            "reverse" => {
+                                direction = Some(DeclValue::AnimationDirection(
+                                    crate::css::property::AnimDirection::Reverse,
+                                ));
+                            }
+                            "alternate" => {
+                                direction = Some(DeclValue::AnimationDirection(
+                                    crate::css::property::AnimDirection::Alternate,
+                                ));
+                            }
+                            "alternate-reverse" => {
+                                direction = Some(DeclValue::AnimationDirection(
+                                    crate::css::property::AnimDirection::AlternateReverse,
+                                ));
+                            }
+                            "forwards" => {
+                                fill = Some(DeclValue::AnimationFillMode(
+                                    crate::css::property::AnimFillMode::Forwards,
+                                ));
+                            }
+                            "backwards" => {
+                                fill = Some(DeclValue::AnimationFillMode(
+                                    crate::css::property::AnimFillMode::Backwards,
+                                ));
+                            }
+                            "both" => {
+                                fill = Some(DeclValue::AnimationFillMode(
+                                    crate::css::property::AnimFillMode::Both,
+                                ));
+                            }
+                            "linear" | "ease" | "ease-in" | "ease-out" | "ease-in-out" => {
+                                timing = Some(DeclValue::AnimationTiming(match lower.as_str() {
+                                    "linear" => crate::css::property::TimingFn::Linear,
+                                    "ease" => crate::css::property::TimingFn::Ease,
+                                    "ease-in" => crate::css::property::TimingFn::EaseIn,
+                                    "ease-out" => crate::css::property::TimingFn::EaseOut,
+                                    _ => crate::css::property::TimingFn::EaseInOut,
+                                }));
+                            }
+                            "none" => name = Some(DeclValue::AnimationName(None)),
+                            _ if !id.starts_with("--") && name.is_none() => {
+                                name = Some(DeclValue::AnimationName(Some(id.to_string())));
+                            }
+                            _ => return Err(p.new_error_for_next_token()),
+                        }
+                    }
+                    _ => return Err(p.new_error_for_next_token()),
+                }
+            }
+            let mut out = Vec::new();
+            if let Some(v) = duration {
+                out.push((P::AnimationDuration, v));
+            }
+            if let Some(v) = timing {
+                out.push((P::AnimationTimingFunction, v));
+            }
+            if let Some(v) = delay {
+                out.push((P::AnimationDelay, v));
+            }
+            if let Some(v) = iteration {
+                out.push((P::AnimationIterationCount, v));
+            }
+            if let Some(v) = direction {
+                out.push((P::AnimationDirection, v));
+            }
+            if let Some(v) = fill {
+                out.push((P::AnimationFillMode, v));
+            }
+            if let Some(v) = name {
+                out.push((P::AnimationName, v));
+            }
+            out
         }
         "border-radius" => {
             // 第五批⑪椭圆圆角：`<lp>{1,4} [ '/' <lp>{1,4} ]?`（tl tr br bl
