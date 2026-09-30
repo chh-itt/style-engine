@@ -339,8 +339,14 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     Err(ParseError::unexpected_token())
                 }
             }
+        } else if name.eq_ignore_ascii_case("font-face") {
+            // @font-face 静默跳过（第五批⑯契约）：字体资源=宿主经 add_font
+            // 推送字节（零副作用，引擎不取 src() URL），家族名按字体内部名
+            // 匹配；良性已知规则不产生报告警告（真实世界 CSS 常携带之，
+            // 告警应留给影响渲染的事）。Ok(None) → parse_block 消费整块。
+            Ok(None)
         } else {
-            // @import/@supports/@font-face…：MVP 跳过整条规则
+            // @import/@supports/@container…：MVP 跳过整条规则并告警
             let loc = input.current_source_location();
             self.report.push(
                 loc.line + 1,
@@ -358,7 +364,10 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
         input: &mut Parser<'i>,
     ) -> Result<(), ParseError<()>> {
         let Some(query) = prelude else {
-            return Ok(()); // 不会发生（media 才有块）；防御
+            // @font-face（第五批⑯）：整块静默消费——无规则产出、无告警
+            // （块 token 自包含，next() 逐 token 推进至块尾即整块耗尽）
+            while input.next().is_ok() {}
+            return Ok(());
         };
         // 递归解析媒体块内规则（继承 media 上下文与源顺序）
         let mut sub = StylesheetParser {
@@ -463,6 +472,19 @@ mod tests {
         assert!(!sheet.report.is_clean());
         // 坏选择器丢弃；print 类型段 eval=false 但规则保留
         assert_eq!(sheet.rules.len(), 2);
+        assert_eq!(sheet.rules[0].declarations.decls.len(), 1);
+    }
+
+    #[test]
+    fn font_face_at_rule_silently_skipped() {
+        // 第五批⑯契约：@font-face 跳过且不产生报告警告（字体=宿主 add_font
+        // 契约，引擎不取 src() URL）——真实世界 CSS 携带 @font-face 不产生
+        // 告警噪音，后续规则解析不受影响
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: 'X'; src: url(x.woff2); font-display: swap; } .ok { color: blue }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.rules.len(), 1);
         assert_eq!(sheet.rules[0].declarations.decls.len(), 1);
     }
 
