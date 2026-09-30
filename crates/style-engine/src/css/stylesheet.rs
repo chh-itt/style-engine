@@ -48,6 +48,22 @@ pub enum MediaFeature {
     MaxHeight(f32),
     PrefersColorScheme(ColorScheme),
     PrefersReducedMotion(bool),
+    /// 指针精度（第五批⑱）：主输入设备。
+    Pointer(PointerKind),
+    /// 主输入设备是否支持悬停。
+    Hover(bool),
+    /// 任意输入设备的指针精度（与 pointer 独立评估）。
+    AnyPointer(PointerKind),
+    /// 任意输入设备是否支持悬停。
+    AnyHover(bool),
+}
+
+/// 指针精度（第五批⑱媒体查询扩展：pointer/any-pointer）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerKind {
+    None,
+    Coarse,
+    Fine,
 }
 
 /// 媒体查询：可选类型段 + AND 连接的特性列表，可整体取反。
@@ -74,6 +90,10 @@ impl MediaFeature {
                 ColorScheme::Light => !env.dark,
             },
             Self::PrefersReducedMotion(reduce) => env.reduced_motion == *reduce,
+            Self::Pointer(k) => env.pointer == *k,
+            Self::Hover(h) => env.hover == *h,
+            Self::AnyPointer(k) => env.any_pointer == *k,
+            Self::AnyHover(h) => env.any_hover == *h,
         }
     }
 }
@@ -93,6 +113,14 @@ pub struct MediaEnv {
     pub viewport_h: f32,
     pub dark: bool,
     pub reduced_motion: bool,
+    /// 主输入设备指针精度（第五批⑱）。
+    pub pointer: PointerKind,
+    /// 主输入设备是否支持悬停。
+    pub hover: bool,
+    /// 任意输入设备指针精度。
+    pub any_pointer: PointerKind,
+    /// 任意输入设备是否支持悬停。
+    pub any_hover: bool,
 }
 
 impl Default for MediaEnv {
@@ -102,6 +130,10 @@ impl Default for MediaEnv {
             viewport_h: 720.0,
             dark: false,
             reduced_motion: false,
+            pointer: PointerKind::Fine,
+            hover: true,
+            any_pointer: PointerKind::Fine,
+            any_hover: true,
         }
     }
 }
@@ -257,6 +289,41 @@ fn parse_feature_body(p: &mut Parser<'_>) -> Result<MediaFeature, ParseError<Bas
                     "min-height" => MediaFeature::MinHeight(px),
                     _ => MediaFeature::MaxHeight(px),
                 })
+            }
+            "pointer" | "any-pointer" | "hover" | "any-hover" => {
+                // 第五批⑱媒体查询扩展：交互媒体特性（指针/悬停；any- 变体
+                // 面向多输入设备）
+                p.expect_colon()?;
+                p.skip_whitespace();
+                let v = p.next()?.clone();
+                let Token::Ident(value) = &v else {
+                    return Err(p.new_error_for_next_token());
+                };
+                let lval = value.to_ascii_lowercase();
+                if lname == "pointer" || lname == "any-pointer" {
+                    let kind = match lval.as_str() {
+                        "none" => PointerKind::None,
+                        "coarse" => PointerKind::Coarse,
+                        "fine" => PointerKind::Fine,
+                        _ => return Err(p.new_error_for_next_token()),
+                    };
+                    Ok(if lname == "pointer" {
+                        MediaFeature::Pointer(kind)
+                    } else {
+                        MediaFeature::AnyPointer(kind)
+                    })
+                } else {
+                    let h = match lval.as_str() {
+                        "hover" => true,
+                        "none" => false,
+                        _ => return Err(p.new_error_for_next_token()),
+                    };
+                    Ok(if lname == "hover" {
+                        MediaFeature::Hover(h)
+                    } else {
+                        MediaFeature::AnyHover(h)
+                    })
+                }
             }
             _ => Err(p.new_error_for_next_token()),
         }
@@ -449,18 +516,21 @@ mod tests {
             viewport_h: 600.0,
             dark: false,
             reduced_motion: false,
+            ..Default::default()
         }));
         assert!(!sheet.rules[2].media.as_ref().unwrap().eval(&MediaEnv {
             viewport_w: 400.0,
             viewport_h: 600.0,
             dark: false,
             reduced_motion: false,
+            ..Default::default()
         }));
         assert!(sheet.rules[3].media.as_ref().unwrap().eval(&MediaEnv {
             viewport_w: 800.0,
             viewport_h: 600.0,
             dark: true,
             reduced_motion: false,
+            ..Default::default()
         }));
     }
 
@@ -489,6 +559,46 @@ mod tests {
     }
 
     #[test]
+    fn pointer_and_hover_features() {
+        // 第五批⑱媒体查询扩展：pointer/hover/any-pointer/any-hover——
+        // 解析 + 环境求值（MediaEnv 扩展四字段，宿主每帧推送）
+        let sheet = parse_stylesheet(
+            "@media (pointer: coarse) and (hover: none) { .a { color: red } } \
+             @media (any-pointer: fine) { .b { color: blue } }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.rules.len(), 2);
+        let touch = MediaEnv {
+            pointer: PointerKind::Coarse,
+            hover: false,
+            any_pointer: PointerKind::Fine,
+            any_hover: true,
+            ..Default::default()
+        };
+        assert!(sheet.rules[0].media.as_ref().unwrap().eval(&touch));
+        assert!(sheet.rules[1].media.as_ref().unwrap().eval(&touch));
+        // 桌面默认环境（Fine/hover=true）：触屏查询不适用
+        let desk = MediaEnv::default();
+        assert!(!sheet.rules[0].media.as_ref().unwrap().eval(&desk));
+        // any-hover 与 hover 独立：主设备无悬停但副设备有 → any-hover: hover
+        // 命中
+        let hybrid = MediaEnv {
+            pointer: PointerKind::None,
+            hover: false,
+            any_pointer: PointerKind::Fine,
+            any_hover: true,
+            ..Default::default()
+        };
+        let sheet2 = parse_stylesheet("@media (any-hover: hover) { .c { color: green } }");
+        assert!(sheet2.report.is_clean(), "{:?}", sheet2.report);
+        assert!(sheet2.rules[0].media.as_ref().unwrap().eval(&hybrid));
+        assert!(!sheet2.rules[0].media.as_ref().unwrap().eval(&MediaEnv {
+            any_hover: false,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
     fn media_not_and_height() {
         let sheet =
             parse_stylesheet("@media not screen and (max-height: 500px) { .a { color: red } }");
@@ -499,6 +609,7 @@ mod tests {
             viewport_h: 400.0,
             dark: false,
             reduced_motion: false,
+            ..Default::default()
         };
         // max-height 命中 + not 取反 → false
         assert!(!q.eval(&env));

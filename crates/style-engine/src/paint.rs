@@ -868,6 +868,7 @@ mod tests {
             viewport_h: 800.0,
             dark: false,
             reduced_motion: false,
+            ..Default::default()
         };
         assert_eq!(
             resolve_radius(&cs, &env),
@@ -888,6 +889,7 @@ mod tests {
             viewport_h: 800.0,
             dark: false,
             reduced_motion: false,
+            ..Default::default()
         };
         let geom = |shape: RS, size: RZ, px: f32, py: f32| {
             resolve_radial(
