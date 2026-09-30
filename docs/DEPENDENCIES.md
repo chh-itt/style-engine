@@ -41,13 +41,15 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - MSRV 以依赖最高者为准（当前这一代 linebender/wgpu 通常要求 Rust 1.85+，edition 2024），CI 用 cargo-hack 验证后在 README 定值。
 - 不承诺 no_std；L1（值与级联）保持 no_std+alloc 可达性，作为将来选项保留。
 
-## taffy calc 直通（预留特性票，未排期）
+## taffy calc 直通（二期①已落地：引擎侧结算式直通）
 
-调研结论（2026-09）：taffy 0.14 的 calc = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())` / `traits.rs fn calc(&self, val: *const (), basis: f32) -> f32`，布局期以 parent_size 为基调用，见 block.rs 各 resolve 点）。接入决策：
+调研结论（2026-09）：taffy 0.14 的 calc = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())`，布局期以 parent_size 为基调用）。**上游接入路径（自定义 LayoutPartialTree 包装覆盖 `resolve_calc_value`）经源码核查被阻断**：TaffyView 的 nodes/cache/unrounded_layout 等字段为 pub(crate)，外部包装无法实现 LayoutPartialTree/CacheTree 全 trait 面（TraversePartialTree/CacheTree 虽有 TaffyTree 公开实现，但 set_unrounded_layout/get_unrounded_layout/set_final_layout 需私有字段）。
 
-- **独立特性票**，不搭车其他变更。实现必须引入 `unsafe`（指针所有权）、生命周期契约（calc 表达式必须活得比 TaffyTree 长——引擎侧由引擎池拥有、结构变更时回收），并走**独立的 unsafe review**（单独 PR，不与功能混提）。
-- **前置条件**：Numeric Channel（conformance harness 的数值对比通道）先就绪——calc 的正确性只能靠数值级验证（百分比基、嵌套 calc、边界 clamp），Pixel Channel 无法区分 0.5px 级语义差。
-- 替代现状：百分比基按 0 扁平化（FEATURES 布局映射注记）保留至直通落地。
+**落地设计（二期①）**：引擎侧「结算式直通」，零 unsafe、零上游票——
+
+- 映射期：含百分比 calc（`LengthPercentage::Calc` + `CalcNode::has_percent`）捕获为延迟条目（layout.rs `DeferredRaw`，thread_local 收集，`map_style` 每次调用即清空；px 部分照旧折叠供首遍布局）；v1 结算槽位 = width/height（flex-basis/min/max/margin/padding 维持 0 折算，记录偏差）。
+- 布局期：每帧首遍布局后 `settle_calc`（engine.rs）以父节点内容盒（Layout.size − border − padding；taffy `content_size` 字段在 content_size 特性门下、workspace 未启用）为基准解析百分比，回写固定值并重算；循环至无变更，上限 3 遍——百分比基准恒为祖先派生 DAG，逐遍稳定一层，3 层内链路与浏览器单遍语义一致，更深链路记偏差待重估。
+- 语义验证：conformance calc-width xfail 转正（.b = 780×50%+10 = 400px 与 Chromium 153 一致，0.5px 容差）；引擎锁定测试两级链收敛（110 → 65）。
 
 ## parley 分词数据调研（2026-09，complex-scripts 已启用）
 

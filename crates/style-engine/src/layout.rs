@@ -7,7 +7,7 @@
 use crate::computed::ComputedStyle;
 use crate::css::property::{Align, DeclValue, PropertyId};
 use crate::css::stylesheet::MediaEnv;
-use crate::css::value::{LengthPercentage, ResolveCtx};
+use crate::css::value::{CalcNode, LengthPercentage, ResolveCtx};
 
 /// em 以节点自身字号为基准，rem 以根 16px 为基准。
 fn resolve_px(lp: &LengthPercentage, cs: &ComputedStyle, env: &MediaEnv) -> Option<f32> {
@@ -20,7 +20,91 @@ fn resolve_px(lp: &LengthPercentage, cs: &ComputedStyle, env: &MediaEnv) -> Opti
     lp.resolve(&ctx, 0.0)
 }
 
+// —— ①calc 直通：延迟结算 ——
+// taffy 0.14 原生 calc 指针传输层的公共接入点被 pub(crate) 内部阻断
+// （LayoutPartialTree 包装需访问 TaffyView 的 nodes/cache/unrounded
+// 私有字段）——引擎侧以「结算式直通」替代：映射期捕获含百分比的
+// calc（px 部分先行折叠供首遍布局），布局后以父内容尺寸为基准解析
+// 百分比并回写固定值（engine.rs settle_calc，上限 3 遍）。收集走
+// thread_local（引擎帧路径单线程；map_style 每次调用即清空）。
+
+/// 延迟 calc 的布局轴（结算基准 = 父内容尺寸对应轴）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CalcAxis {
+    Width,
+    Height,
+}
+
+/// 映射期捕获的延迟 calc（expr + 解析上下文快照）。
+pub(crate) struct DeferredRaw {
+    pub axis: CalcAxis,
+    pub expr: CalcNode,
+    pub em: f32,
+    pub rem: f32,
+    pub vw: f32,
+    pub vh: f32,
+}
+
+/// 挂接 taffy 节点后的结算条目。
+pub(crate) struct DeferredCalc {
+    pub node: taffy::NodeId,
+    pub raw: DeferredRaw,
+}
+
+thread_local! {
+    static CALC_DEFERRED: std::cell::RefCell<Vec<DeferredRaw>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 取走本次 map_style 捕获的延迟 calc（调用方挂接 taffy 节点 id）。
+pub(crate) fn take_calc_deferred() -> Vec<DeferredRaw> {
+    CALC_DEFERRED.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+fn defer_calc(expr: &CalcNode, cs: &ComputedStyle, env: &MediaEnv, axis: CalcAxis) {
+    CALC_DEFERRED.with(|c| {
+        c.borrow_mut().push(DeferredRaw {
+            axis,
+            expr: expr.clone(),
+            em: cs.font_size_px(),
+            rem: 16.0,
+            vw: env.viewport_w,
+            vh: env.viewport_h,
+        });
+    });
+}
+
 fn dimension(
+    lp: Option<&LengthPercentage>,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+    axis: CalcAxis,
+) -> taffy::prelude::Dimension {
+    use taffy::prelude::Dimension;
+    match lp {
+        None => Dimension::auto(),
+        Some(LengthPercentage::Percent(f)) => Dimension::percent(*f),
+        // ①calc 直通：含百分比 calc 延迟结算（px 部分先行折叠供首遍布局）。
+        Some(LengthPercentage::Calc(e)) if e.has_percent() => {
+            defer_calc(e, cs, env, axis);
+            let ctx = ResolveCtx {
+                em: cs.font_size_px(),
+                rem: 16.0,
+                viewport_w: env.viewport_w,
+                viewport_h: env.viewport_h,
+            };
+            Dimension::length(e.resolve(&ctx, 0.0).unwrap_or(0.0))
+        }
+        Some(other) => match resolve_px(other, cs, env) {
+            Some(px) => Dimension::length(px),
+            None => Dimension::auto(),
+        },
+    }
+}
+
+/// flex-basis 映射（①v1 范围外：percent-calc 维持 0 折算偏差，v1 仅
+/// width/height 两槽位结算；flex-basis 基准=容器主轴，轴语义不同）。
+fn dimension_no_defer(
     lp: Option<&LengthPercentage>,
     cs: &ComputedStyle,
     env: &MediaEnv,
@@ -149,8 +233,8 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             crate::css::property::BoxSizing::BorderBox => taffy::style::BoxSizing::BorderBox,
         },
         size: Size {
-            width: dimension(lp_auto(PropertyId::Width), cs, env),
-            height: dimension(lp_auto(PropertyId::Height), cs, env),
+            width: dimension(lp_auto(PropertyId::Width), cs, env, CalcAxis::Width),
+            height: dimension(lp_auto(PropertyId::Height), cs, env, CalcAxis::Height),
         },
         min_size: Size {
             width: length_percentage_auto(cs.len(PropertyId::MinWidth), cs, env),
@@ -250,7 +334,7 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
         },
         flex_grow: flex_number(cs, PropertyId::FlexGrow, 0.0),
         flex_shrink: flex_number(cs, PropertyId::FlexShrink, 1.0),
-        flex_basis: dimension(lp_auto(PropertyId::FlexBasis), cs, env),
+        flex_basis: dimension_no_defer(lp_auto(PropertyId::FlexBasis), cs, env),
         aspect_ratio: match cs.get(PropertyId::AspectRatio) {
             Some(DeclValue::AspectRatio(Some(r))) => Some(*r),
             _ => None,

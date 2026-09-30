@@ -84,6 +84,18 @@ pub enum CalcNode {
 }
 
 impl CalcNode {
+    /// 是否含百分比叶子（①calc 直通：映射期判定是否延迟结算）。
+    pub fn has_percent(&self) -> bool {
+        match self {
+            Self::Value(_, CalcUnit::Percent) => true,
+            Self::Sum(a, b) | Self::Sub(a, b) | Self::Product(a, b) => {
+                a.has_percent() || b.has_percent()
+            }
+            Self::Divide(a, _) => a.has_percent(),
+            _ => false,
+        }
+    }
+
     pub fn resolve(&self, ctx: &ResolveCtx, percent_basis: f32) -> Option<f32> {
         match self {
             Self::Value(v, u) => Some(match u {

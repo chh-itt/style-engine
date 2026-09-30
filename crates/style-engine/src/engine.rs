@@ -70,6 +70,10 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     taffy: taffy::TaffyTree,
     taffy_root: Option<taffy::NodeId>,
     taffy_node: HashMap<NodeId, taffy::NodeId>,
+    /// ①calc 直通：延迟结算条目（restyle 重建，settle_calc 消费）。
+    calc_deferred: Vec<crate::layout::DeferredCalc>,
+    /// taffy 父链（结算基准 = 父内容尺寸；build_taffy_subtree 填充）。
+    taffy_parent: HashMap<taffy::NodeId, taffy::NodeId>,
     styles: HashMap<NodeId, ComputedStyle>,
     /// span 级样式（T5c）：NodeId → (字节起点, 字节终点, 覆盖后的 ComputedStyle)。
     span_styles: HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
@@ -121,6 +125,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             text: crate::text::TextSystem::new(),
             taffy_root: None,
             taffy_node: HashMap::new(),
+            calc_deferred: Vec::new(),
+            taffy_parent: HashMap::new(),
             styles: HashMap::new(),
             span_styles: HashMap::new(),
             parents: HashMap::new(),
@@ -497,6 +503,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     height: taffy::prelude::AvailableSpace::Definite(viewport.1),
                 },
             );
+            // ①calc 直通：百分比 calc 结算（父尺寸就绪后回写固定值，收敛
+            // 上限 3 遍；须在文本换行重排之前——文本折行宽度依赖结算值）。
+            self.settle_calc(viewport);
         }
         // T5c-2：文本叶换行——pass1 布局给出包含块宽后，white-space: normal 的
         // 自动测量文本叶按 max_advance 重测量并按需二次布局。包含块内容宽 =
@@ -580,6 +589,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 self.wrap_widths.insert(id, Some(avail));
                 if let Some(&tid) = self.taffy_node.get(&id) {
                     let mut ts = map_style(&cs, &self.media);
+                    // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点。
+                    for raw in crate::layout::take_calc_deferred() {
+                        self.calc_deferred
+                            .push(crate::layout::DeferredCalc { node: tid, raw });
+                    }
                     // 第五批⑥：同 restyle_node 契约——声明宽优先，否则
                     // taffy auto（块流拉伸到容器内容宽）；测量高兜底。
                     ts.size = taffy::prelude::Size {
@@ -684,6 +698,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 if let Some(&tid) = self.taffy_node.get(&id) {
                     if let Some(cs) = self.styles.get(&id) {
                         let mut ts = map_style(cs, &self.media);
+                        // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点。
+                        for raw in crate::layout::take_calc_deferred() {
+                            self.calc_deferred
+                                .push(crate::layout::DeferredCalc { node: tid, raw });
+                        }
                         // 第五批⑥：absolute shrink-to-fit（CSS 10.3.7）仅适
                         // 用 width:auto——声明宽优先保留（含 min/max 夹紧由
                         // taffy 消费）；测量高兜底 height:auto。
@@ -841,9 +860,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.taffy = taffy::TaffyTree::new();
         self.taffy_node.clear();
         self.taffy_root = None;
+        self.calc_deferred.clear();
+        self.taffy_parent.clear();
         if self.root_key.is_some() {
             let root = self.tree.root();
-            let tid = self.build_taffy_subtree(root);
+            let tid = self.build_taffy_subtree(root, None);
             // 合成视口根（ICB）：树根成为其子，树根自身的 margin 得以生效
             //（taffy 不应用根节点 margin；CSS 中根盒 margin 相对初始包含块生效）。
             let viewport = self
@@ -856,28 +877,42 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.taffy
                 .set_children(viewport, &[tid])
                 .expect("viewport root children");
+            // ①calc 直通：树根的结算基准 = 视口根内容尺寸。
+            self.taffy_parent.insert(tid, viewport);
             self.taffy_root = Some(viewport);
         }
         self.dirty_struct = false;
         self.dirty_style = true; // 新树需重贴样式
     }
 
-    fn build_taffy_subtree(&mut self, id: NodeId) -> taffy::NodeId {
+    fn build_taffy_subtree(
+        &mut self,
+        id: NodeId,
+        parent_tid: Option<taffy::NodeId>,
+    ) -> taffy::NodeId {
         let children: Vec<NodeId> = self.tree.children(id).to_vec();
+        let mut child_ids: Vec<taffy::NodeId> = Vec::new();
         let tid = if children.is_empty() {
             self.taffy
                 .new_leaf(taffy::prelude::Style::default())
                 .expect("taffy leaf creation")
         } else {
-            let child_ids: Vec<taffy::NodeId> = children
+            child_ids = children
                 .iter()
-                .map(|c| self.build_taffy_subtree(*c))
+                .map(|c| self.build_taffy_subtree(*c, None))
                 .collect();
             self.taffy
                 .new_with_children(taffy::prelude::Style::default(), &child_ids)
                 .expect("taffy node creation")
         };
         self.taffy_node.insert(id, tid);
+        // ①calc 直通：父链（后序回填——子 tid 已知，自身 tid 现创建）。
+        if let Some(p) = parent_tid {
+            self.taffy_parent.insert(tid, p);
+        }
+        for ct in &child_ids {
+            self.taffy_parent.insert(*ct, tid);
+        }
         tid
     }
 
@@ -1008,11 +1043,100 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// ①calc 直通：百分比 calc 结算循环（设计决策见 layout.rs DeferredRaw
+    /// 注）。首遍布局后，以父节点已布局内容尺寸为基准解析延迟 calc，
+    /// 回写固定值并重算；循环至无变更（上限 3 遍——百分比基准恒为祖先
+    /// 派生（DAG），逐遍稳定一层；3 层内链路与浏览器单遍语义一致，
+    /// 更深链路记偏差待重估）。
+    fn settle_calc(&mut self, viewport: (f32, f32)) {
+        use crate::css::value::ResolveCtx;
+        const MAX_SETTLE_PASSES: usize = 3;
+        for _ in 0..MAX_SETTLE_PASSES {
+            let mut updates: Vec<(taffy::NodeId, crate::layout::CalcAxis, f32)> = Vec::new();
+            for d in &self.calc_deferred {
+                let Some(&parent) = self.taffy_parent.get(&d.node) else {
+                    continue;
+                };
+                let Ok(pl) = self.taffy.layout(parent) else {
+                    continue;
+                };
+                let basis = match d.raw.axis {
+                    // CSS 百分比基准 = 包含块内容盒（taffy size 为边框盒，
+                    // 扣除 border+padding；content_size 字段在 content_size
+                    // 特性门下、workspace 未启用）。
+                    crate::layout::CalcAxis::Width => {
+                        pl.size.width
+                            - pl.border.left
+                            - pl.border.right
+                            - pl.padding.left
+                            - pl.padding.right
+                    }
+                    crate::layout::CalcAxis::Height => {
+                        pl.size.height
+                            - pl.border.top
+                            - pl.border.bottom
+                            - pl.padding.top
+                            - pl.padding.bottom
+                    }
+                };
+                let ctx = ResolveCtx {
+                    em: d.raw.em,
+                    rem: d.raw.rem,
+                    viewport_w: d.raw.vw,
+                    viewport_h: d.raw.vh,
+                };
+                let Some(px) = d.raw.expr.resolve(&ctx, basis) else {
+                    continue;
+                };
+                let target = taffy::prelude::Dimension::length(px);
+                let Ok(style) = self.taffy.style(d.node) else {
+                    continue;
+                };
+                let changed = match d.raw.axis {
+                    crate::layout::CalcAxis::Width => style.size.width != target,
+                    crate::layout::CalcAxis::Height => style.size.height != target,
+                };
+                if changed {
+                    updates.push((d.node, d.raw.axis, px));
+                }
+            }
+            if updates.is_empty() {
+                return;
+            }
+            // 重复条目幂等：同值 set_style 二次应用无副作用（首次应用后
+            // changed 检查即拦截），无需去重。
+            for (node, axis, px) in updates {
+                let Ok(mut style) = self.taffy.style(node).cloned() else {
+                    continue;
+                };
+                match axis {
+                    crate::layout::CalcAxis::Width => {
+                        style.size.width = taffy::prelude::Dimension::length(px)
+                    }
+                    crate::layout::CalcAxis::Height => {
+                        style.size.height = taffy::prelude::Dimension::length(px)
+                    }
+                }
+                let _ = self.taffy.set_style(node, style);
+            }
+            if let Some(root) = self.taffy_root {
+                let _ = self.taffy.compute_layout(
+                    root,
+                    taffy::prelude::Size {
+                        width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                        height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                    },
+                );
+            }
+        }
+    }
+
     fn restyle(&mut self) {
         self.styles.clear();
         self.span_styles.clear();
         self.parents.clear();
         self.wrap_widths.clear();
+        self.calc_deferred.clear();
         #[cfg(feature = "text")]
         self.min_measures.clear();
         let root = self.tree.root();
@@ -1117,6 +1241,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
         }
         let mut ts = map_style(&cs, &self.media);
+        // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点（结算基准 =
+        // 父内容尺寸；无 taffy 节点则弃置——下次 restyle 重新捕获）。
+        if let Some(&tid) = self.taffy_node.get(&id) {
+            for raw in crate::layout::take_calc_deferred() {
+                self.calc_deferred
+                    .push(crate::layout::DeferredCalc { node: tid, raw });
+            }
+        }
         if let Some((w, h)) = self.measures.get(&id) {
             // 文本叶盒宽语义（第五批⑥契约）：声明宽度优先（CSS 显式 width
             // 胜出测量，旧实现被测量值覆写为缺陷）；无声明时交 taffy auto——
@@ -1423,11 +1555,9 @@ mod tests {
 
     #[test]
     fn calc_layout_resolution() {
-        // 第五批⑤calc 直通评估：calc 无百分比 → resolve_px 全解（布局语义
-        // 正确）；calc 含百分比 → 布局映射期按 0 折算（taffy 0.14 的
-        // TaffyTree::resolve_calc_value 默认 0.0（taffy_tree.rs:387），原生
-        // calc = 不透明指针运输层——真直通需自定义 LayoutPartialTree 实现，
-        // 偏差冻结记录 FEATURES ⑤ 条）
+        // 二期①calc 直通：taffy 原生指针传输层公共接入点被 pub(crate) 内部
+        // 阻断——引擎侧结算式直通（layout.rs DeferredRaw / settle_calc）：
+        // px 部分首遍折叠，百分比部分以父内容尺寸为基准结算后回写固定值。
         let mut engine: StyleEngine<Key> = StyleEngine::new();
         let report = engine.set_stylesheet(
             "div { width: calc(100px + 50px); height: 20px } \
@@ -1444,7 +1574,33 @@ mod tests {
         let d = frame.find(Key(1)).unwrap();
         assert_eq!(d.width, 150.0, "纯长度 calc 应在布局期正确解析");
         let p = frame.find(Key(2)).unwrap();
-        assert_eq!(p.width, 10.0, "含百分比 calc 布局期按 0 折算（偏差锁定）");
+        assert_eq!(p.width, 85.0, "含百分比 calc 结算后 = 50%×150+10");
+    }
+
+    #[test]
+    fn calc_percent_chain_settles() {
+        // 二期①calc 直通：两级百分比链——p1 = 50%×200+10 = 110（1 遍结算），
+        // p2 = 50%×110+10 = 65（p1 稳定后方可结算，需第 2 遍）；收敛上限
+        // 3 遍覆盖 3 层内链路。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "div { width: 200px; height: 20px } \
+             p1 { width: calc(50% + 10px); height: 20px } \
+             p2 { width: calc(50% + 10px); height: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("div")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("p1")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("p2")).is_ok());
+        let frame = engine.frame((400.0, 100.0), 1.0, 0.0);
+        let p1 = frame.find(Key(2)).unwrap();
+        assert_eq!(p1.width, 110.0, "一级链 1 遍结算");
+        let p2 = frame.find(Key(3)).unwrap();
+        assert_eq!(p2.width, 65.0, "二级链经第 2 遍结算收敛");
     }
 
     #[test]
