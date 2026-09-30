@@ -16,7 +16,8 @@
 ## T1 — v0.2+
 
 - @keyframes 动画（第五批⑰已落地）：解析——`@keyframes name { from/to/百分比 [,分组] { decls } }`（-webkit-keyframes 别名；坏帧选择器整帧容错丢弃+告警）；描述符——animation-name/duration/delay/iteration-count(infinite)/timing-function(linear/ease 系三次贝塞尔二分求值/steps(n[,start|end]))/direction(normal/reverse/alternate/alternate-reverse)/fill-mode(none/forwards/backwards/both) + animation 简写（单动画组：`<time>` 首现=duration 次现=delay、关键字先行消歧、余下 ident=名；多动画组逗号分隔=残余偏差）；采样——engine.frame 每帧 apply_animations（级联后、布局前覆写）：fill 语义（未开始 backwards/both、结束 forwards/both，否则回底层值）、方向折叠、缓动按关键帧段施加、插值=lerp_decl（颜色 pick_scheme 终结后 sRGBA 直排混合、长度同变体线性跨单位离散、transform 同名函数逐参、圆角/origin 双组件、不可插值离散取段进度 0.5 界）；锁定测试 keyframes_parse + keyframes_animation_sampling（0/0.25/0.5/1 插值、fill both 端点保持、无 fill 回底层）
-- 容器查询、bidi 与多 run 混排、text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter/clip-path 触发的 stacking context 已落地（第四批④：仅 SC 触发、不做滤镜/裁剪效果，见偏差核对 filter/clip-path 条）
+- bidi 与多 run 混排（第五批⑲已落地评估）：parley 0.11 内建 Unicode bidi 算法（analysis 以 base_level=None 调 resolve）——引擎文本栈零成本继承混排重排（first-strong 基向、嵌段层级、簇视觉序经 line items 直出）；锁定测试 bidi_mixed_direction_first_strong（混排串 LTR+RTL 双 run 划分、纯 RTL 串全 run 奇数层级、advance 不塌缩，DejaVu 覆盖希伯来字形）；残余偏差：CSS direction 属性无显式基向管道（parley 0.11 硬编码 first-strong，上游暴露 builder 级基向后接入）
+- 容器查询、text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter/clip-path 触发的 stacking context 已落地（第四批④：仅 SC 触发、不做滤镜/裁剪效果，见偏差核对 filter/clip-path 条）
 
 ## T2 — 暂缓（记录重估条件）
 

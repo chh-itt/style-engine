@@ -189,4 +189,47 @@ mod tests {
         ts.add_font(vec![0u8; 64]);
         ts.add_font(b"not a font".to_vec());
     }
+
+    #[test]
+    fn bidi_mixed_direction_first_strong() {
+        // 第五批⑲：parley 0.11 内建 Unicode bidi（first-strong 基向——
+        // analysis/mod.rs 以 base_level=None 调 resolve），引擎文本栈自动
+        // 继承多 run 混排重排。锁定：混排串产出 LTR+RTL 两 run（RTL 段
+        // is_rtl）、纯 RTL 串全 run 为 RTL、advance 不因重排塌缩。
+        // 残余偏差：direction 属性无显式基向管道（parley 0.11 硬编码
+        // first-strong），上游暴露后接入。
+        let mut ts = TextSystem::new();
+        ts.add_font(include_bytes!("../../style-engine-demo/assets/fonts/DejaVuSans.ttf").to_vec());
+        let sheet = crate::css::stylesheet::parse_stylesheet(
+            "div { font-family: \"DejaVu Sans\"; font-size: 16px }",
+        );
+        let mut tree = crate::tree::StyleTree::new();
+        let id = tree.insert_child(
+            tree.root(),
+            crate::tree::StyleNode {
+                name: Some("div".into()),
+                text: Some("abc שלום".into()),
+                ..Default::default()
+            },
+        );
+        let style = crate::computed::compute_node(&tree, id, &sheet, &MediaEnv::default(), None);
+        // 混排：LTR 基向（first-strong=拉丁），希伯来段嵌入 RTL 层
+        let mut layout = ts.build_layout("abc שלום", &style, &[], &MediaEnv::default());
+        layout.break_all_lines(None);
+        let runs: Vec<bool> = layout
+            .lines()
+            .next()
+            .unwrap()
+            .runs()
+            .map(|r| r.is_rtl())
+            .collect();
+        assert_eq!(runs, vec![false, true], "混排应产出 LTR+RTL 两 run");
+        // 纯 RTL：first-strong → 基向 RTL，全 run 为 RTL
+        let mut l2 = ts.build_layout("שלום", &style, &[], &MediaEnv::default());
+        l2.break_all_lines(None);
+        assert!(l2.lines().next().unwrap().runs().all(|r| r.is_rtl()));
+        // 纯 RTL 测量不塌缩（DejaVu 覆盖希伯来字形）
+        let (w, _h) = ts.measure("שלום", &style, &MediaEnv::default());
+        assert!(w > 0.0, "RTL 串应有非零 advance（w={w}）");
+    }
 }
