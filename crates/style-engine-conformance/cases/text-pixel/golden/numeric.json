@@ -1,0 +1,45 @@
+{
+ "meta": {
+  "schema": 1,
+  "generator": "tools/dump_rects.py",
+  "browser": "chromium",
+  "browser_version": "153.0.8010.12",
+  "viewport": [
+   300.0,
+   200.0
+  ],
+  "device_scale_factor": 1.0,
+  "fonts": [
+   "DejaVu Sans=crates/style-engine-demo/assets/fonts/DejaVuSans.ttf"
+  ]
+ },
+ "boxes": [
+  {
+   "key": 1,
+   "rect": [
+    0,
+    0,
+    300,
+    200
+   ]
+  },
+  {
+   "key": 2,
+   "rect": [
+    40,
+    80,
+    38.9375,
+    19
+   ]
+  },
+  {
+   "key": 3,
+   "rect": [
+    40,
+    120,
+    30.03125,
+    24
+   ]
+  }
+ ]
+}

@@ -6,3 +6,9 @@ scale = 1.0
 fonts = ["DejaVu Sans=crates/style-engine-demo/assets/fonts/DejaVuSans.ttf"]
 features = ["table", "background-color", "text", "line-height-normal"]
 tolerance = 0.5
+
+# Pixel 通道（二期⑦）：软 Sink 转正 Text 后并入；表格矩形全整数应精确，
+# 单元格字形栅格化差异属 Class 1/2 预算内噪声。
+[pixel]
+max_ratio = 0.005
+allowed = [1, 2]

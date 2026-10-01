@@ -49,3 +49,7 @@ pub use error::{ContractError, ParseReport};
 pub use paint::{DisplayList, PaintOp};
 #[cfg(feature = "text")]
 pub use text::TextSystem;
+
+// 公共再导出：下游（如 style-engine-soft 零依赖测试）构造 FontFamilyList
+// 等属性值需要 SmallVec 容器——复用本 crate 锁定版本，避免版本漂移。
+pub use smallvec;

@@ -1,0 +1,14 @@
+# text 软 Sink 用例（二期⑦）：软渲染器转正 Text（TTF 轮廓扫描线）后并入
+# Pixel 通道。单行短词 + 空格分隔，保证字形差异簇小且相互分离
+# （Class 1/2 预算内）；16px/20px 两档验证字号缩放与基线
+# （normal 行高 = round(ascent)+round(descent)，与 Chromium 同式）。
+viewport = [300.0, 200.0]
+scale = 1.0
+fonts = ["DejaVu Sans=crates/style-engine-demo/assets/fonts/DejaVuSans.ttf"]
+features = ["text", "position-absolute", "position-relative", "color"]
+tolerance = 0.5
+
+[pixel]
+# 实测 0.00585（351/60000），2× 余量收紧
+max_ratio = 0.01
+allowed = [1, 2]

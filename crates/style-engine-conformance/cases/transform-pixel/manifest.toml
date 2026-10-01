@@ -1,0 +1,15 @@
+# transform 软 Sink 用例（二期⑦）：软渲染器转正 PushTransform 后并入 Pixel 通道。
+# 只收 gBCR==布局盒 的变换——rotate(180deg) bbox 保持且轴对齐（整数边缘无 AA），
+# Numeric 通道安全；旋转真实性由非对称背景渐变（.rot 横向 / .rot2 纵向）与
+# 非对称边框（.bd 上 12px 下 4px）验证——若引擎漏转，渐变方向/厚边位置翻转，
+# 大差异落入 Class 3/4 零容忍被拦截。scale/translate 的 gBCR 含变换（引擎布局
+# 盒不含），属 Numeric 通道语义边界，由 soft 锁定测试覆盖（见 FEATURES.md）。
+viewport = [400.0, 300.0]
+scale = 1.0
+fonts = []
+features = ["transform", "position-absolute", "position-relative", "background-color", "background-image", "border"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

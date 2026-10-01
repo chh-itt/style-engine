@@ -1,0 +1,8 @@
+/* text 软 Sink 用例（二期⑦）：单行短词（空格分隔→字形差异簇分离），
+   16px/20px 两档验证字号缩放与基线（normal 行高与 Chromium 同式）。 */
+body { margin: 0; }
+.host { position: relative; width: 300px; height: 200px; }
+.t { position: absolute; left: 40px; top: 80px; font-family: "DejaVu Sans";
+     font-size: 16px; color: #111111; }
+.t2 { position: absolute; left: 40px; top: 120px; font-family: "DejaVu Sans";
+      font-size: 20px; color: #222222; }

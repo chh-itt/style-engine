@@ -330,7 +330,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     let transformed = style.has_transform();
     if transformed {
         out.ops.push(PaintOp::PushTransform {
-            affine: resolve_transform_affine(style, w, h, env),
+            affine: resolve_transform_affine(style, x, y, w, h, env),
         });
     }
 
@@ -709,7 +709,16 @@ fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
 /// 绘制期仿射终结（ADR-0009）：函数列表按书写顺序连乘（最右先应用），
 /// translate 百分比基 = 自身 border-box 宽/高，最后包 transform-origin
 /// 默认 50% 50%：A = T(o)·M·T(−o)。rotate 顺时针（y-down 屏幕坐标）。
-fn resolve_transform_affine(style: &ComputedStyle, w: f32, h: f32, env: &MediaEnv) -> [f32; 6] {
+/// op 坐标为视口系（盒左上角在 (x,y)），origin = (x,y) + 盒内百分比基点
+/// ——二期⑦修复：旧实现漏加盒偏移，offset 盒绕错中心旋转/整体错位。
+fn resolve_transform_affine(
+    style: &ComputedStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    env: &MediaEnv,
+) -> [f32; 6] {
     let ctx = crate::css::value::ResolveCtx {
         em: style.font_size_px(),
         rem: 16.0,
@@ -747,11 +756,11 @@ fn resolve_transform_affine(style: &ComputedStyle, w: f32, h: f32, env: &MediaEn
     // transform-origin（第五批⑬）：解析入库并消费于此——A = T(o)·M·T(−o)；
     // 百分比基 = 自身 border-box（与 CSS 一致）；缺席回退 50% 50%
     let (ox, oy) = match style.get(PropertyId::TransformOrigin) {
-        Some(DeclValue::TransformOrigin(x, y)) => (
-            x.resolve(&ctx, w).unwrap_or(w * 0.5),
-            y.resolve(&ctx, h).unwrap_or(h * 0.5),
+        Some(DeclValue::TransformOrigin(rx, ry)) => (
+            x + rx.resolve(&ctx, w).unwrap_or(w * 0.5),
+            y + ry.resolve(&ctx, h).unwrap_or(h * 0.5),
         ),
-        _ => (w * 0.5, h * 0.5),
+        _ => (x + w * 0.5, y + h * 0.5),
     };
     let pre = [1.0, 0.0, 0.0, 1.0, ox, oy];
     let post = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
@@ -1370,6 +1379,25 @@ mod tests {
         assert_eq!(out.ops.len(), 1);
         match &out.ops[0] {
             PaintOp::Gradient { gradient, .. } => assert_eq!(gradient.stops.len(), 2),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_origin_includes_box_offset() {
+        // 二期⑦回归：run 默认盒 (10,20,100,50)——origin=盒中心 (60,45)，
+        // rotate(180) → e=2·60=120、f=2·45=90（旧实现漏加盒偏移得 (w,h)=(100,50)，
+        // offset 盒绕错中心旋转、子树整体错位/消失，由 transform-pixel 用例暴露）。
+        let (tree, id, style) = setup("transform: rotate(180deg)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        assert_eq!(out.ops.len(), 2, "{:?}", out.ops);
+        match &out.ops[0] {
+            PaintOp::PushTransform { affine } => {
+                let want = [-1.0, 0.0, 0.0, -1.0, 120.0, 90.0];
+                for (g, e) in affine.iter().zip(want.iter()) {
+                    assert!((g - e).abs() < 1e-4, "affine {affine:?} want {want:?}");
+                }
+            }
             other => panic!("{other:?}"),
         }
     }

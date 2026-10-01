@@ -241,8 +241,9 @@ pub fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
 /// 引擎侧用例渲染：与 numeric::run_case 共享 build_case_engine（同一 case
 /// 驱动双通道——Numeric 盒与 Pixel 像素出自同一次布局），frame.paint 经
 /// style-engine-soft 光栅化为 PNG 字节。底色白 = Chromium 默认画布；尺寸 =
-/// 视口 × scale（与 dumper 截图的设备像素对齐）。软 Sink v0 跳过 Text 与
-/// Transform——含文本/变换的用例不应声明 `[pixel]`（⑦ 转正后放开）。
+/// 视口 × scale（与 dumper 截图的设备像素对齐）。字体经 FontBank 注入
+/// soft sink（⑦ 转正：Text/Transform 已由 soft 支持——字形栅格化差异
+/// 属 Class 1/2 预算内噪声）。
 pub fn render_case_png(case: &crate::numeric::NumericCase) -> Result<Vec<u8>, String> {
     let mut engine = crate::numeric::build_case_engine(case)?;
     let w = (case.manifest.viewport[0] * case.manifest.scale) as u32;
@@ -252,7 +253,25 @@ pub fn render_case_png(case: &crate::numeric::NumericCase) -> Result<Vec<u8>, St
         case.manifest.scale,
         0.0,
     );
-    let canvas = style_engine_soft::render(&frame.paint, w, h, [255, 255, 255, 255]);
+    // FontBank：manifest.fonts 项 = "族名=相对仓库根路径"（与 numeric
+    // 引擎装载同源字节——两侧字体对称）。
+    let repo_root = case
+        .dir
+        .ancestors()
+        .nth(4)
+        .ok_or_else(|| format!("case {} 无法定位仓库根", case.name))?
+        .to_path_buf();
+    let mut bank = style_engine_soft::FontBank::new();
+    for entry in &case.manifest.fonts {
+        let (family, rel) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("case {} 字体项须为 族名=路径：{entry}", case.name))?;
+        let bytes = std::fs::read(repo_root.join(rel))
+            .map_err(|e| format!("case {} 字体读取失败 {rel}: {e}", case.name))?;
+        bank.add(family, bytes);
+    }
+    let canvas =
+        style_engine_soft::render_with_fonts(&frame.paint, w, h, [255, 255, 255, 255], &bank);
     Ok(encode_png(canvas.width, canvas.height, &canvas.pixels))
 }
 

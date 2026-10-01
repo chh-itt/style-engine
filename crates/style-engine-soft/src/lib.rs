@@ -7,7 +7,7 @@
 //! Rgba8Unorm 路径与 Chromium/CSS 默认一致）；渐变停点 sRGB 插值
 //! （CSS 默认插值空间）。
 //!
-//! v0 覆盖矩阵：
+//! ⑦ 转正覆盖矩阵：
 //!
 //! | op | 支持 | 备注 |
 //! |---|---|---|
@@ -16,15 +16,22 @@
 //! | Shadow | 近似 | 平移半透明矩形（blur 忽略——与 vello sink MVP 同偏差；inset=与盒求交） |
 //! | Image | ✓ | 最近邻采样（缩放无滤波） |
 //! | Border | 近似 | 直边带（Solid；Dashed/Dotted 近似为实线；圆角未斜切） |
-//! | PushClip/PopClip | ✓ | 矩形+圆角裁剪栈 |
-//! | PushOpacity/PopOpacity | ✓ | 有界组 alpha（快照回混，ADR-0008） |
-//! | PushScroll/PopScroll | ✓ | 平移折叠（嵌套累加） |
-//! | PushTransform/PopTransform | ✗ v0 跳过 | 变换层不消费（记录） |
-//! | Text | ✗ v0 跳过 | 需 shaping——与 vello sink MVP 同注 |
+//! | PushClip/PopClip | ✓ | 矩形+圆角裁剪栈（裁剪矩节点随所在变换层） |
+//! | PushOpacity/PopOpacity | ✓ | 有界组 alpha（快照回混，ADR-0008；bbox 随变换层） |
+//! | PushScroll/PopScroll | ✓ | 平移折叠进变换矩阵（嵌套累加） |
+//! | PushTransform/PopTransform | ✓ | 逆映射逐像素反解 + 4×4 子采样覆盖；无旋转缩放时走中心采样快路径（与整数盒逐位一致）；斜向边缘为锯齿（无 AA，记录） |
+//! | Text | ✓ 近似 | 最小 TrueType（cmap4/glyf 简单+复合字形）折线扫描线 16 级覆盖；基线 = Chromium 同法（hhea 取整 + 半行距）；无 kerning/GSUB、无合成粗斜体、span 覆盖忽略、仅 Start 对齐、max_advance 不折行（记录） |
+//!
+//! 字节零副作用：字体由宿主经 [`FontBank`] 提供（族名 → TTF 字节）；
+//! `render` 不带字体库时跳过 Text（v0 行为）。
 
-use style_engine::css::property::{BorderStyle, ColorStop, GradientKind};
+mod ttf;
+
+use style_engine::css::property::{
+    BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind,
+};
 use style_engine::css::value::{ColorValue, LengthPercentage};
-use style_engine::paint::{ImageRes, RadialGeom};
+use style_engine::paint::RadialGeom;
 use style_engine::{DisplayList, PaintOp};
 
 /// 纯软件画布：RGBA8 直 alpha、sRGB 编码值（与 DisplayList 色彩语义一致）。
@@ -35,12 +42,111 @@ pub struct SoftCanvas {
     pub pixels: Vec<u8>,
 }
 
+/// 宿主字体库（零副作用：TTF 字节由宿主提供；族名 → 字节）。
+/// Text op 的 `font_family` 按声明顺序取首个命中库的 Named 族。
+#[derive(Default)]
+pub struct FontBank {
+    entries: Vec<(String, Vec<u8>)>,
+}
+
+impl FontBank {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, family: &str, data: Vec<u8>) {
+        self.entries.push((family.to_string(), data));
+    }
+
+    pub fn get(&self, family: &str) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|(name, _)| name == family)
+            .map(|(_, data)| data.as_slice())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// 2D 仿射 [a, b, c, d, e, f]（列向量：x' = a·x + c·y + e）。
+#[derive(Clone, Copy, Debug)]
+struct Mat {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+}
+
+impl Mat {
+    fn identity() -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+
+    fn from_affine(m: &[f32; 6]) -> Self {
+        Self {
+            a: m[0],
+            b: m[1],
+            c: m[2],
+            d: m[3],
+            e: m[4],
+            f: m[5],
+        }
+    }
+
+    /// self ∘ n（先应用 n）——与 paint.rs mul_affine 同块乘。
+    fn mul(self, n: Self) -> Self {
+        Self {
+            a: self.a * n.a + self.c * n.b,
+            b: self.b * n.a + self.d * n.b,
+            c: self.a * n.c + self.c * n.d,
+            d: self.b * n.c + self.d * n.d,
+            e: self.a * n.e + self.c * n.f + self.e,
+            f: self.b * n.e + self.d * n.f + self.f,
+        }
+    }
+
+    fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+
+    fn invert(&self) -> Option<Self> {
+        let det = self.a * self.d - self.b * self.c;
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        Some(Self {
+            a: self.d / det,
+            b: -self.b / det,
+            c: -self.c / det,
+            d: self.a / det,
+            e: (self.c * self.f - self.d * self.e) / det,
+            f: (self.b * self.e - self.a * self.f) / det,
+        })
+    }
+}
+
 struct ClipRect {
     x: f32,
     y: f32,
     w: f32,
     h: f32,
     radius: [f32; 8],
+    /// 设备→裁剪源空间映射（push 时刻矩阵之逆；奇异 = 恒不可见）。
+    inv: Option<Mat>,
 }
 
 struct OpacityLayer {
@@ -52,8 +158,23 @@ struct OpacityLayer {
     h: u32,
 }
 
-/// 将绘制清单光栅化到 `width×height` 画布（`base` 为初始底色）。
+/// 4×4 子采样偏移（像素内 16 点网格中心）。
+const SUBS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
+
+/// 将绘制清单光栅化到 `width×height` 画布（`base` 为初始底色；无字体库，
+/// Text op 跳过——与 v0 行为一致）。
 pub fn render(list: &DisplayList, width: u32, height: u32, base: [u8; 4]) -> SoftCanvas {
+    render_with_fonts(list, width, height, base, &FontBank::new())
+}
+
+/// 光栅化（带宿主字体库）：Text op 经 [`FontBank`] 取字形。
+pub fn render_with_fonts(
+    list: &DisplayList,
+    width: u32,
+    height: u32,
+    base: [u8; 4],
+    bank: &FontBank,
+) -> SoftCanvas {
     let mut canvas = SoftCanvas {
         width,
         height,
@@ -63,31 +184,33 @@ pub fn render(list: &DisplayList, width: u32, height: u32, base: [u8; 4]) -> Sof
         px.copy_from_slice(&base);
     }
     let mut clips: Vec<ClipRect> = Vec::new();
-    let mut scroll: (f32, f32) = (0.0, 0.0);
-    let mut scroll_stack: Vec<(f32, f32)> = Vec::new();
+    let mut mat = Mat::identity();
+    let mut mat_stack: Vec<Mat> = Vec::new();
     let mut layers: Vec<OpacityLayer> = Vec::new();
     for op in &list.ops {
         apply_op(
             op,
             &mut canvas,
             &mut clips,
-            &mut scroll,
-            &mut scroll_stack,
+            &mut mat,
+            &mut mat_stack,
             &mut layers,
+            bank,
         );
     }
     canvas
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_op(
     op: &PaintOp,
     canvas: &mut SoftCanvas,
     clips: &mut Vec<ClipRect>,
-    scroll: &mut (f32, f32),
-    scroll_stack: &mut Vec<(f32, f32)>,
+    mat: &mut Mat,
+    mat_stack: &mut Vec<Mat>,
     layers: &mut Vec<OpacityLayer>,
+    bank: &FontBank,
 ) {
-    let (dx, dy) = *scroll;
     match op {
         PaintOp::FillRect {
             x,
@@ -101,8 +224,9 @@ fn apply_op(
             fill_rect(
                 canvas,
                 clips,
-                x + dx,
-                y + dy,
+                *mat,
+                *x,
+                *y,
                 *width,
                 *height,
                 radius,
@@ -118,16 +242,17 @@ fn apply_op(
             gradient,
             radial,
         } => {
-            let (geom, line_len) = match gradient.kind {
+            let (geom, line) = match gradient.kind {
                 GradientKind::Linear(angle) => {
-                    // CSS 角度：0deg=向上，顺时针；方向向量 = (sin θ, -cos θ)
+                    // CSS 角度：0deg=向上，顺时针；方向向量 = (sin θ, -cos θ)；
+                    // 源空间采样（scroll/transform 已折叠进矩阵）。
                     let rad = angle.0.to_radians();
                     let (sx, sy) = (rad.sin(), -rad.cos());
                     let len = (width * sx).abs() + (height * sy).abs();
                     (None, (sx, sy, len.max(1e-6)))
                 }
                 GradientKind::Radial(_) => {
-                    // paint 层已解析绝对几何（RadialGeom）；渐变线 = 水平半径
+                    // paint 层已解析绝对几何（RadialGeom，源空间）；渐变线 = 水平半径
                     let g = radial.unwrap_or(RadialGeom {
                         cx: x + width / 2.0,
                         cy: y + height / 2.0,
@@ -137,33 +262,33 @@ fn apply_op(
                     (Some(g), (0.0, 0.0, g.rx.max(1e-6)))
                 }
             };
-            let (bx, by) = (x + dx, y + dy);
+            let (bx, by, bw, bh) = (*x, *y, *width, *height);
             let stops = gradient.stops.clone();
             fill_rect(
                 canvas,
                 clips,
+                *mat,
                 bx,
                 by,
-                *width,
-                *height,
+                bw,
+                bh,
                 radius,
                 move |fx, fy| {
                     let t = match geom {
-                        // 线性：中心点投影归一（线过盒中心，长 = |w·sin|+|h·cos|）
+                        // 线性：盒心投影归一（线过盒心，长 = |w·sin|+|h·cos|）
                         None => {
-                            let (sx, sy, len) = line_len;
-                            let cx = bx + width / 2.0;
-                            let cy = by + height / 2.0;
+                            let (sx, sy, len) = line;
+                            let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
                             ((fx - cx) * sx + (fy - cy) * sy) / len + 0.5
                         }
                         // 径向：椭圆归一距离
                         Some(g) => {
-                            let nx = (fx - (g.cx + dx)) / g.rx;
-                            let ny = (fy - (g.cy + dy)) / g.ry;
+                            let nx = (fx - g.cx) / g.rx;
+                            let ny = (fy - g.cy) / g.ry;
                             (nx * nx + ny * ny).sqrt()
                         }
                     };
-                    stop_at(&stops, t.clamp(0.0, 1.0), line_len.2)
+                    stop_at(&stops, t.clamp(0.0, 1.0), line.2)
                 },
             );
         }
@@ -198,16 +323,7 @@ fn apply_op(
                 )
             };
             let c = components_of_color(color.components);
-            fill_rect(
-                canvas,
-                clips,
-                sx + dx,
-                sy + dy,
-                sw,
-                sh,
-                radius,
-                move |_, _| c,
-            );
+            fill_rect(canvas, clips, *mat, sx, sy, sw, sh, radius, move |_, _| c);
         }
         PaintOp::Image {
             x,
@@ -215,21 +331,39 @@ fn apply_op(
             width,
             height,
             radius,
-            source_w,
-            source_h,
-            pixels,
+            pixels: img,
+            ..
         } => {
-            draw_image(
+            if img.width == 0 || img.height == 0 {
+                return;
+            }
+            let (ix, iy, iw, ih) = (*x, *y, *width, *height);
+            let img = img.clone();
+            fill_rect(
                 canvas,
                 clips,
-                x + dx,
-                y + dy,
-                *width,
-                *height,
+                *mat,
+                ix,
+                iy,
+                iw,
+                ih,
                 radius,
-                pixels,
+                move |fx, fy| {
+                    // 最近邻采样（源空间坐标 → 源位图）
+                    let u = ((fx - ix) / iw).clamp(0.0, 0.999_9);
+                    let v = ((fy - iy) / ih).clamp(0.0, 0.999_9);
+                    let sx = (u * img.width as f32) as usize;
+                    let sy = (v * img.height as f32) as usize;
+                    let bytes = img.rgba.as_ref().as_ref();
+                    let si = (sy * img.width as usize + sx) * 4;
+                    [
+                        bytes[si] as f32 / 255.0,
+                        bytes[si + 1] as f32 / 255.0,
+                        bytes[si + 2] as f32 / 255.0,
+                        bytes[si + 3] as f32 / 255.0,
+                    ]
+                },
             );
-            let _ = (source_w, source_h);
         }
         PaintOp::Border {
             x,
@@ -256,8 +390,9 @@ fn apply_op(
                 fill_rect(
                     canvas,
                     clips,
-                    bx + dx,
-                    by + dy,
+                    *mat,
+                    bx,
+                    by,
                     bw,
                     bh,
                     &[0.0; 8],
@@ -271,13 +406,16 @@ fn apply_op(
             width,
             height,
             radius,
-        } => clips.push(ClipRect {
-            x: x + dx,
-            y: y + dy,
-            w: *width,
-            h: *height,
-            radius: *radius,
-        }),
+        } => {
+            clips.push(ClipRect {
+                x: *x,
+                y: *y,
+                w: *width,
+                h: *height,
+                radius: *radius,
+                inv: mat.invert(),
+            });
+        }
         PaintOp::PopClip => {
             clips.pop();
         }
@@ -288,13 +426,28 @@ fn apply_op(
             width,
             height,
         } => {
+            // 混合区域 = op 盒经当前矩阵的设备包围盒
+            let corners = [
+                mat.apply(*x, *y),
+                mat.apply(x + width, *y),
+                mat.apply(x + width, y + height),
+                mat.apply(*x, y + height),
+            ];
+            let min_x = corners.iter().fold(f32::MAX, |m, p| m.min(p.0));
+            let min_y = corners.iter().fold(f32::MAX, |m, p| m.min(p.1));
+            let max_x = corners.iter().fold(f32::MIN, |m, p| m.max(p.0));
+            let max_y = corners.iter().fold(f32::MIN, |m, p| m.max(p.1));
+            let bx = (min_x.max(0.0).floor() as u32).min(canvas.width);
+            let by = (min_y.max(0.0).floor() as u32).min(canvas.height);
+            let ex = (max_x.min(canvas.width as f32).ceil() as u32).min(canvas.width);
+            let ey = (max_y.min(canvas.height as f32).ceil() as u32).min(canvas.height);
             layers.push(OpacityLayer {
                 snapshot: canvas.pixels.clone(),
                 alpha: alpha.clamp(0.0, 1.0),
-                x: (x + dx).max(0.0) as u32,
-                y: (y + dy).max(0.0) as u32,
-                w: (*width).max(0.0) as u32,
-                h: (*height).max(0.0) as u32,
+                x: bx,
+                y: by,
+                w: ex.saturating_sub(bx),
+                h: ey.saturating_sub(by),
             });
         }
         PaintOp::PopOpacity => {
@@ -316,18 +469,65 @@ fn apply_op(
                 }
             }
         }
-        PaintOp::PushScroll { dx: ndx, dy: ndy } => {
-            scroll_stack.push(*scroll);
-            scroll.0 += ndx;
-            scroll.1 += ndy;
+        PaintOp::PushScroll { dx, dy } => {
+            mat_stack.push(*mat);
+            *mat = Mat {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: *dx,
+                f: *dy,
+            }
+            .mul(*mat);
         }
         PaintOp::PopScroll => {
-            if let Some(prev) = scroll_stack.pop() {
-                *scroll = prev;
+            if let Some(prev) = mat_stack.pop() {
+                *mat = prev;
             }
         }
-        // v0 跳过：变换层与文本（覆盖矩阵见模块注）；未识别 op 一并忽略
-        //（PaintOp 非穷举演进——契约 sink 对未来 op 的默认语义=忽略）。
+        PaintOp::PushTransform { affine } => {
+            mat_stack.push(*mat);
+            // 变换作用于子树局部坐标：设备 = cur(M(局部)) → cur∘M
+            *mat = mat.mul(Mat::from_affine(affine));
+        }
+        PaintOp::PopTransform => {
+            if let Some(prev) = mat_stack.pop() {
+                *mat = prev;
+            }
+        }
+        PaintOp::Text {
+            x,
+            y,
+            text,
+            color,
+            font_size,
+            font_family,
+            letter_spacing,
+            line_height,
+            text_align,
+            ..
+        } => {
+            // v1 仅 Start 对齐（非 Start 按 Start 绘制——记录偏差）；
+            // span 覆盖/合成粗斜体/max_advance 折行同属记录边界。
+            let _ = text_align;
+            draw_text(
+                canvas,
+                clips,
+                *mat,
+                *x,
+                *y,
+                text,
+                color.components,
+                *font_size,
+                font_family,
+                *letter_spacing,
+                *line_height,
+                bank,
+            );
+        }
+        // 未识别 op 忽略（PaintOp 非穷举演进——契约 sink 对未来 op 的默认
+        // 语义=忽略）。
         _ => {}
     }
 }
@@ -379,11 +579,19 @@ fn corner_ok(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> 
     true
 }
 
+/// 源空间矩形内含测试（含圆角）。
+fn src_inside(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> bool {
+    px >= x && px < x + w && py >= y && py < y + h && corner_ok(px, py, x, y, w, h, r)
+}
+
 fn clip_ok(px: f32, py: f32, c: &ClipRect) -> bool {
-    if px < c.x || px >= c.x + c.w || py < c.y || py >= c.y + c.h {
-        return false;
-    }
-    corner_ok(px, py, c.x, c.y, c.w, c.h, &c.radius)
+    let Some(inv) = &c.inv else { return false };
+    let (sx, sy) = inv.apply(px, py);
+    src_inside(sx, sy, c.x, c.y, c.w, c.h, &c.radius)
+}
+
+fn clips_ok(clips: &[ClipRect], px: f32, py: f32) -> bool {
+    clips.iter().all(|c| clip_ok(px, py, c))
 }
 
 /// sRGB 编码值直接 src-over（㉕ 实测语义；alpha 直 alpha 合成）。
@@ -398,11 +606,14 @@ fn blend(dst: &mut [u8], src: [f32; 4]) {
     dst[3] = ((a + da * (1.0 - a)) * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
-/// 矩形区域逐像素填充（像素光栅器签名天然多参——圆角/裁剪/取色闭包）。
+/// 矩形区域逐像素填充（源空间几何 + 矩阵逆映射到设备；像素光栅器签名
+/// 天然多参——圆角/裁剪/取色闭包）。无旋转缩放（a=d=1, b=c=0）走单中心
+/// 采样快路径（与整数盒逐位一致）；否则 4×4 子采样累积覆盖做边缘近似。
 #[allow(clippy::too_many_arguments)]
 fn fill_rect(
     canvas: &mut SoftCanvas,
     clips: &[ClipRect],
+    mat: Mat,
     x: f32,
     y: f32,
     w: f32,
@@ -410,27 +621,228 @@ fn fill_rect(
     radius: &[f32; 8],
     color_at: impl Fn(f32, f32) -> [f32; 4],
 ) {
-    let x0 = x.floor().max(0.0) as i64;
-    let y0 = y.floor().max(0.0) as i64;
-    let x1 = ((x + w).ceil() as i64).min(canvas.width as i64);
-    let y1 = ((y + h).ceil() as i64).min(canvas.height as i64);
+    let Some(inv) = mat.invert() else { return };
+    // 设备 bbox = 四角变换后的包围盒（与画布求交）
+    let corners = [
+        mat.apply(x, y),
+        mat.apply(x + w, y),
+        mat.apply(x + w, y + h),
+        mat.apply(x, y + h),
+    ];
+    let min_x = corners.iter().fold(f32::MAX, |m, p| m.min(p.0));
+    let min_y = corners.iter().fold(f32::MAX, |m, p| m.min(p.1));
+    let max_x = corners.iter().fold(f32::MIN, |m, p| m.max(p.0));
+    let max_y = corners.iter().fold(f32::MIN, |m, p| m.max(p.1));
+    let x0 = min_x.floor().max(0.0) as i64;
+    let y0 = min_y.floor().max(0.0) as i64;
+    let x1 = (max_x.ceil() as i64).min(canvas.width as i64);
+    let y1 = (max_y.ceil() as i64).min(canvas.height as i64);
+    let fast = mat.b.abs() < 1e-6
+        && mat.c.abs() < 1e-6
+        && (mat.a - 1.0).abs() < 1e-6
+        && (mat.d - 1.0).abs() < 1e-6;
     for py in y0..y1 {
         for px in x0..x1 {
             let fx = px as f32 + 0.5;
             let fy = py as f32 + 0.5;
-            if fx < x || fx >= x + w || fy < y || fy >= y + h {
-                continue;
+            if fast {
+                let (sx, sy) = inv.apply(fx, fy);
+                if !src_inside(sx, sy, x, y, w, h, radius) {
+                    continue;
+                }
+                if !clips_ok(clips, fx, fy) {
+                    continue;
+                }
+                let c = color_at(sx, sy);
+                let i = (py as usize * canvas.width as usize + px as usize) * 4;
+                blend(&mut canvas.pixels[i..i + 4], c);
+            } else {
+                let mut hits = 0u32;
+                for &oy in &SUBS {
+                    for &ox in &SUBS {
+                        let (ssx, ssy) = inv.apply(px as f32 + ox, py as f32 + oy);
+                        if !src_inside(ssx, ssy, x, y, w, h, radius) {
+                            continue;
+                        }
+                        if !clips_ok(clips, px as f32 + ox, py as f32 + oy) {
+                            continue;
+                        }
+                        hits += 1;
+                    }
+                }
+                if hits == 0 {
+                    continue;
+                }
+                let (sx, sy) = inv.apply(fx, fy);
+                let mut c = color_at(sx, sy);
+                c[3] *= hits as f32 / 16.0;
+                let i = (py as usize * canvas.width as usize + px as usize) * 4;
+                blend(&mut canvas.pixels[i..i + 4], c);
             }
-            if !corner_ok(fx, fy, x, y, w, h, radius) {
-                continue;
-            }
-            if !clips.iter().all(|c| clip_ok(fx, fy, c)) {
-                continue;
-            }
-            let c = color_at(fx, fy);
-            let i = (py as usize * canvas.width as usize + px as usize) * 4;
-            blend(&mut canvas.pixels[i..i + 4], c);
         }
+    }
+}
+
+/// 字形折线扫描线填充（设备空间折线 + 4×4 子行 16 级覆盖；非零环绕）。
+fn fill_polygons(
+    canvas: &mut SoftCanvas,
+    clips: &[ClipRect],
+    polys: &[Vec<(f32, f32)>],
+    color: [f32; 4],
+) {
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for poly in polys {
+        for &(x, y) in poly {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        return;
+    }
+    let x0 = min_x.floor().max(0.0) as i64;
+    let y0 = min_y.floor().max(0.0) as i64;
+    let x1 = ((max_x + 1.0).ceil() as i64).min(canvas.width as i64);
+    let y1 = ((max_y + 1.0).ceil() as i64).min(canvas.height as i64);
+    let mut edges: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for poly in polys {
+        let n = poly.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            if a.1 != b.1 {
+                edges.push((a.0, a.1, b.0, b.1));
+            }
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+    let mut cov = vec![0.0f32; (x1 - x0).max(0) as usize];
+    for py in y0..y1 {
+        for c in cov.iter_mut() {
+            *c = 0.0;
+        }
+        for s in 0..4 {
+            let ys = py as f32 + (s as f32 + 0.5) * 0.25;
+            let mut xs: Vec<(f32, i32)> = Vec::new();
+            for &(ex0, ey0, ex1, ey1) in &edges {
+                let (lo, hi) = if ey0 < ey1 { (ey0, ey1) } else { (ey1, ey0) };
+                if ys < lo || ys >= hi {
+                    continue;
+                }
+                let t = (ys - ey0) / (ey1 - ey0);
+                xs.push((ex0 + t * (ex1 - ex0), if ey1 > ey0 { 1 } else { -1 }));
+            }
+            if xs.is_empty() {
+                continue;
+            }
+            xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut winding = 0i32;
+            let mut span_start = 0.0f32;
+            for (x, d) in xs {
+                if winding != 0 {
+                    add_span(&mut cov, x0 as f32, span_start, x);
+                }
+                winding += d;
+                span_start = x;
+            }
+        }
+        for (i, &c) in cov.iter().enumerate() {
+            if c <= 0.0 {
+                continue;
+            }
+            let px = x0 + i as i64;
+            if !clips_ok(clips, px as f32 + 0.5, py as f32 + 0.5) {
+                continue;
+            }
+            let idx = (py as usize * canvas.width as usize + px as usize) * 4;
+            blend(
+                &mut canvas.pixels[idx..idx + 4],
+                [color[0], color[1], color[2], color[3] * c.min(1.0)],
+            );
+        }
+    }
+}
+
+/// 半开区间 [xa, xb) 的覆盖累加（每子行权重 0.25）。
+fn add_span(cov: &mut [f32], base_x: f32, xa: f32, xb: f32) {
+    if xb <= xa {
+        return;
+    }
+    let first = xa.floor() as i64;
+    let last = (xb - 1e-4).floor() as i64;
+    for px in first..=last {
+        let left = (px as f32).max(xa);
+        let right = ((px + 1) as f32).min(xb);
+        if right > left {
+            let idx = px - base_x as i64;
+            if idx >= 0 && (idx as usize) < cov.len() {
+                cov[idx as usize] += (right - left) * 0.25;
+            }
+        }
+    }
+}
+
+/// Text op 光栅化：家族命中 [`FontBank`] → 最小 TrueType → 折线 → 扫描线。
+/// 基线与 Chromium 同法：hhea asc/desc 取整，行盒内半行距居中；
+/// normal（None）= round(asc)+round(desc)（与引擎 ㉔ 同式）。
+#[allow(clippy::too_many_arguments)]
+fn draw_text(
+    canvas: &mut SoftCanvas,
+    clips: &[ClipRect],
+    mat: Mat,
+    x: f32,
+    y: f32,
+    text: &str,
+    color: [f32; 4],
+    font_size: f32,
+    family: &FontFamilyList,
+    letter_spacing: f32,
+    line_height: Option<f32>,
+    bank: &FontBank,
+) {
+    let Some(data) = family.0.iter().find_map(|f| match f {
+        FamilyName::Named(name) => bank.get(name),
+        _ => None,
+    }) else {
+        return; // 未命中字体 → 跳过该 Text（记录偏差）
+    };
+    let Some(font) = ttf::SoftFont::parse(data) else {
+        return;
+    };
+    let scale = font.scale_for(font_size);
+    let asc = font.ascender as f32 * scale;
+    let desc = -font.descender as f32 * scale;
+    let (asc_i, desc_i) = (asc.round(), desc.round());
+    let lh = line_height.unwrap_or(asc_i + desc_i);
+    let baseline = y + (lh - (asc_i + desc_i)) * 0.5 + asc_i;
+    let mut pen = x;
+    for ch in text.chars() {
+        // 未映射码点 → notdef（gid 0，DejaVu 为盒形——与 Chromium 同语义）
+        let gid = font.lookup(ch).unwrap_or(0);
+        let polys_font = font.outline(gid);
+        if !polys_font.is_empty() {
+            let mut polys: Vec<Vec<(f32, f32)>> = Vec::with_capacity(polys_font.len());
+            for cont in &polys_font {
+                let mut dp = Vec::with_capacity(cont.len());
+                for &(fx, fy) in cont {
+                    let (sx, sy) = (pen + fx * scale, baseline - fy * scale);
+                    dp.push(mat.apply(sx, sy));
+                }
+                polys.push(dp);
+            }
+            fill_polygons(canvas, clips, &polys, color);
+        }
+        pen += font.advance(gid, scale) + letter_spacing;
     }
 }
 
@@ -495,58 +907,6 @@ fn stop_at(stops: &[ColorStop], t: f32, line_len: f32) -> [f32; 4] {
     rgba(&stops[stops.len() - 1].color)
 }
 
-/// 背景图最近邻采样（无滤波缩放；圆角覆盖与 FillRect 同法）。
-#[allow(clippy::too_many_arguments)]
-fn draw_image(
-    canvas: &mut SoftCanvas,
-    clips: &[ClipRect],
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    radius: &[f32; 8],
-    img: &ImageRes,
-) {
-    if img.width == 0 || img.height == 0 {
-        return;
-    }
-    let bytes = img.rgba.as_ref().as_ref();
-    let x0 = x.floor().max(0.0) as i64;
-    let y0 = y.floor().max(0.0) as i64;
-    let x1 = ((x + w).ceil() as i64).min(canvas.width as i64);
-    let y1 = ((y + h).ceil() as i64).min(canvas.height as i64);
-    for py in y0..y1 {
-        for px in x0..x1 {
-            let fx = px as f32 + 0.5;
-            let fy = py as f32 + 0.5;
-            if fx < x || fx >= x + w || fy < y || fy >= y + h {
-                continue;
-            }
-            if !corner_ok(fx, fy, x, y, w, h, radius) {
-                continue;
-            }
-            if !clips.iter().all(|c| clip_ok(fx, fy, c)) {
-                continue;
-            }
-            let sx = (((fx - x) / w) * img.width as f32) as u32;
-            let sy = (((fy - y) / h) * img.height as f32) as u32;
-            let sx = sx.min(img.width - 1);
-            let sy = sy.min(img.height - 1);
-            let si = (sy as usize * img.width as usize + sx as usize) * 4;
-            let i = (py as usize * canvas.width as usize + px as usize) * 4;
-            blend(
-                &mut canvas.pixels[i..i + 4],
-                [
-                    bytes[si] as f32 / 255.0,
-                    bytes[si + 1] as f32 / 255.0,
-                    bytes[si + 2] as f32 / 255.0,
-                    bytes[si + 3] as f32 / 255.0,
-                ],
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +914,7 @@ mod tests {
     use style_engine::css::property::Gradient;
     use style_engine::css::value::Angle;
     use style_engine::paint::DisplayList;
+    use style_engine::smallvec::smallvec;
 
     /// 测试辅助：f32 分量 → PaintOp 所用的 AlphaColor<Srgb>。
     fn rgba(color: [f32; 4]) -> AlphaColor<Srgb> {
@@ -569,6 +930,55 @@ mod tests {
             radius: r,
             color: rgba(color),
         }
+    }
+
+    fn pixel(c: &SoftCanvas, x: u32, y: u32) -> [u8; 3] {
+        let i = ((y * c.width + x) * 4) as usize;
+        [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2]]
+    }
+
+    fn op_text(x: f32, y: f32, text: &str) -> PaintOp {
+        PaintOp::Text {
+            x,
+            y,
+            text: text.to_string(),
+            color: rgba([0.0, 0.0, 0.0, 1.0]),
+            spans: Vec::new(),
+            font_size: 16.0,
+            font_family: FontFamilyList(smallvec![FamilyName::Named("DejaVu Sans".into())]),
+            font_weight: 400.0,
+            italic: false,
+            max_advance: None,
+            line_height: Some(19.0),
+            letter_spacing: 0.0,
+            text_align: style_engine::css::property::TextAlign::Start,
+        }
+    }
+
+    /// DejaVu Sans（demo 资产，与 conformance 用例同源字节）。
+    const TEST_FONT: &[u8] = include_bytes!("../../style-engine-demo/assets/fonts/DejaVuSans.ttf");
+
+    fn font_bank() -> FontBank {
+        let mut b = FontBank::new();
+        b.add("DejaVu Sans", TEST_FONT.to_vec());
+        b
+    }
+
+    /// 墨迹包围盒 (min_x, min_y, max_x, max_y)（亮度 < 128 视为墨迹）。
+    fn ink_bbox(c: &SoftCanvas) -> Option<(u32, u32, u32, u32)> {
+        let mut r: Option<(u32, u32, u32, u32)> = None;
+        for y in 0..c.height {
+            for x in 0..c.width {
+                let p = pixel(c, x, y);
+                if p[0] < 128 && p[1] < 128 && p[2] < 128 {
+                    r = Some(match r {
+                        None => (x, y, x, y),
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    });
+                }
+            }
+        }
+        r
     }
 
     #[test]
@@ -677,5 +1087,205 @@ mod tests {
         list.ops.push(PaintOp::PopOpacity);
         let c = render(&list, 8, 8, [255, 255, 255, 255]);
         assert_eq!(&c.pixels[0..4], &[255, 128, 128, 255]);
+    }
+
+    #[test]
+    fn scroll_translation_folds() {
+        // PushScroll 平移折叠：矩形整体位移（⑦：scroll 并入矩阵语义等价）
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushScroll { dx: 2.0, dy: 1.0 });
+        list.ops
+            .push(op_fill(0.0, 0.0, 2.0, 2.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopScroll);
+        let c = render(&list, 8, 8, [255, 255, 255, 255]);
+        assert_eq!(pixel(&c, 2, 1), [255, 0, 0]);
+        assert_eq!(pixel(&c, 3, 2), [255, 0, 0]);
+        assert_eq!(pixel(&c, 0, 0), [255, 255, 255]);
+    }
+
+    #[test]
+    fn transform_translate_fill() {
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushTransform {
+            affine: [1.0, 0.0, 0.0, 1.0, 2.0, 1.0],
+        });
+        list.ops
+            .push(op_fill(1.0, 1.0, 2.0, 2.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopTransform);
+        let c = render(&list, 8, 8, [255, 255, 255, 255]);
+        // (1,1,2,2) 平移 (2,1) → 设备 (3..5, 2..4)
+        assert_eq!(pixel(&c, 3, 2), [255, 0, 0]);
+        assert_eq!(pixel(&c, 4, 3), [255, 0, 0]);
+        assert_eq!(pixel(&c, 2, 2), [255, 255, 255]);
+        assert_eq!(pixel(&c, 5, 3), [255, 255, 255]);
+    }
+
+    #[test]
+    fn transform_rotate_90_crisp() {
+        // 顺时针 90°（y-down）：(x,y) → (4−y, x)；矩形 (0,0,4,2) →
+        // 设备 x∈[2,4), y∈[0,2)。轴对齐整数边 → 无 AA、二值覆盖。
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushTransform {
+            affine: [0.0, 1.0, -1.0, 0.0, 4.0, 0.0],
+        });
+        list.ops
+            .push(op_fill(0.0, 0.0, 4.0, 2.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopTransform);
+        let c = render(&list, 8, 8, [255, 255, 255, 255]);
+        for x in 2..4 {
+            for y in 0..2 {
+                assert_eq!(pixel(&c, x, y), [255, 0, 0], "({x},{y}) 应为红");
+            }
+        }
+        assert_eq!(pixel(&c, 1, 0), [255, 255, 255]);
+        assert_eq!(pixel(&c, 4, 1), [255, 255, 255]);
+    }
+
+    #[test]
+    fn transform_scale2_fill() {
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushTransform {
+            affine: [2.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+        });
+        list.ops
+            .push(op_fill(1.0, 1.0, 2.0, 2.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopTransform);
+        let c = render(&list, 8, 8, [255, 255, 255, 255]);
+        // (1,1,2,2) ×2 → 设备 (2..6, 2..6)
+        assert_eq!(pixel(&c, 2, 2), [255, 0, 0]);
+        assert_eq!(pixel(&c, 5, 5), [255, 0, 0]);
+        assert_eq!(pixel(&c, 1, 2), [255, 255, 255]);
+        assert_eq!(pixel(&c, 6, 5), [255, 255, 255]);
+    }
+
+    #[test]
+    fn transform_clip_rotated() {
+        // 裁剪矩节点随所在变换层：旋转空间裁剪 (0,0,4,1) → 设备 x∈[3,4)
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushTransform {
+            affine: [0.0, 1.0, -1.0, 0.0, 4.0, 0.0],
+        });
+        list.ops.push(PaintOp::PushClip {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 1.0,
+            radius: [0.0; 8],
+        });
+        list.ops
+            .push(op_fill(0.0, 0.0, 4.0, 2.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopClip);
+        list.ops.push(PaintOp::PopTransform);
+        let c = render(&list, 8, 8, [255, 255, 255, 255]);
+        assert_eq!(pixel(&c, 3, 0), [255, 0, 0]);
+        assert_eq!(pixel(&c, 3, 1), [255, 0, 0]);
+        assert_eq!(pixel(&c, 2, 0), [255, 255, 255]);
+    }
+
+    #[test]
+    fn nested_transform_compose() {
+        // 外层平移 + 内层旋转：矩阵复合 cur∘M
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushTransform {
+            affine: [1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        });
+        list.ops.push(PaintOp::PushTransform {
+            affine: [0.0, 1.0, -1.0, 0.0, 4.0, 0.0],
+        });
+        list.ops
+            .push(op_fill(0.0, 0.0, 4.0, 2.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopTransform);
+        list.ops.push(PaintOp::PopTransform);
+        let c = render(&list, 8, 8, [255, 255, 255, 255]);
+        // 旋转结果 (2..4, 0..2) 再平移 (1,1) → (3..5, 1..3)
+        assert_eq!(pixel(&c, 3, 1), [255, 0, 0]);
+        assert_eq!(pixel(&c, 4, 2), [255, 0, 0]);
+        assert_eq!(pixel(&c, 2, 1), [255, 255, 255]);
+    }
+
+    #[test]
+    fn text_glyph_ink() {
+        // "A" 墨迹存在且落位合理：基线 = y + asc_i（DejaVu 16px asc≈14.85→15）
+        let bank = font_bank();
+        let mut list = DisplayList::default();
+        list.ops.push(op_text(10.0, 12.0, "A"));
+        let c = render_with_fonts(&list, 40, 40, [255, 255, 255, 255], &bank);
+        let Some((x0, y0, x1, y1)) = ink_bbox(&c) else {
+            panic!("应有墨迹");
+        };
+        assert!(x1 - x0 >= 6, "A 墨迹过窄: {x0}..{x1}");
+        assert!(y1 - y0 >= 8, "A 墨迹过矮: {y0}..{y1}");
+        // 大写 A 无降部：墨迹底应接近基线 12+15=27（±2）
+        assert!((y1 as i32 - 27).abs() <= 2, "墨迹底 {y1} 应≈基线 27");
+        // 墨迹顶 ≈ 基线 − 大写字高(~11.7) ≈ 15
+        assert!((y0 as i32 - 15).abs() <= 2, "墨迹顶 {y0} 应≈15");
+        // 无字体库 → 跳过（v0 行为）
+        let c2 = render(&list, 40, 40, [255, 255, 255, 255]);
+        assert!(ink_bbox(&c2).is_none());
+    }
+
+    #[test]
+    fn text_composite_glyph_ink() {
+        // "é"（U+00E9）：cmap4 → 复合字形（e + 重音符平移组件）递归展开
+        let bank = font_bank();
+        let mut list = DisplayList::default();
+        list.ops.push(op_text(8.0, 12.0, "\u{00e9}"));
+        let c = render_with_fonts(&list, 40, 40, [255, 255, 255, 255], &bank);
+        let Some((_, y0, _, y1)) = ink_bbox(&c) else {
+            panic!("复合字形应有墨迹");
+        };
+        // 重音符在 x 高之上：墨迹顶应明显高于基线 27 − x 高(~11)
+        assert!(y0 < 16, "重音符墨迹顶 {y0} 应 <16");
+        assert!(y1 >= 24, "e 主体墨迹底 {y1} 应≥24");
+    }
+
+    #[test]
+    fn text_advance_layout() {
+        // "aa" 第二字形按 hmtx 步进：整体墨迹宽 > 单 "a" + 4px
+        let bank = font_bank();
+        let single = {
+            let mut list = DisplayList::default();
+            list.ops.push(op_text(8.0, 12.0, "a"));
+            render_with_fonts(&list, 48, 40, [255, 255, 255, 255], &bank)
+        };
+        let double = {
+            let mut list = DisplayList::default();
+            list.ops.push(op_text(8.0, 12.0, "aa"));
+            render_with_fonts(&list, 48, 40, [255, 255, 255, 255], &bank)
+        };
+        let (_, _, ax1, _) = ink_bbox(&single).expect("a 墨迹");
+        let (_, _, bx1, _) = ink_bbox(&double).expect("aa 墨迹");
+        assert!(bx1 > ax1 + 4, "aa 末端 {bx1} 应显著大于 a 末端 {ax1}");
+    }
+
+    #[test]
+    fn text_under_transform() {
+        // 文本随变换层平移：与直接平移绘制等价（墨迹包围盒一致）
+        let bank = font_bank();
+        let shifted = {
+            let mut list = DisplayList::default();
+            list.ops.push(PaintOp::PushTransform {
+                affine: [1.0, 0.0, 0.0, 1.0, 4.0, 0.0],
+            });
+            list.ops.push(op_text(10.0, 12.0, "A"));
+            list.ops.push(PaintOp::PopTransform);
+            render_with_fonts(&list, 48, 40, [255, 255, 255, 255], &bank)
+        };
+        let direct = {
+            let mut list = DisplayList::default();
+            list.ops.push(op_text(14.0, 12.0, "A"));
+            render_with_fonts(&list, 48, 40, [255, 255, 255, 255], &bank)
+        };
+        assert_eq!(ink_bbox(&shifted), ink_bbox(&direct));
+    }
+
+    #[test]
+    fn text_notdef_box() {
+        // 未映射码点（私用区 U+E000）→ notdef 盒（与 Chromium 同语义）
+        let bank = font_bank();
+        let mut list = DisplayList::default();
+        list.ops.push(op_text(8.0, 12.0, "\u{e000}"));
+        let c = render_with_fonts(&list, 48, 40, [255, 255, 255, 255], &bank);
+        assert!(ink_bbox(&c).is_some(), "notdef 应绘制盒形墨迹");
     }
 }
