@@ -28,11 +28,75 @@ fn resolve_px(lp: &LengthPercentage, cs: &ComputedStyle, env: &MediaEnv) -> Opti
 // 百分比并回写固定值（engine.rs settle_calc，上限 3 遍）。收集走
 // thread_local（引擎帧路径单线程；map_style 每次调用即清空）。
 
-/// 延迟 calc 的布局轴（结算基准 = 父内容尺寸对应轴）。
+/// 延迟 calc 的结算槽位（三期③扩展：width/height 之外新增 flex-basis、
+/// min/max、margin/padding 三族——此前含百分比 calc 在这些槽位按 0 折算）。
+/// 结算基准：width 族 = 包含块内容宽；height 族 = 包含块内容高；
+/// margin/padding 百分比按 CSS 2.1 §8.3/§8.4 恒以包含块 WIDTH 为基
+/// （含 margin-top/bottom、padding-top/bottom）；flex-basis 按父容器
+/// 主轴（settle 期读父 flex_direction 决定，basis_axis 返回 None）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CalcAxis {
     Width,
     Height,
+    MinWidth,
+    MinHeight,
+    MaxWidth,
+    MaxHeight,
+    FlexBasis,
+    MarginTop,
+    MarginRight,
+    MarginBottom,
+    MarginLeft,
+    PaddingTop,
+    PaddingRight,
+    PaddingBottom,
+    PaddingLeft,
+    ColumnGap,
+    RowGap,
+}
+
+impl CalcAxis {
+    /// 结算基准轴（对应父内容盒的宽/高；FlexBasis 动态判定）。
+    pub(crate) fn basis_axis(self) -> Option<CalcAxis> {
+        match self {
+            CalcAxis::Height | CalcAxis::MinHeight | CalcAxis::MaxHeight => Some(CalcAxis::Height),
+            CalcAxis::RowGap => Some(CalcAxis::Height),
+            CalcAxis::FlexBasis => None,
+            // width 族 + margin/padding 全族（百分比基恒为包含块宽度）+ 列隙
+            _ => Some(CalcAxis::Width),
+        }
+    }
+
+    /// 结算值回写 taffy 样式（padding 负值按 CSS §8.4 钳 0）。
+    pub(crate) fn write(self, style: &mut taffy::prelude::Style, px: f32) {
+        use taffy::prelude::{Dimension, LengthPercentage as LP, LengthPercentageAuto as LPA};
+        let px = match self {
+            CalcAxis::PaddingTop
+            | CalcAxis::PaddingRight
+            | CalcAxis::PaddingBottom
+            | CalcAxis::PaddingLeft => px.max(0.0),
+            _ => px,
+        };
+        match self {
+            CalcAxis::Width => style.size.width = Dimension::length(px),
+            CalcAxis::Height => style.size.height = Dimension::length(px),
+            CalcAxis::MinWidth => style.min_size.width = LPA::length(px),
+            CalcAxis::MinHeight => style.min_size.height = LPA::length(px),
+            CalcAxis::MaxWidth => style.max_size.width = LPA::length(px),
+            CalcAxis::MaxHeight => style.max_size.height = LPA::length(px),
+            CalcAxis::FlexBasis => style.flex_basis = Dimension::length(px),
+            CalcAxis::MarginTop => style.margin.top = LPA::length(px),
+            CalcAxis::MarginRight => style.margin.right = LPA::length(px),
+            CalcAxis::MarginBottom => style.margin.bottom = LPA::length(px),
+            CalcAxis::MarginLeft => style.margin.left = LPA::length(px),
+            CalcAxis::PaddingTop => style.padding.top = LP::length(px),
+            CalcAxis::PaddingRight => style.padding.right = LP::length(px),
+            CalcAxis::PaddingBottom => style.padding.bottom = LP::length(px),
+            CalcAxis::PaddingLeft => style.padding.left = LP::length(px),
+            CalcAxis::ColumnGap => style.gap.width = LP::length(px.max(0.0)),
+            CalcAxis::RowGap => style.gap.height = LP::length(px.max(0.0)),
+        }
+    }
 }
 
 /// 映射期捕获的延迟 calc（expr + 解析上下文快照）。
@@ -102,24 +166,6 @@ fn dimension(
     }
 }
 
-/// flex-basis 映射（①v1 范围外：percent-calc 维持 0 折算偏差，v1 仅
-/// width/height 两槽位结算；flex-basis 基准=容器主轴，轴语义不同）。
-fn dimension_no_defer(
-    lp: Option<&LengthPercentage>,
-    cs: &ComputedStyle,
-    env: &MediaEnv,
-) -> taffy::prelude::Dimension {
-    use taffy::prelude::Dimension;
-    match lp {
-        None => Dimension::auto(),
-        Some(LengthPercentage::Percent(f)) => Dimension::percent(*f),
-        Some(other) => match resolve_px(other, cs, env) {
-            Some(px) => Dimension::length(px),
-            None => Dimension::auto(),
-        },
-    }
-}
-
 fn length_percentage_auto(
     lp: Option<&LengthPercentage>,
     cs: &ComputedStyle,
@@ -143,13 +189,70 @@ fn margin_side(
     cs: &ComputedStyle,
     id: PropertyId,
     env: &MediaEnv,
+    slot: CalcAxis,
 ) -> taffy::prelude::LengthPercentageAuto {
     use taffy::prelude::LengthPercentageAuto;
     match cs.get(id) {
         None => LengthPercentageAuto::length(0.0),
         Some(DeclValue::LenAuto(None)) => LengthPercentageAuto::auto(),
-        Some(DeclValue::LenAuto(Some(lp))) => length_percentage_auto(Some(lp), cs, env),
-        Some(_) => length_percentage_auto(cs.len_auto(id), cs, env),
+        Some(DeclValue::LenAuto(Some(lp))) => lp_auto_defer(Some(lp), cs, env, slot),
+        Some(_) => lp_auto_defer(cs.len_auto(id), cs, env, slot),
+    }
+}
+
+/// 三期③：LengthPercentageAuto 槽位（min/max/margin）的延迟结算映射——
+/// 含百分比 calc 捕获进结算队列，首遍以 px 部分折叠。
+fn lp_auto_defer(
+    lp: Option<&LengthPercentage>,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+    slot: CalcAxis,
+) -> taffy::prelude::LengthPercentageAuto {
+    use taffy::prelude::LengthPercentageAuto as T;
+    match lp {
+        None => T::auto(),
+        Some(LengthPercentage::Percent(f)) => T::percent(*f),
+        Some(LengthPercentage::Calc(e)) if e.has_percent() => {
+            defer_calc(e, cs, env, slot);
+            let ctx = ResolveCtx {
+                em: cs.font_size_px(),
+                rem: 16.0,
+                viewport_w: env.viewport_w,
+                viewport_h: env.viewport_h,
+            };
+            T::length(e.resolve(&ctx, 0.0).unwrap_or(0.0))
+        }
+        Some(other) => match resolve_px(other, cs, env) {
+            Some(px) => T::length(px),
+            None => T::auto(),
+        },
+    }
+}
+
+/// 三期③：LengthPercentage 槽位（padding/gap）的延迟结算映射；clamp_neg
+/// 对 padding/gap 负值按 CSS 钳 0（负值非法）。
+fn lp_defer(
+    lp: &LengthPercentage,
+    cs: &ComputedStyle,
+    env: &MediaEnv,
+    slot: CalcAxis,
+    clamp_neg: bool,
+) -> taffy::prelude::LengthPercentage {
+    use taffy::prelude::LengthPercentage as T;
+    let fold = |px: f32| T::length(if clamp_neg { px.max(0.0) } else { px });
+    match lp {
+        LengthPercentage::Percent(f) => T::percent(*f),
+        LengthPercentage::Calc(e) if e.has_percent() => {
+            defer_calc(e, cs, env, slot);
+            let ctx = ResolveCtx {
+                em: cs.font_size_px(),
+                rem: 16.0,
+                viewport_w: env.viewport_w,
+                viewport_h: env.viewport_h,
+            };
+            fold(e.resolve(&ctx, 0.0).unwrap_or(0.0))
+        }
+        other => fold(resolve_px(other, cs, env).unwrap_or(0.0)),
     }
 }
 
@@ -242,31 +345,45 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             height: dimension(lp_auto(PropertyId::Height), cs, env, CalcAxis::Height),
         },
         min_size: Size {
-            width: length_percentage_auto(cs.len(PropertyId::MinWidth), cs, env),
-            height: length_percentage_auto(cs.len(PropertyId::MinHeight), cs, env),
+            // 三期③修正：min-* 解析入 LenAuto 族（parse_len_auto），旧代码误用
+            // Len 族读取（cs.len）恒得 None——min/max 尺寸整体失效（calc 与
+            // 普通值皆然），本槽位扩展顺带修复；auto → taffy Auto（flex
+            // automatic minimum size 语义）。
+            width: lp_auto_defer(
+                cs.len_auto(PropertyId::MinWidth),
+                cs,
+                env,
+                CalcAxis::MinWidth,
+            ),
+            height: lp_auto_defer(
+                cs.len_auto(PropertyId::MinHeight),
+                cs,
+                env,
+                CalcAxis::MinHeight,
+            ),
         },
         max_size: Size {
-            width: length_percentage_auto(lp_auto(PropertyId::MaxWidth), cs, env),
-            height: length_percentage_auto(lp_auto(PropertyId::MaxHeight), cs, env),
+            width: lp_auto_defer(lp_auto(PropertyId::MaxWidth), cs, env, CalcAxis::MaxWidth),
+            height: lp_auto_defer(lp_auto(PropertyId::MaxHeight), cs, env, CalcAxis::MaxHeight),
         },
         margin: Rect {
-            top: margin_side(cs, PropertyId::MarginTop, env),
-            right: margin_side(cs, PropertyId::MarginRight, env),
-            bottom: margin_side(cs, PropertyId::MarginBottom, env),
-            left: margin_side(cs, PropertyId::MarginLeft, env),
+            top: margin_side(cs, PropertyId::MarginTop, env, CalcAxis::MarginTop),
+            right: margin_side(cs, PropertyId::MarginRight, env, CalcAxis::MarginRight),
+            bottom: margin_side(cs, PropertyId::MarginBottom, env, CalcAxis::MarginBottom),
+            left: margin_side(cs, PropertyId::MarginLeft, env, CalcAxis::MarginLeft),
         },
         padding: Rect {
             top: padding[0]
-                .map(|lp| length_percentage(lp, cs, env))
+                .map(|lp| lp_defer(lp, cs, env, CalcAxis::PaddingTop, true))
                 .unwrap_or_else(|| taffy::prelude::LengthPercentage::length(0.0)),
             right: padding[1]
-                .map(|lp| length_percentage(lp, cs, env))
+                .map(|lp| lp_defer(lp, cs, env, CalcAxis::PaddingRight, true))
                 .unwrap_or_else(|| taffy::prelude::LengthPercentage::length(0.0)),
             bottom: padding[2]
-                .map(|lp| length_percentage(lp, cs, env))
+                .map(|lp| lp_defer(lp, cs, env, CalcAxis::PaddingBottom, true))
                 .unwrap_or_else(|| taffy::prelude::LengthPercentage::length(0.0)),
             left: padding[3]
-                .map(|lp| length_percentage(lp, cs, env))
+                .map(|lp| lp_defer(lp, cs, env, CalcAxis::PaddingLeft, true))
                 .unwrap_or_else(|| taffy::prelude::LengthPercentage::length(0.0)),
         },
         inset: Rect {
@@ -305,21 +422,26 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             ),
         },
         gap: Size {
-            width: length_percentage(
+            // 三期③：gap 含百分比 calc 延迟结算（列隙基=内容宽、行隙基=内容高）。
+            width: lp_defer(
                 cs.len(PropertyId::ColumnGap).unwrap_or(
                     cs.len(PropertyId::Gap)
                         .unwrap_or(&LengthPercentage::Px(0.0)),
                 ),
                 cs,
                 env,
+                CalcAxis::ColumnGap,
+                true,
             ),
-            height: length_percentage(
+            height: lp_defer(
                 cs.len(PropertyId::RowGap).unwrap_or(
                     cs.len(PropertyId::Gap)
                         .unwrap_or(&LengthPercentage::Px(0.0)),
                 ),
                 cs,
                 env,
+                CalcAxis::RowGap,
+                true,
             ),
         },
         flex_direction: match cs.flex_direction() {
@@ -339,7 +461,9 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
         },
         flex_grow: flex_number(cs, PropertyId::FlexGrow, 0.0),
         flex_shrink: flex_number(cs, PropertyId::FlexShrink, 1.0),
-        flex_basis: dimension_no_defer(lp_auto(PropertyId::FlexBasis), cs, env),
+        // 三期③：flex-basis 含百分比 calc 延迟结算（基=父容器主轴内容尺寸，
+        // settle 期按父 flex_direction 判定；行向=宽、列向=高）。
+        flex_basis: dimension(lp_auto(PropertyId::FlexBasis), cs, env, CalcAxis::FlexBasis),
         aspect_ratio: match cs.get(PropertyId::AspectRatio) {
             Some(DeclValue::AspectRatio(Some(r))) => Some(*r),
             _ => None,

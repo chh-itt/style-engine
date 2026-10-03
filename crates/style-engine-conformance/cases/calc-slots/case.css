@@ -1,0 +1,18 @@
+/* 三期③calc 结算槽位扩展：flex-basis/min/max/margin/padding/gap 含百分比
+   calc 的延迟结算（此前这些槽位 % 基按 0 折算）。全整数盒纯色，
+   Numeric 与 Pixel 双通道验收：
+   b1 margin-left 25%×400−25 = 75；b2 padding 5%×400+5 = 25（四侧，
+   content-box → border-box 150×70）；b3 min-width 25%×400+50 = 150 抬升
+   w10；b4 max-width 50%×400−40 = 160 压制 w1000；fx margin-top
+   5%×400+20 = 40（CSS §8.3 百分比 margin 恒以宽度为基——高度基会得 35）、
+   column-gap 10%×400+10 = 50、ia flex-basis 25%×400+25 = 125（行向基=
+   容器内容宽）、ib 顺延 x=175。 */
+body { margin: 0; }
+.mk { margin-left: calc(25% - 25px); width: 50px; height: 30px; background-color: #ef4444; }
+.pk { padding: calc(5% + 5px); width: 100px; height: 20px; background-color: #3b82f6; }
+.in { width: 80px; height: 20px; background-color: #22c55e; }
+.mn { width: 10px; min-width: calc(25% + 50px); height: 30px; background-color: #f59e0b; }
+.mx { width: 1000px; max-width: calc(50% - 40px); height: 30px; background-color: #a855f7; }
+.fx { display: flex; column-gap: calc(10% + 10px); margin-top: calc(5% + 20px); height: 40px; }
+.ia { flex-basis: calc(25% + 25px); flex-grow: 0; height: 40px; background-color: #06b6d4; }
+.ib { width: 50px; height: 40px; background-color: #6b7280; }

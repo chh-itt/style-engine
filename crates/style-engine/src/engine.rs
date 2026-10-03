@@ -1257,24 +1257,37 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let Ok(pl) = self.taffy.layout(parent) else {
                     continue;
                 };
+                let cw = pl.size.width
+                    - pl.border.left
+                    - pl.border.right
+                    - pl.padding.left
+                    - pl.padding.right;
+                let ch = pl.size.height
+                    - pl.border.top
+                    - pl.border.bottom
+                    - pl.padding.top
+                    - pl.padding.bottom;
+                // 三期③槽位扩展：flex-basis 百分比基=父容器主轴内容尺寸
+                // （flex-direction 行向=宽、列向=高）；margin/padding 全族
+                // 按 CSS 2.1 §8.3/§8.4 恒以包含块宽度为基（含 top/bottom）。
                 let basis = match d.raw.axis {
-                    // CSS 百分比基准 = 包含块内容盒（taffy size 为边框盒，
-                    // 扣除 border+padding；content_size 字段在 content_size
-                    // 特性门下、workspace 未启用）。
-                    crate::layout::CalcAxis::Width => {
-                        pl.size.width
-                            - pl.border.left
-                            - pl.border.right
-                            - pl.padding.left
-                            - pl.padding.right
+                    crate::layout::CalcAxis::FlexBasis => {
+                        let dir = self
+                            .taffy
+                            .style(parent)
+                            .map(|s| s.flex_direction)
+                            .unwrap_or(taffy::prelude::FlexDirection::Row);
+                        let vertical = matches!(
+                            dir,
+                            taffy::prelude::FlexDirection::Column
+                                | taffy::prelude::FlexDirection::ColumnReverse
+                        );
+                        if vertical { ch } else { cw }
                     }
-                    crate::layout::CalcAxis::Height => {
-                        pl.size.height
-                            - pl.border.top
-                            - pl.border.bottom
-                            - pl.padding.top
-                            - pl.padding.bottom
-                    }
+                    axis => match axis.basis_axis() {
+                        Some(crate::layout::CalcAxis::Width) => cw,
+                        _ => ch,
+                    },
                 };
                 let ctx = ResolveCtx {
                     em: d.raw.em,
@@ -1285,15 +1298,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let Some(px) = d.raw.expr.resolve(&ctx, basis) else {
                     continue;
                 };
-                let target = taffy::prelude::Dimension::length(px);
-                let Ok(style) = self.taffy.style(d.node) else {
+                let Some(style) = self.taffy.style(d.node).ok() else {
                     continue;
                 };
-                let changed = match d.raw.axis {
-                    crate::layout::CalcAxis::Width => style.size.width != target,
-                    crate::layout::CalcAxis::Height => style.size.height != target,
-                };
-                if changed {
+                let mut target = style.clone();
+                d.raw.axis.write(&mut target, px);
+                if target != *style {
                     updates.push((d.node, d.raw.axis, px));
                 }
             }
@@ -1302,18 +1312,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
             // 重复条目幂等：同值 set_style 二次应用无副作用（首次应用后
             // changed 检查即拦截），无需去重。
-            for (node, axis, px) in updates {
+            for (node, slot, px) in updates {
                 let Ok(mut style) = self.taffy.style(node).cloned() else {
                     continue;
                 };
-                match axis {
-                    crate::layout::CalcAxis::Width => {
-                        style.size.width = taffy::prelude::Dimension::length(px)
-                    }
-                    crate::layout::CalcAxis::Height => {
-                        style.size.height = taffy::prelude::Dimension::length(px)
-                    }
-                }
+                slot.write(&mut style, px);
                 let _ = self.taffy.set_style(node, style);
             }
             if let Some(root) = self.taffy_root {
@@ -2208,6 +2211,177 @@ mod tests {
         assert_eq!(p1.width, 110.0, "一级链 1 遍结算");
         let p2 = frame.find(Key(3)).unwrap();
         assert_eq!(p2.width, 65.0, "二级链经第 2 遍结算收敛");
+    }
+
+    #[test]
+    fn calc_slot_flex_basis_settles_both_axes() {
+        // 三期③槽位扩展：flex-basis 含百分比 calc 延迟结算——基=父容器
+        // 主轴内容尺寸（行向=宽、列向=高，settle 期按父 flex_direction 判定）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "wrap { width: 400px } \
+             row { display: flex; flex-direction: row; width: 400px; height: 20px } \
+             rit { flex-basis: calc(25% + 50px); flex-grow: 0; height: 20px } \
+             col { display: flex; flex-direction: column; width: 20px; height: 600px } \
+             cit { flex-basis: calc(50% - 100px); flex-grow: 0; width: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("wrap")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("rit")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("col")).is_ok());
+        assert!(engine.insert(Some(Key(4)), Key(5), mk("cit")).is_ok());
+        let frame = engine.frame((400.0, 800.0), 1.0, 0.0);
+        assert_eq!(
+            frame.find(Key(3)).unwrap().width,
+            150.0,
+            "行向基=容器内容宽：25%×400+50"
+        );
+        assert_eq!(
+            frame.find(Key(5)).unwrap().height,
+            200.0,
+            "列向基=容器内容高：50%×600−100"
+        );
+    }
+
+    #[test]
+    fn calc_slot_min_max_settles() {
+        // 三期③槽位扩展：min/max-width 含百分比 calc 延迟结算（基=父内容
+        // 宽）——min 抬升过窄子盒、max 压制过宽子盒。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "pw { width: 400px; height: 20px } \
+             mn { width: 10px; min-width: calc(50% - 30px); height: 20px } \
+             mx { width: 1000px; max-width: calc(50% + 50px); height: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("pw")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("mn")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("mx")).is_ok());
+        let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
+        assert_eq!(
+            frame.find(Key(2)).unwrap().width,
+            170.0,
+            "min-width = 50%×400−30 抬升"
+        );
+        assert_eq!(
+            frame.find(Key(3)).unwrap().width,
+            250.0,
+            "max-width = 50%×400+50 压制"
+        );
+    }
+
+    #[test]
+    fn calc_slot_margin_percent_base_is_width() {
+        // 三期③槽位扩展：margin 含百分比 calc 延迟结算——CSS 2.1 §8.3
+        // 百分比 margin（含 top/bottom）恒以包含块宽度为基而非高度：
+        // margin-top 10%×400+5 = 45（若误用高基 300×10%=30+5=35）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "pw { width: 400px; height: 300px } \
+             it { width: 100px; height: 20px; margin-left: calc(50% - 50px); \
+                  margin-top: calc(10% + 5px) }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("pw")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("it")).is_ok());
+        let frame = engine.frame((400.0, 400.0), 1.0, 0.0);
+        let it = frame.find(Key(2)).unwrap();
+        assert_eq!(it.x, 150.0, "margin-left = 50%×400−50");
+        assert_eq!(
+            it.y, 45.0,
+            "margin-top 以宽度为基 = 10%×400+5（首子 margin 与父塌陷后父子同位）"
+        );
+    }
+
+    #[test]
+    fn calc_slot_padding_settles_and_clamps() {
+        // 三期③槽位扩展：padding 含百分比 calc 延迟结算（基=包含块内容宽，
+        // 含 padding-top——CSS 2.1 §8.4）；负值钳 0（padding 负值非法）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "wrap { width: 400px } \
+             it { width: 100px; height: 20px; padding: calc(10% + 5px) } \
+             cc { width: 80px; height: 10px } \
+             nz { width: 50px; height: 10px; padding-left: calc(0% - 10px) }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("wrap")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("it")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("cc")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("nz")).is_ok());
+        let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
+        let it = frame.find(Key(2)).unwrap();
+        let cc = frame.find(Key(3)).unwrap();
+        assert_eq!(it.width, 190.0, "border-box = 100 + 两侧 padding 45");
+        assert_eq!(cc.x, 45.0, "内容随 padding-left 内缩（宽基 10%×400+5）");
+        assert_eq!(cc.y, 45.0, "padding-top 同以宽度为基");
+        let nz = frame.find(Key(4)).unwrap();
+        assert_eq!(nz.width, 50.0, "padding-left 负值钳 0（不缩宽度）");
+    }
+
+    #[test]
+    fn calc_slot_gap_settles() {
+        // 三期③槽位扩展：column-gap 含百分比 calc 延迟结算（列隙基=容器
+        // 内容宽 20%×400+10 = 90 → 第二项 x=190）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "fx { display: flex; width: 400px; height: 20px; column-gap: calc(20% + 10px) } \
+             ia { width: 100px; height: 20px } \
+             ib { width: 100px; height: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("fx")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("ia")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("ib")).is_ok());
+        let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
+        assert_eq!(frame.find(Key(3)).unwrap().x, 190.0, "gap = 90 结算后推进");
+    }
+
+    #[test]
+    fn calc_slot_two_level_chain_converges() {
+        // 三期③：跨槽位两级链——mid.width 结算后 inner.min-width 以其为基
+        // （需第 2 遍，3 遍上限内收敛）：mid = 50%×400+10 = 210；
+        // inner min-width = 50%×210−5 = 100。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mid { width: calc(50% + 10px); height: 20px } \
+             inner { width: 10px; min-width: calc(50% - 5px); height: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mid")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("inner")).is_ok());
+        let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
+        assert_eq!(frame.find(Key(1)).unwrap().width, 210.0);
+        assert_eq!(
+            frame.find(Key(2)).unwrap().width,
+            100.0,
+            "min-width 以已结算父宽为基（跨槽位第 2 遍）"
+        );
     }
 
     #[test]

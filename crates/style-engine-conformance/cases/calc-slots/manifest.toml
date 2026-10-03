@@ -1,0 +1,12 @@
+# 三期③calc 结算槽位扩展：flex-basis/min/max/margin/padding/gap 含百分比
+# calc 延迟结算（结算基=包含块内容宽；margin-top/padding-top 亦以宽度为基，
+# flex-basis 行向基=容器内容宽）。全部整数盒纯色，Numeric 与 Pixel 双通道。
+viewport = [400.0, 300.0]
+scale = 1.0
+fonts = []
+features = ["calc", "calc-percent", "min-max", "flex", "gap", "padding", "margin-single-side", "background-color"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]
