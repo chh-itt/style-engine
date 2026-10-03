@@ -33,9 +33,25 @@
 - T1 用例覆盖（二期⑥）：conformance 新增 2 用例入 Numeric 通道（合计 18，零 xfail）——①keyframes-layout（动画布局不变性：.a/.b 挂 animation 简写+@keyframes（背景色/透明度插值），golden 与静态布局逐位一致，实证 apply_animations 每帧采样不扰动布局；transform 动画刻意不用——getBoundingClientRect 含变换、像素截图时机非确定，动画终值像素验收待 ⑦）；②bidi-mixed（混排一致性：相对容器 600×200 内 3 个 absolute 文本叶——拉丁+希伯来混排串/纯 RTL 串/声明宽 140px 折行串，宽 203.1/42.4/140、高 19/19/38 与 Chromium 153 golden 零超差，parley first-strong 基向两侧一致）；随用例修复两缺陷：restyle 的 absolute 宽例外改查本地 cs（原 is_absolute 查 self.styles 而本节点 cs 到函数尾才 insert 恒 None——auto 宽绝对文本叶测量宽丢失，taffy 绝对布局对 auto 叶无测量回退得 0）与 T5d 换行宽声明优先（原一律用 shrink 夹紧宽，声明 140px 被无界测量 233px 盖过漏折行；percent 基准暂取夹紧宽 v1 近似）；引擎锁定测试 absolute_text_leaf_sizes（混排/RTL 测量宽正负号回归+声明宽折行高）
 - 第二软 Sink 转正：Text + Transform（二期⑦）——style-engine-soft 从 FillRect/Gradient/Shadow/Image/Border/Clip/Opacity/Scroll 八算子扩至全算子：①Transform 逆映射光栅化（DisplayList 级组合矩阵 cur=[f32;6]+栈消费 PushTransform（cur=M∘cur）/PushScroll（平移折叠）/Pop*；dest 包围盒=变换后角点，逐像素中心逆仿射回源空间做矩形/圆角/clip 判定，color_at 源坐标采样——旋转 90/180° 轴对齐整数边缘无 AA，与 Chromium 逐位一致，transform-pixel 实测 diff 0/120000）；②Text 最小 TrueType 光栅化（soft::ttf 纯 std：sfnt/head/hhea/maxp/hmtx/loca/glyf 简单+复合字形（平移+双轴缩放，点匹配与 2×2 按单位阵近似记录偏差）、cmap format 4 BMP、二次曲线 16 段折线化（2048 upm 偏差≲0.06px@16px）、4×4 超采样 16 级 AA；FontBank 族名→字节注入（零副作用原则，宿主推字体），render_with_fonts 接管 Text op（基线=y+(行高−(asc+desc))/2+asc，normal 行高=round(asc)+round(desc) 与引擎㉔/Chromium 同式）；v1 边界：无合成粗斜体/kerning/spans/换行/align 消费）；③Pixel 通道转正新增 3 用例（合计 6）——transform-pixel（rotate(180)×2 非对称渐变盒+非对称 border-top 宽盒，预算 0.001 实测逐位一致）、text-pixel（DejaVu 16/20px 单行短词，预算 0.01 实测 0.00585）、table-basic 并入（预算 0.005 实测 0.002875）；④随用例修复引擎缺陷：resolve_transform_affine 漏传盒偏移——op 坐标为视口系而 origin 按 (w/2,h/2) 解析，offset 盒绕错中心旋转、子树整体错位/消失（既有单测盒在 (0,0) 故盲），paint.rs paint_node 改传 (x,y)、origin=(x,y)+盒内百分比基点，锁定测试 transform_origin_includes_box_offset（盒 (10,20,100,50) rotate(180) → e=120/f=90）
 
-## T2 — 暂缓（记录重估条件）
+## T2 — 暂缓（显式排除项清单；每项记录当前行为与重估条件）
 
-sticky / fixed（依赖滚动语义的完整所有权，滚动偏移已按 ADR-0005 归宿主，重估时补滚动容器模型）、float、打印
+> T2 定位：**有意不进 MVP 的特性**（区别于已落地项的 B/C 级偏差）。每项记录：当前行为（引擎真实状态，勿臆测）→ 重估条件（何时/依赖什么才值得做）。清单随特性落地增删。
+
+- sticky / fixed 定位：当前 `position: fixed|sticky` 声明整体丢弃（Position 枚举仅 Static/Relative/Absolute，property.rs）——fixed 不回落 absolute 语义（Chromium 中 fixed 锚视口）。重估条件：滚动容器模型完整所有权（滚动偏移已按 ADR-0005 归宿主，重估时补滚动容器注册+偏移驱动的重布局钩子）；fixed 另需视口=ICB 锚定语义。
+- float 浮动：`float`/`clear` 属性不存在、声明丢弃。taffy 0.14 block 算法内建浮动与 clearance 机械（第五批⑦评估证实），引擎侧缺属性解析与 Float 映射。重估条件：有真实用例需求时（解析+taffy FloatStyle 直通，估计一小批当量）。
+- 打印 / @media print / 分页：媒体查询求值按视口（screen 语义），无 page box 与 fragmentation。重估条件：分页布局需求出现（page 模型+跨页断行是独立工程量级）。
+- 3D 变换（matrix3d/translate3d/rotate3d/scale3d/perspective 等，ADR-0009）：解析期 warn 拒绝、声明丢弃=none——vello 0.10 纯 2D 仿射管线（[f32;6]）。重估条件：sink 升级 3D 或换渲染后端。
+- filter / clip-path / mix-blend-mode 效果本体：仅 stacking context 触发语义位（第四批④/第五批㉒），不产生任何 PaintOp——无滤镜、无路径裁剪、无混合实现。重估条件：vello 滤镜/图像效果管线可用。
+- :has() 相对选择器：未解析（选择器能力=结构伪类+组合器）。重估条件：上游 selectors 0.40 :has() 匹配能力查证通过 + 级联失效模型（父/兄弟变更反向传播的 restyle 标记——查询型选择器需依赖方向反转）。
+- CSS 嵌套（CSS Nesting，`&`）：未支持——规则体平铺，`&` 开头的规则按无效选择器丢弃。重估条件：需求出现时做解析期 desugar 展开 pass（不改级联内核）。
+- 容器查询单位（cqw/cqh/cqi/cqb）与 style 查询（@container style()）：阶段2③ v1 边界。cq 单位需要长度延迟求值（当前解析期即 resolve，容器基值布局期才有——与 calc 百分比扁平化同病，calc A·待办⑤ 同批重估）；style 查询依赖容器自定义属性计算值快照。重估条件：延迟求值管线落地。
+- 多列 fragmentation 深化：break-inside:auto 内容跨列分裂、column-span 整数列跨。当前 avoid/整列装箱语义（B 级在案）。重估条件：fragmentainer 模型（内容分裂是通用断行工程，table/多列共享）。
+- 多动画组：animation 简写逗号分隔多组（残余偏差，第五批⑰）。当前单组采样。重估条件：采样循环数组化（小工程，随动画需求）。
+- direction / unicode-bidi 显式基向：未解析——parley 0.11 硬编码 first-strong（第五批⑲已记录上游限制）。重估条件：parley 暴露 builder 级基向 API。
+- text-decoration（underline/overline/line-through + 装饰色/线型）：未解析、声明丢弃。重估条件：文本装饰绘制批（sink 文本通路画线+跨 run 装饰传播语义）。
+- @import / @supports / 其余未支持 at-rule：解析跳过+report 告警（既有）。@import 需交叉样式表装载（宿主取 URL 契约扩展）；@supports 需特性支持表。重估条件：按宿主需求。
+- 字体描述符深化：unicode-range / font-display / ascent-override 等无引擎语义（第五批⑯已记 @font-face 主体契约）。重估条件：多字重/子集化字体需求。
+- 背景图片 repeat / size / position：当前拉伸至 padding box MVP。重估条件：视觉需求出现（repeat/cover/contain 是独立绘制批）。
 - git-lfs（第五批㉗暂缓，记录重估条件）：字体基准资产（NotoSansSC.ttf/DejaVuSans.ttf 等 demo+conformance 双侧共享）暂以普通 git 对象入库；重估条件=仓库二进制总量显著增长（如新增多字重字体族/图片基准资产）或克隆体积成为协作痛点——届时迁 LFS 需同步改 CI checkout（lfs: true）与 dumper 路径无差（file 语义不变）
 
 ## MVP 实现偏差核对（T4/T6 落地后现状；分级冻结见各条【】标注）
