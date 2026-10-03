@@ -95,6 +95,8 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     tables: Vec<NodeId>,
     /// ②table：上次结算列宽缓存（px；全等免重排——稳态帧零额外布局 pass）。
     table_cols: HashMap<NodeId, Vec<f32>>,
+    /// 三期④：上次结算的单元格列位签名（(cell, 列起点0基, 跨数)；全等免重写）。
+    table_cells: HashMap<NodeId, Vec<(NodeId, usize, usize)>>,
     /// ③multi-column：多列容器注册表（restyle 收集，settle_columns 结算）。
     multicols: Vec<NodeId>,
     /// ③multi-column：稳态缓存（幻影列节点 + 当前分配；全等免重排）。
@@ -156,6 +158,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             abs_structured: false,
             tables: Vec::new(),
             table_cols: HashMap::new(),
+            table_cells: HashMap::new(),
             multicols: Vec::new(),
             multicol_state: HashMap::new(),
             styles: HashMap::new(),
@@ -1057,6 +1060,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.abs_structured = false;
         self.tables.clear();
         self.table_cols.clear();
+        self.table_cells.clear();
         self.multicols.clear();
         self.multicol_state.clear();
         if self.root_key.is_some() {
@@ -1331,10 +1335,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// 三期④：节点 display 快查（缺样式视为 None）。
+    fn display_of(&self, id: NodeId) -> Option<crate::css::property::Display> {
+        self.styles.get(&id).map(|cs| cs.display())
+    }
+
     /// ②table：列模板结算——首遍布局给出表内容宽后，按首行单元格声明宽
     /// （定宽 px / 百分比 / auto）计算列模板回写各 table-row 的单行 Grid；
     /// 全等缓存则免重排（稳态帧零额外布局 pass）。嵌套表外层先行：变更
     /// 触发一次重排后二次迭代（上限 2 遍，内层表宽度取结算后值）。
+    /// 三期④：行发现穿透行组；单元格图（CSS 2.1 §17.2.11.1 简化版）按
+    /// colspan 属性分配显式列位；span-n 声明宽度均分给跨内未声明列。
     fn settle_tables(&mut self, viewport: (f32, f32)) {
         if self.tables.is_empty() {
             return;
@@ -1356,73 +1367,174 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     - tl.padding.left
                     - tl.padding.right)
                     .max(0.0);
-                let rows: Vec<NodeId> = self.tree.children(table).to_vec();
-                let mut n_cols = 0usize;
-                for r in &rows {
-                    n_cols = n_cols.max(self.tree.children(*r).len());
-                }
-                // 列声明取首行单元格（无 colspan v1）；列数取各行最大值。
-                // 水平内缩（padding+border）随声明一并收集：Length 贡献 =
-                // px + 内缩（content-box），Percent 列 = border-box 不加。
-                let mut declared: Vec<(taffy::prelude::Dimension, f32)> = Vec::new();
-                if let Some(first) = rows.first() {
-                    for c in self.tree.children(*first) {
-                        let Some(cs) = self.styles.get(c) else {
-                            declared.push((taffy::prelude::Dimension::auto(), 0.0));
-                            continue;
-                        };
-                        let d = map_style(cs, &self.media).size.width;
-                        let rctx = crate::css::value::ResolveCtx {
-                            em: cs.font_size_px(),
-                            rem: 16.0,
-                            viewport_w: self.media.viewport_w,
-                            viewport_h: self.media.viewport_h,
-                        };
-                        let inset: f32 = [
-                            (crate::css::property::PropertyId::PaddingLeft, None),
-                            (crate::css::property::PropertyId::PaddingRight, None),
-                            (
-                                crate::css::property::PropertyId::BorderLeftWidth,
-                                Some(crate::css::property::PropertyId::BorderLeftStyle),
-                            ),
-                            (
-                                crate::css::property::PropertyId::BorderRightWidth,
-                                Some(crate::css::property::PropertyId::BorderRightStyle),
-                            ),
-                        ]
-                        .iter()
-                        .filter_map(|(pid, style_pid)| used_h_inset(cs, *pid, *style_pid, &rctx))
-                        .sum();
-                        declared.push((d, inset));
+                // 三期④：行发现穿透行组（row-group/header/footer 组为透明
+                // 包装）；caption 与杂件跳过（匿名盒修补另批）。
+                let mut rows: Vec<NodeId> = Vec::new();
+                for &c in self.tree.children(table) {
+                    match self.display_of(c) {
+                        Some(crate::css::property::Display::TableRow) => rows.push(c),
+                        Some(crate::css::property::Display::TableRowGroup) => {
+                            for &r in self.tree.children(c) {
+                                if self.display_of(r)
+                                    == Some(crate::css::property::Display::TableRow)
+                                {
+                                    rows.push(r);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
+                // 三期④：单元格图（CSS 2.1 §17.2.11.1 简化版，rowspan 后批）——
+                // 逐行游标分配列位，colspan 取属性（StyleNode.attrs，缺省 1），
+                // 列数 = 各行跨数和的最大值；非单元格子件跳过（匿名盒另批）。
+                let mut placements: Vec<(NodeId, usize, usize)> = Vec::new();
+                let mut n_cols = 0usize;
+                let mut first_row_len = 0usize;
+                for (ri, r) in rows.iter().enumerate() {
+                    let mut cursor = 0usize;
+                    for &c in self.tree.children(*r) {
+                        if self.display_of(c) != Some(crate::css::property::Display::TableCell) {
+                            continue;
+                        }
+                        let span = self
+                            .tree
+                            .node(c)
+                            .attrs
+                            .get("colspan")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(1)
+                            .clamp(1, 1000) as usize;
+                        placements.push((c, cursor, span));
+                        cursor += span;
+                    }
+                    n_cols = n_cols.max(cursor);
+                    if ri == 0 {
+                        first_row_len = placements.len();
+                    }
+                }
+                // 列声明仍取首行单元格；span-n 声明把宽度分给跨内未声明列
+                // （等分近似——Chromium 按 min/max-content 分配，简单表一致）。
+                // Length 声明 = px+内缩（content-box），Percent = 表宽基不追加。
+                let mut declared: Vec<Option<(taffy::prelude::Dimension, f32)>> =
+                    vec![None; n_cols];
+                let mut claims: Vec<(usize, usize, taffy::prelude::Dimension, f32)> = Vec::new();
+                for (cell, start, span) in placements[..first_row_len].iter() {
+                    let Some(cs) = self.styles.get(cell) else {
+                        continue;
+                    };
+                    let d = map_style(cs, &self.media).size.width;
+                    let rctx = crate::css::value::ResolveCtx {
+                        em: cs.font_size_px(),
+                        rem: 16.0,
+                        viewport_w: self.media.viewport_w,
+                        viewport_h: self.media.viewport_h,
+                    };
+                    let inset: f32 = [
+                        (crate::css::property::PropertyId::PaddingLeft, None),
+                        (crate::css::property::PropertyId::PaddingRight, None),
+                        (
+                            crate::css::property::PropertyId::BorderLeftWidth,
+                            Some(crate::css::property::PropertyId::BorderLeftStyle),
+                        ),
+                        (
+                            crate::css::property::PropertyId::BorderRightWidth,
+                            Some(crate::css::property::PropertyId::BorderRightStyle),
+                        ),
+                    ]
+                    .iter()
+                    .filter_map(|(pid, style_pid)| used_h_inset(cs, *pid, *style_pid, &rctx))
+                    .sum();
+                    if *span == 1 {
+                        declared[*start] = Some((d, inset));
+                    } else {
+                        claims.push((*start, *span, d, inset));
+                    }
+                }
+                for (start, span, d, inset) in &claims {
+                    let spanned = *start..(*start + *span);
+                    let autos: Vec<usize> =
+                        spanned.clone().filter(|i| declared[*i].is_none()).collect();
+                    if autos.is_empty() {
+                        continue;
+                    }
+                    let target = if let Some(px) = d.into_option() {
+                        px + inset
+                    } else if d.is_auto() {
+                        continue;
+                    } else {
+                        d.value() * tw
+                    };
+                    let fixed: f32 = spanned
+                        .filter_map(|i| declared[i])
+                        .map(|(dd, ii)| match dd.into_option() {
+                            Some(p) => p + ii,
+                            None if dd.is_auto() => 0.0,
+                            None => dd.value() * tw,
+                        })
+                        .sum();
+                    let share = ((target - fixed) / autos.len() as f32).max(0.0);
+                    for i in autos {
+                        declared[i] = Some((taffy::prelude::Dimension::length(share), 0.0));
+                    }
+                }
+                let declared: Vec<(taffy::prelude::Dimension, f32)> = declared
+                    .into_iter()
+                    .map(|d| d.unwrap_or((taffy::prelude::Dimension::auto(), 0.0)))
+                    .collect();
                 let cols = crate::layout::table_column_template(tw, &declared, n_cols);
-                if self
+                let cols_unchanged = self
                     .table_cols
                     .get(&table)
-                    .is_some_and(|prev| *prev == cols)
-                {
+                    .is_some_and(|prev| *prev == cols);
+                let cells_unchanged = self.table_cells.get(&table) == Some(&placements);
+                if cols_unchanged && cells_unchanged {
                     continue;
                 }
-                let template: Vec<_> = cols
-                    .iter()
-                    .map(|&px| {
-                        taffy::style::GridTemplateComponent::Single(taffy::style_helpers::length(
-                            px,
-                        ))
-                    })
-                    .collect();
-                for r in &rows {
-                    let Some(&rtid) = self.taffy_node.get(r) else {
-                        continue;
-                    };
-                    let Ok(mut rs) = self.taffy.style(rtid).cloned() else {
-                        continue;
-                    };
-                    rs.grid_template_columns = template.clone();
-                    let _ = self.taffy.set_style(rtid, rs);
+                if !cols_unchanged {
+                    let template: Vec<_> = cols
+                        .iter()
+                        .map(|&px| {
+                            taffy::style::GridTemplateComponent::Single(
+                                taffy::style_helpers::length(px),
+                            )
+                        })
+                        .collect();
+                    for r in &rows {
+                        let Some(&rtid) = self.taffy_node.get(r) else {
+                            continue;
+                        };
+                        let Ok(mut rs) = self.taffy.style(rtid).cloned() else {
+                            continue;
+                        };
+                        rs.grid_template_columns = template.clone();
+                        let _ = self.taffy.set_style(rtid, rs);
+                    }
+                    self.table_cols.insert(table, cols);
                 }
-                self.table_cols.insert(table, cols);
+                // 三期④：单元格显式列位（1 基网格线起点 + 跨数），行位钉在
+                // 第 1 行——洞（rowspan/杂件）不再吸附后续单元格。列模板全等
+                // 但单元格图变化（如 colspan 属性变更）时仍需回写列位。
+                if !cells_unchanged {
+                    for (cell, start, span) in &placements {
+                        let Some(&ctid) = self.taffy_node.get(cell) else {
+                            continue;
+                        };
+                        let Ok(mut cst) = self.taffy.style(ctid).cloned() else {
+                            continue;
+                        };
+                        cst.grid_column = taffy::geometry::Line {
+                            start: taffy::style::GridPlacement::Line(((*start + 1) as i16).into()),
+                            end: taffy::style::GridPlacement::Span(*span as u16),
+                        };
+                        cst.grid_row = taffy::geometry::Line {
+                            start: taffy::style::GridPlacement::Line(1i16.into()),
+                            end: taffy::style::GridPlacement::Span(1),
+                        };
+                        let _ = self.taffy.set_style(ctid, cst);
+                    }
+                    self.table_cells.insert(table, placements.clone());
+                }
                 changed = true;
             }
             if !changed {
@@ -1684,6 +1796,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.calc_deferred.clear();
         self.tables.clear();
         self.table_cols.clear();
+        self.table_cells.clear();
         self.multicols.clear();
         self.multicol_state.clear();
         #[cfg(feature = "text")]
@@ -2433,6 +2546,132 @@ mod tests {
         let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
         let frame3 = engine.frame((800.0, 600.0), 1.0, 0.0);
         assert_eq!(frame3.find(Key(5)).unwrap().width, 300.0);
+    }
+
+    #[test]
+    fn table_colspan_expands_column_map() {
+        // 三期④a：colspan 属性（StyleNode.attrs）→ 单元格图显式列位；
+        // span-n 声明宽均分给跨内未声明列（Chromium 简单表一致）。
+        // 列模板 [100,100,100,100]：ca 定宽 100 占列 1，cb 宽 300
+        // colspan=3 占列 2–4；第二行四格共享模板并显式列位推进。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "tab { display: table; width: 400px } \
+             row { display: table-row } \
+             ca { display: table-cell; width: 100px; height: 30px } \
+             cb { display: table-cell; width: 300px; height: 30px } \
+             cd { display: table-cell; height: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let mk_span = |name: &str, span: &str| StyleNode {
+            name: Some(name.to_string()),
+            attrs: [("colspan".to_string(), span.to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("tab")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(4), mk("ca")).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(2)), Key(5), mk_span("cb", "3"))
+                .is_ok()
+        );
+        for k in 6..=9 {
+            assert!(engine.insert(Some(Key(3)), Key(k), mk("cd")).is_ok());
+        }
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let (w, x, y) = (
+            |k: Key| frame.find(k).unwrap().width,
+            |k: Key| frame.find(k).unwrap().x,
+            |k: Key| frame.find(k).unwrap().y,
+        );
+        assert_eq!(w(Key(4)), 100.0, "定宽列 1");
+        assert_eq!(x(Key(5)), 100.0, "跨列单元起于列 2");
+        assert_eq!(w(Key(5)), 300.0, "跨 3 列 = 100×3");
+        for (i, k) in (6..=9).enumerate() {
+            assert_eq!(w(Key(k)), 100.0, "第二行共享模板");
+            assert_eq!(x(Key(k)), i as f32 * 100.0, "显式列位推进");
+            assert_eq!(y(Key(k)), 30.0, "第二行位于首行下方");
+        }
+        // 稳态幂等：列位签名全等不重写。
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let frame3 = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert_eq!(frame3.find(Key(5)).unwrap().x, 100.0);
+    }
+
+    #[test]
+    fn table_row_group_stacks_rows() {
+        // 三期④a：行组（table-row-group）=纵向透明块包装，行发现穿透；
+        // 组内行与表直系行混排（直系行在组后接续堆叠）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "tab { display: table; width: 400px } \
+             grp { display: table-row-group } \
+             row { display: table-row; height: 30px } \
+             row2 { display: table-row; height: 20px } \
+             cell { display: table-cell; width: 100px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("tab")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("grp")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(4), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(5), mk("row2")).is_ok());
+        assert!(engine.insert(Some(Key(3)), Key(6), mk("cell")).is_ok());
+        assert!(engine.insert(Some(Key(4)), Key(7), mk("cell")).is_ok());
+        assert!(engine.insert(Some(Key(5)), Key(8), mk("cell")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        // 行组透明：组内两行 y=0/30，直系行接续 y=50。
+        assert_eq!(b(Key(3)).y, 0.0);
+        assert_eq!(b(Key(4)).y, 30.0);
+        assert_eq!(b(Key(5)).y, 60.0, "直系行接在行组之后（组内 30+30）");
+        // 列模板跨行共享（首行单元格声明穿透行组生效）。
+        for k in [Key(6), Key(7), Key(8)] {
+            assert_eq!(b(k).width, 100.0);
+            assert_eq!(b(k).x, 0.0);
+        }
+        assert_eq!(b(Key(1)).height, 80.0, "表高 = 30+30+20");
+    }
+
+    #[test]
+    fn table_caption_sits_above_rows() {
+        // 三期④a：caption=普通块盒置于行区上方，宽=表内容宽，不参与列发现。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "tab { display: table; width: 400px } \
+             cap { display: table-caption; height: 20px } \
+             row { display: table-row; height: 30px } \
+             cell { display: table-cell; width: 100px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("tab")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("cap")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(3)), Key(4), mk("cell")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        assert_eq!(b(Key(2)).y, 0.0, "caption 在最上");
+        assert_eq!(b(Key(2)).height, 20.0);
+        assert_eq!(b(Key(2)).width, 400.0, "caption 宽=表内容宽");
+        assert_eq!(b(Key(3)).y, 20.0, "行区在 caption 之下");
+        assert_eq!(b(Key(4)).width, 100.0, "caption 不参与列发现");
+        assert_eq!(b(Key(1)).height, 50.0);
     }
 
     #[test]

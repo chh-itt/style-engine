@@ -327,6 +327,9 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
             crate::css::property::Display::Table => taffy::prelude::Display::Block,
             crate::css::property::Display::TableRow => taffy::prelude::Display::Grid,
             crate::css::property::Display::TableCell => taffy::prelude::Display::Block,
+            // 三期④：行组=纵向透明块包装、caption=普通块（置于行区上方）。
+            crate::css::property::Display::TableRowGroup => taffy::prelude::Display::Block,
+            crate::css::property::Display::TableCaption => taffy::prelude::Display::Block,
         },
         position: match cs.position() {
             crate::css::property::Position::Static | crate::css::property::Position::Relative => {

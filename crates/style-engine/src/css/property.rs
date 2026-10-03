@@ -391,6 +391,12 @@ pub enum Display {
     TableRow,
     /// display:table-cell——映射为 Grid 项（块），宽度交列模板（拉伸）。
     TableCell,
+    /// 三期④：display:table-row-group/header-group/footer-group——行组为
+    /// 纵向透明的块包装（行 Grid 直系堆叠），行发现由 settle_tables 穿透。
+    TableRowGroup,
+    /// 三期④：display:table-caption——表标题盒（块流置于行区上方，
+    /// 宽度=表内容宽；不参与列发现）。
+    TableCaption,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -734,11 +740,13 @@ pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             "block" | "inline" | "inline-block" | "flow-root" => Display::Block,
             "flex" | "inline-flex" => Display::Flex,
             "grid" | "inline-grid" => Display::Grid,
-            // 二期②：表格三核心值（inline-table 归一 Block 级语义，同⑧契约）；
-            // 行组/列组/caption 未解析（容错回退初始值，v1 偏差记录）。
+            // 二期②表格核心值（inline-table 归一 Block 级语义，同⑧契约）；
+            // 三期④补行组（header/footer 组归一）与 caption。
             "table" | "inline-table" => Display::Table,
             "table-row" => Display::TableRow,
             "table-cell" => Display::TableCell,
+            "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
+            "table-caption" => Display::TableCaption,
             "none" => Display::None,
             _ => return None,
         ))
