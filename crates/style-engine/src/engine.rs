@@ -1388,7 +1388,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 }
                 // 三期④：单元格图（CSS 2.1 §17.2.11.1 简化版）——逐行游标
                 // 分配列位，colspan/rowspan 取属性（StyleNode.attrs，缺省 1），
-                // 列数 = 各行跨数和的最大值；非单元格子件跳过（匿名盒另批）。
+                // 列数 = 各行跨数和的最大值；④d 行内非单元格元素按匿名单元
+                // 格入图（见下方过滤注释）。
                 // ④c rowspan：occupancy 集合记录被跨单元格占据的 (行,列)，
                 // 后续行游标先跳过占据位（Chromium 语义——跨行单元不挤走
                 // 后行单元格，列照常向后开辟）。
@@ -1399,7 +1400,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 for (ri, r) in rows.iter().enumerate() {
                     let mut cursor = 0usize;
                     for &c in self.tree.children(*r) {
-                        if self.display_of(c) != Some(crate::css::property::Display::TableCell) {
+                        // ④d 匿名盒（CSS 2.1 §17.2.1 第 3 条简化）：行内非
+                        // 单元格元素（框架常见直写 <div>）→ 匿名单元格——
+                        // 直接按单元格入图（列位/宽度拉伸与 td 一致，匿名
+                        // 包装盒省略、元素自身承担单元格几何）。display:none
+                        // 不入图；absolute 出流不作为单元格。
+                        if self.display_of(c) == Some(crate::css::property::Display::None) {
+                            continue;
+                        }
+                        if self.styles.get(&c).is_some_and(|cs| {
+                            cs.position() == crate::css::property::Position::Absolute
+                        }) {
                             continue;
                         }
                         let attrs = &self.tree.node(c).attrs;
@@ -2798,6 +2809,49 @@ mod tests {
             assert_eq!(b(Key(k)).width, 100.0);
         }
         assert_eq!(b(Key(1)).height, 70.0, "表高 = 30+20+20");
+    }
+
+    #[test]
+    fn table_row_non_cell_becomes_anonymous_cell() {
+        // 三期④d：行内非单元格元素（display:block div）→ 匿名单元格
+        // （CSS 2.1 §17.2.1 第 3 条）：入单元格图、列位分配、宽度拉伸；
+        // display:none 与 absolute 子件不入图。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "tab { display: table; width: 300px } \
+             row { display: table-row; height: 20px } \
+             row2 { display: table-row; height: 25px } \
+             ca { display: table-cell; width: 100px } \
+             cb { display: block; width: 200px } \
+             cc { display: block } \
+             hidden { display: none }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("tab")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("ca")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(4), mk("cb")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(5), mk("hidden")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(6), mk("row2")).is_ok());
+        assert!(engine.insert(Some(Key(6)), Key(7), mk("cc")).is_ok());
+        assert!(engine.insert(Some(Key(6)), Key(8), mk("ca")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        // 首行：td 列 1，div 匿名单元格列 2（列模板 [100,200]）。
+        assert_eq!(b(Key(3)).x, 0.0);
+        assert_eq!(b(Key(3)).width, 100.0);
+        assert_eq!(b(Key(4)).x, 100.0, "div 匿名单元格起列 2");
+        assert_eq!(b(Key(4)).width, 200.0);
+        // 第二行：div 落列 1（auto 拉伸 100），td 落列 2 拉伸 200。
+        assert_eq!(b(Key(7)).x, 0.0);
+        assert_eq!(b(Key(7)).width, 100.0);
+        assert_eq!(b(Key(8)).x, 100.0);
+        assert_eq!(b(Key(8)).width, 200.0, "声明 100 拉伸到列宽 200");
+        assert_eq!(b(Key(1)).height, 45.0, "表高 = 20+25");
     }
 
     #[test]
