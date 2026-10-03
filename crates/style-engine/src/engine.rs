@@ -95,8 +95,9 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     tables: Vec<NodeId>,
     /// ②table：上次结算列宽缓存（px；全等免重排——稳态帧零额外布局 pass）。
     table_cols: HashMap<NodeId, Vec<f32>>,
-    /// 三期④：上次结算的单元格列位签名（(cell, 列起点0基, 跨数)；全等免重写）。
-    table_cells: HashMap<NodeId, Vec<(NodeId, usize, usize)>>,
+    /// 三期④：上次结算的单元格列位签名（(cell, 列起点0基, 列跨, 行跨)；
+    /// 全等免重写）。
+    table_cells: HashMap<NodeId, Vec<(NodeId, usize, usize, u32)>>,
     /// ③multi-column：多列容器注册表（restyle 收集，settle_columns 结算）。
     multicols: Vec<NodeId>,
     /// ③multi-column：稳态缓存（幻影列节点 + 当前分配；全等免重排）。
@@ -1385,10 +1386,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         _ => {}
                     }
                 }
-                // 三期④：单元格图（CSS 2.1 §17.2.11.1 简化版，rowspan 后批）——
-                // 逐行游标分配列位，colspan 取属性（StyleNode.attrs，缺省 1），
+                // 三期④：单元格图（CSS 2.1 §17.2.11.1 简化版）——逐行游标
+                // 分配列位，colspan/rowspan 取属性（StyleNode.attrs，缺省 1），
                 // 列数 = 各行跨数和的最大值；非单元格子件跳过（匿名盒另批）。
-                let mut placements: Vec<(NodeId, usize, usize)> = Vec::new();
+                // ④c rowspan：occupancy 集合记录被跨单元格占据的 (行,列)，
+                // 后续行游标先跳过占据位（Chromium 语义——跨行单元不挤走
+                // 后行单元格，列照常向后开辟）。
+                let mut placements: Vec<(NodeId, usize, usize, u32)> = Vec::new();
+                let mut occupied: std::collections::BTreeSet<(usize, usize)> = Default::default();
                 let mut n_cols = 0usize;
                 let mut first_row_len = 0usize;
                 for (ri, r) in rows.iter().enumerate() {
@@ -1397,15 +1402,26 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         if self.display_of(c) != Some(crate::css::property::Display::TableCell) {
                             continue;
                         }
-                        let span = self
-                            .tree
-                            .node(c)
-                            .attrs
+                        let attrs = &self.tree.node(c).attrs;
+                        let span = attrs
                             .get("colspan")
                             .and_then(|v| v.parse::<u32>().ok())
                             .unwrap_or(1)
                             .clamp(1, 1000) as usize;
-                        placements.push((c, cursor, span));
+                        let rspan = attrs
+                            .get("rowspan")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(1)
+                            .clamp(1, 1000);
+                        while occupied.contains(&(ri, cursor)) {
+                            cursor += 1;
+                        }
+                        placements.push((c, cursor, span, rspan));
+                        for rr in ri..ri + rspan as usize {
+                            for cc in cursor..cursor + span {
+                                occupied.insert((rr, cc));
+                            }
+                        }
                         cursor += span;
                     }
                     n_cols = n_cols.max(cursor);
@@ -1419,7 +1435,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let mut declared: Vec<Option<(taffy::prelude::Dimension, f32)>> =
                     vec![None; n_cols];
                 let mut claims: Vec<(usize, usize, taffy::prelude::Dimension, f32)> = Vec::new();
-                for (cell, start, span) in placements[..first_row_len].iter() {
+                for (cell, start, span, _) in placements[..first_row_len].iter() {
                     let Some(cs) = self.styles.get(cell) else {
                         continue;
                     };
@@ -1508,6 +1524,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             continue;
                         };
                         rs.grid_template_columns = template.clone();
+                        // ④c：行高 definite 时同时钉死行轨道——否则跨行单元
+                        // 的高度覆写作为 auto 轨道的 min-content 贡献会把整
+                        // 条轨道（及同轨其他单元格）撑高；Chromium 语义是跨
+                        // 行内容不改显式行高、只向下溢出。
+                        if let Some(row_h) = self
+                            .styles
+                            .get(r)
+                            .and_then(|cs| map_style(cs, &self.media).size.height.into_option())
+                        {
+                            rs.grid_template_rows =
+                                vec![taffy::style::GridTemplateComponent::Single(
+                                    taffy::style_helpers::length(row_h),
+                                )];
+                        }
                         let _ = self.taffy.set_style(rtid, rs);
                     }
                     self.table_cols.insert(table, cols);
@@ -1515,8 +1545,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 // 三期④：单元格显式列位（1 基网格线起点 + 跨数），行位钉在
                 // 第 1 行——洞（rowspan/杂件）不再吸附后续单元格。列模板全等
                 // 但单元格图变化（如 colspan 属性变更）时仍需回写列位。
+                // ④c rowspan：跨行单元留在宿主行网格内（列位照旧），高度
+                // 覆写 = 宿主行 + 下方被跨行的 definite 高度和 → 向下溢出
+                // 覆盖后续行（行高 definite 时与 Chromium 一致；被跨行 auto
+                // 或宿主行 auto 时放弃覆写、按内容高——v1 记偏差，Chromium
+                // 会把跨行内容分摊进被跨行高度）。行跨超出末行按 CSS 截断。
                 if !cells_unchanged {
-                    for (cell, start, span) in &placements {
+                    for (cell, start, span, rspan) in &placements {
                         let Some(&ctid) = self.taffy_node.get(cell) else {
                             continue;
                         };
@@ -1531,6 +1566,29 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             start: taffy::style::GridPlacement::Line(1i16.into()),
                             end: taffy::style::GridPlacement::Span(1),
                         };
+                        if *rspan > 1 {
+                            // 宿主行 = 单元格直接父行（placements 即按行枚举产生）。
+                            let ri = rows
+                                .iter()
+                                .position(|r| self.tree.parent(*cell) == Some(*r))
+                                .unwrap_or(0);
+                            let end = (ri + *rspan as usize).min(rows.len());
+                            let heights: Vec<Option<f32>> = rows[ri..end]
+                                .iter()
+                                .map(|r| {
+                                    self.styles.get(r).map(|cs| {
+                                        map_style(cs, &self.media).size.height.into_option()
+                                    })
+                                })
+                                .map(|o| o.flatten())
+                                .collect();
+                            if heights.iter().all(|h| h.is_some()) {
+                                let total: f32 = heights.iter().map(|h| h.unwrap_or(0.0)).sum();
+                                if total > 0.0 {
+                                    cst.size.height = taffy::prelude::Dimension::length(total);
+                                }
+                            }
+                        }
                         let _ = self.taffy.set_style(ctid, cst);
                     }
                     self.table_cells.insert(table, placements.clone());
@@ -2672,6 +2730,74 @@ mod tests {
         assert_eq!(b(Key(3)).y, 20.0, "行区在 caption 之下");
         assert_eq!(b(Key(4)).width, 100.0, "caption 不参与列发现");
         assert_eq!(b(Key(1)).height, 50.0);
+    }
+
+    #[test]
+    fn table_rowspan_spans_rows_in_home_grid() {
+        // 三期④c：rowspan=2 单元格留在宿主行网格（列位照旧），高度覆写 =
+        // 被跨行 definite 高度和（30+20=50）向下溢出覆盖；后行游标跳过被
+        // 占列（第二行 col 2–4 被占，单格落列 1）；第三行四格补齐列 1–4。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "tab { display: table; width: 400px } \
+             row { display: table-row; height: 30px } \
+             row2 { display: table-row; height: 20px } \
+             row3 { display: table-row; height: 20px } \
+             ca { display: table-cell; width: 100px } \
+             cb { display: table-cell; width: 300px } \
+             cc { display: table-cell; width: 100px } \
+             cd { display: table-cell }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let mk_span = |name: &str, attrs: &[(&str, &str)]| StyleNode {
+            name: Some(name.to_string()),
+            attrs: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("tab")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("row")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("row2")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("row3")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(5), mk("ca")).is_ok());
+        assert!(
+            engine
+                .insert(
+                    Some(Key(2)),
+                    Key(6),
+                    mk_span("cb", &[("colspan", "3"), ("rowspan", "2")])
+                )
+                .is_ok()
+        );
+        assert!(engine.insert(Some(Key(3)), Key(7), mk("cc")).is_ok());
+        for k in 8..=11 {
+            assert!(engine.insert(Some(Key(4)), Key(k), mk("cd")).is_ok());
+        }
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        // 跨行单元：宿主行内起列 2，高 = 30+20。
+        assert_eq!(b(Key(6)).x, 100.0);
+        assert_eq!(b(Key(6)).y, 0.0, "无 caption，首行在表顶");
+        assert_eq!(b(Key(6)).width, 300.0);
+        assert_eq!(b(Key(6)).height, 50.0, "rowspan 覆写 = 30+20");
+        // 第二行：col 2–4 被占，唯一格落列 1。
+        assert_eq!(b(Key(7)).x, 0.0);
+        assert_eq!(b(Key(7)).y, 30.0);
+        assert_eq!(b(Key(7)).width, 100.0);
+        assert_eq!(b(Key(7)).height, 20.0);
+        // 第三行四格补齐列 1–4。
+        for (i, k) in (8..=11).enumerate() {
+            assert_eq!(b(Key(k)).x, i as f32 * 100.0);
+            assert_eq!(b(Key(k)).y, 50.0);
+            assert_eq!(b(Key(k)).width, 100.0);
+        }
+        assert_eq!(b(Key(1)).height, 70.0, "表高 = 30+20+20");
     }
 
     #[test]

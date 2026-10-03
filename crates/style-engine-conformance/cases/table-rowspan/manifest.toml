@@ -1,0 +1,12 @@
+# 三期④c 表格 rowspan：td.b colspan=3 rowspan=2 宽 300 高 50（30+20），
+# occupancy 让第二行唯一格落列 1，第三行四格补齐。全整数盒纯色，
+# Numeric 与 Pixel 双通道验收。
+viewport = [400.0, 300.0]
+scale = 1.0
+fonts = []
+features = ["table", "table-colspan", "table-rowspan", "table-row-group", "background-color"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

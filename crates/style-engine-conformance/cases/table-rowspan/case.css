@@ -1,0 +1,17 @@
+/* 三期④c 表格 rowspan 用例：td.b colspan=3 rowspan=2 → 列 2–4、行 1–2，
+ * 高 = 30+20=50；第二行唯一格被 occupancy 顶到列 1（col 2–4 被跨行单元
+ * 占据）；第三行四格补齐列 1–4。期望几何（无 caption，行区自表顶起）：
+ * r1(0,0,400,30) a(0,0,100,30) b(100,0,300,50) r2(0,30,400,20) c(0,30,100,20)
+ * r3(0,50,400,20) d×4(0/100/200/300,50,100,20) 表高 70。
+ * display 显式声明保持两侧对称；UA 装饰由 dumper 中和样式归零。 */
+body { margin: 0; }
+.wrap { width: 400px; background-color: #f5f5f5; }
+table.tab { display: table; width: 400px; }
+tbody.grp { display: table-row-group; }
+tr.r1 { display: table-row; height: 30px; }
+tr.r2 { display: table-row; height: 20px; }
+tr.r3 { display: table-row; height: 20px; }
+td.a { display: table-cell; width: 100px; background-color: #3366cc; }
+td.b { display: table-cell; width: 300px; background-color: #33aa55; }
+td.c { display: table-cell; width: 100px; background-color: #cc8822; }
+td.d { display: table-cell; background-color: #cc4444; }
