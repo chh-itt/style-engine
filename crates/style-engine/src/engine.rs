@@ -3990,6 +3990,82 @@ mod tests {
     }
 
     #[test]
+    fn grid_autofill_repeats_tracks_to_fit() {
+        // 阶段2①：auto-fill 重复计数 = 可用空间容纳的最大次数（空轨保留）。
+        // 400 宽 + repeat(auto-fill, 100px) → 4 轨；5 个 80×80 自动回绕第二行。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.g { display: grid; width: 400px; \
+                     grid-template-columns: repeat(auto-fill, 100px); } \
+                     div.i { width: 80px; height: 80px; }"
+                )
+                .is_clean()
+        );
+        let mk = |cls: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(cls.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("g")).is_ok());
+        for k in 2..=6u32 {
+            assert!(engine.insert(Some(Key(1)), Key(k), mk("i")).is_ok());
+        }
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k| frame.find(Key(k)).unwrap();
+        assert_eq!((b(2).x, b(2).y), (0.0, 0.0));
+        assert_eq!((b(3).x, b(3).y), (100.0, 0.0));
+        assert_eq!((b(4).x, b(4).y), (200.0, 0.0));
+        assert_eq!((b(5).x, b(5).y), (300.0, 0.0));
+        assert_eq!((b(6).x, b(6).y), (0.0, 80.0), "第 5 项回绕第二行");
+    }
+
+    #[test]
+    fn grid_autofit_collapses_empty_tracks_fr_expands() {
+        // 阶段2①：auto-fit 空轨折叠后剩余轨（fr）重分自由空间。
+        // 对照 400 宽 2 项 minmax(100px, 1fr)：auto-fill=4 轨各 100；
+        // auto-fit=折叠 2 空轨 → 2 轨各 200。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.g { display: grid; width: 400px; \
+                     grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); } \
+                     div.f { display: grid; width: 400px; \
+                     grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); } \
+                     div.i { height: 80px; }"
+                )
+                .is_clean()
+        );
+        let mk = |cls: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(cls.to_string()).collect(),
+            ..Default::default()
+        };
+        // 单根约束：w 包裹两个对照容器（g=auto-fill / f=auto-fit）。
+        assert!(engine.insert(None, Key(1), mk("w")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("g")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("i")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(4), mk("i")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(5), mk("f")).is_ok());
+        assert!(engine.insert(Some(Key(5)), Key(6), mk("i")).is_ok());
+        assert!(engine.insert(Some(Key(5)), Key(7), mk("i")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        // auto-fill：4 轨各 100，两项 x=0 / x=100。
+        let b3 = frame.find(Key(3)).unwrap();
+        let b4 = frame.find(Key(4)).unwrap();
+        assert_eq!((b3.x, b3.width), (0.0, 100.0));
+        assert_eq!((b4.x, b4.width), (100.0, 100.0));
+        // auto-fit：2 空轨折叠，剩余 2 轨 fr 均分 → 各 200。
+        let b6 = frame.find(Key(6)).unwrap();
+        let b7 = frame.find(Key(7)).unwrap();
+        assert_eq!((b6.x, b6.width), (0.0, 200.0));
+        assert_eq!((b7.x, b7.width), (200.0, 200.0));
+        assert_eq!((b6.y, b7.y), (80.0, 80.0), "auto-fit 容器在 g 容器下方");
+    }
+
+    #[test]
     fn class_attribute_is_space_separated_tokens() {
         // class 属性按空格拆 token："row alt" 同时命中 .row 与 .alt。
         let mut engine: StyleEngine<Key> = StyleEngine::new();

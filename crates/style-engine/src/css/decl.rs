@@ -1197,6 +1197,35 @@ mod tests {
     }
 
     #[test]
+    fn grid_repeat_auto_fill_and_fit() {
+        // 阶段2①：repeat 首参数 auto-fill / auto-fit（计数留待布局期定）；
+        // 固定次数与 auto 混排合法；auto-repeat 内禁嵌套 auto-repeat（整条丢弃）。
+        let (b, r) = block(
+            "grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); \
+             grid-template-rows: 50px repeat(auto-fit, 100px)",
+        );
+        assert!(r.is_clean());
+        match parsed(&b.decls[0]) {
+            DeclValue::GridTracks(t) => {
+                assert_eq!(t.tracks.len(), 1);
+                assert!(matches!(t.tracks[0], TrackSize::RepeatAuto(false, ref l) if l.len() == 1));
+            }
+            other => panic!("expected grid tracks, got {other:?}"),
+        }
+        match parsed(&b.decls[1]) {
+            DeclValue::GridTracks(t) => {
+                assert_eq!(t.tracks.len(), 2);
+                assert_eq!(t.tracks[0], TrackSize::Len(LengthPercentage::Px(50.0)));
+                assert!(matches!(t.tracks[1], TrackSize::RepeatAuto(true, _)));
+            }
+            other => panic!("expected grid tracks, got {other:?}"),
+        }
+        let (b, r) = block("grid-template-columns: repeat(auto-fill, repeat(auto-fill, 100px))");
+        assert!(!r.is_clean(), "嵌套 auto-repeat 非法 → 整条丢弃");
+        assert!(b.decls.is_empty());
+    }
+
+    #[test]
     fn gradient_direction_and_shadows() {
         let (b, r) = block(
             "background-image: linear-gradient(to right, red, blue); \

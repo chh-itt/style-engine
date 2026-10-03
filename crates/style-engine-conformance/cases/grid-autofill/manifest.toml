@@ -1,0 +1,12 @@
+# 阶段2①：grid repeat(auto-fill / auto-fit)——auto-fill 计数按可用空间最大化
+#（空轨保留），auto-fit 折叠空轨后 fr 重分。全整数矩形纯色块，
+# Numeric+Pixel 双通道（Pixel 关照背景色带边界）。
+viewport = [400.0, 400.0]
+scale = 1.0
+fonts = []
+features = ["grid", "grid-template-columns", "repeat", "auto-fill", "auto-fit", "background-color"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

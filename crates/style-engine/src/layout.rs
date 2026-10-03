@@ -614,6 +614,14 @@ fn grid_component<S: taffy::style::CheapCloneStr>(
                 .map(|t| track_sizing(t, cs, env))
                 .collect::<Vec<_>>(),
         ),
+        // 阶段2①：auto-fill / auto-fit —— 计数由 taffy 布局期按可用空间定
+        //（RepetitionCount::AutoFill / AutoFit 原生支持；auto-fit 空轨折叠）。
+        crate::css::property::TrackSize::RepeatAuto(fit, list) => taffy::style_helpers::repeat(
+            if *fit { "auto-fit" } else { "auto-fill" },
+            list.iter()
+                .map(|t| track_sizing(t, cs, env))
+                .collect::<Vec<_>>(),
+        ),
         other => taffy::style::GridTemplateComponent::Single(track_sizing(other, cs, env)),
     }
 }
@@ -636,6 +644,8 @@ fn track_sizing(
             style_helpers::minmax(min_side(min, cs, env), max_side(max, cs, env))
         }
         crate::css::property::TrackSize::Repeat(_, _) => style_helpers::auto(),
+        // auto 重复嵌套于轨道内属解析容错场景（CSS 禁止），防御性归 auto。
+        crate::css::property::TrackSize::RepeatAuto(_, _) => style_helpers::auto(),
     }
 }
 

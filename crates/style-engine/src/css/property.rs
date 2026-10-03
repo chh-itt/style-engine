@@ -577,8 +577,11 @@ pub enum TrackSize {
     MaxContent,
     MinContent,
     MinMax(Box<TrackSize>, Box<TrackSize>),
-    /// 固定次数 repeat（auto-fill/auto-fit 属 T1，见 FEATURES.md）。
+    /// 固定次数 repeat。
     Repeat(u16, Vec<TrackSize>),
+    /// auto-fill / auto-fit 重复（阶段2①）：fit=true 为 auto-fit（空轨折叠）。
+    /// 计数由布局期按可用空间定（taffy RepetitionCount 原生支持）。
+    RepeatAuto(bool, Vec<TrackSize>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1489,26 +1492,52 @@ fn parse_track_size(p: &mut Parser<'_>) -> ValResult<TrackSize> {
             Ok(TrackSize::MinMax(Box::new(a), Box::new(b)))
         }
         Token::Function(name) if name.eq_ignore_ascii_case("repeat") => {
-            let (n, list) = p.parse_nested_block(|p| {
-                let n = parse_number(p)? as u16;
-                if n == 0 {
-                    return Err(p.new_error_for_next_token());
-                }
-                p.expect_comma()?;
-                let mut list = Vec::new();
-                loop {
-                    list.push(parse_track_size(p)?);
-                    if p.is_exhausted() {
-                        break;
+            let size = p.parse_nested_block(|p| {
+                // 首参数：auto-fill / auto-fit 关键字（阶段2①）或固定次数。
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(id) if id.eq_ignore_ascii_case("auto-fill") => {
+                        p.expect_comma()?;
+                        Ok(TrackSize::RepeatAuto(false, parse_repeat_track_list(p)?))
                     }
-                    p.expect_comma()?;
+                    Token::Ident(id) if id.eq_ignore_ascii_case("auto-fit") => {
+                        p.expect_comma()?;
+                        Ok(TrackSize::RepeatAuto(true, parse_repeat_track_list(p)?))
+                    }
+                    Token::Number { value, .. } => {
+                        let n = *value as u16;
+                        if n == 0 {
+                            return Err(p.new_error_for_next_token());
+                        }
+                        p.expect_comma()?;
+                        Ok(TrackSize::Repeat(n, parse_repeat_track_list(p)?))
+                    }
+                    _ => Err(p.new_error_for_next_token()),
                 }
-                Ok((n, list))
             })?;
-            Ok(TrackSize::Repeat(n, list))
+            Ok(size)
         }
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+/// repeat(…) 轨道列表：逗号分隔的 track-size 序列（固定与 auto 重复共用）。
+/// auto-repeat 不可嵌套于任何 repeat（CSS 规范，Chromium 同判非法）；
+/// 固定次数嵌套沿用既有解析容错（布局期防御性归 auto）。
+fn parse_repeat_track_list(p: &mut Parser<'_>) -> ValResult<Vec<TrackSize>> {
+    let mut list = Vec::new();
+    loop {
+        let item = parse_track_size(p)?;
+        if matches!(item, TrackSize::RepeatAuto(..)) {
+            return Err(p.new_error_for_next_token());
+        }
+        list.push(item);
+        if p.is_exhausted() {
+            break;
+        }
+        p.expect_comma()?;
+    }
+    Ok(list)
 }
 
 // ---------- background / box-shadow ----------
