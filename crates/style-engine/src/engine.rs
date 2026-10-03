@@ -53,9 +53,19 @@ pub(crate) type IntrinsicSize = ((f32, f32), (f32, f32));
 #[derive(Default)]
 struct MulticolState {
     phantoms: Vec<taffy::NodeId>,
+    /// 三期⑤b：spanner 分段行包装（Flex Row 装 n 幻影列）——
+    /// column-span:all 模式下每段一行；行模式为空。
+    rows: Vec<taffy::NodeId>,
+    /// 三期⑤b：spanner 分段模式（容器 Flex Column + 行包装）。
+    span_mode: bool,
+    /// 三期⑤b：容器孩子序签名（Seg(段序) | Spanner→usize::MAX）——
+    /// 行数不变而 spanner 换位时仅重排容器孩子。
+    seq_sig: Vec<usize>,
     n: usize,
     colw: f32,
-    assignment: Vec<usize>,
+    /// 每真实子件 (段序, 列序)；(usize::MAX, _) = 重建后待分配
+    /// （spanner 不参与平衡，恒 MAX）。
+    assignment: Vec<(usize, usize)>,
     /// 三期⑤a：断口 margin-top 截断的原值备份（taffy 层）——
     /// 不再列首 / 回退块流时恢复；restyle 时清空（map_style 全量重写
     /// 已把 margin 复位为样式真值）。
@@ -1691,7 +1701,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let mut changed = false;
                 if let Some(prev) = self.multicol_state.remove(&mc) {
                     // 三期⑤a：回退块流前恢复全部断口 margin-top 截断
-                    // （幻影拆除，子节点回到容器块流）。
+                    // （幻影拆除，子节点回到容器块流）；⑤b 拆净段行。
                     for (&id, &orig) in &prev.truncated {
                         if let Some(&tid) = self.taffy_node.get(&id) {
                             if let Ok(mut ts) = self.taffy.style(tid).cloned() {
@@ -1700,15 +1710,22 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             }
                         }
                     }
-                    let mut children: Vec<taffy::NodeId> = Vec::new();
-                    for p in &prev.phantoms {
-                        if let Ok(pc) = self.taffy.children(*p) {
-                            children.extend(pc);
-                        }
+                    for r in &prev.rows {
+                        let _ = self.taffy.set_children(*r, &[]);
                     }
-                    let _ = self.taffy.set_children(ctid, &children);
-                    for c in &children {
-                        self.taffy_parent.insert(*c, ctid);
+                    for p in &prev.phantoms {
+                        let _ = self.taffy.set_children(*p, &[]);
+                    }
+                    // 树序重挂全部真实子件（含 spanner——行序不含它）。
+                    let ids: Vec<taffy::NodeId> = self
+                        .tree
+                        .children(mc)
+                        .iter()
+                        .filter_map(|c| self.taffy_node.get(c).copied())
+                        .collect();
+                    let _ = self.taffy.set_children(ctid, &ids);
+                    for t in &ids {
+                        self.taffy_parent.insert(*t, ctid);
                     }
                     changed = true;
                 }
@@ -1735,44 +1752,206 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
             let colw = ((cw - gap * (n as f32 - 1.0)) / n as f32).max(0.0);
             let children: Vec<NodeId> = self.tree.children(mc).to_vec();
+            // 三期⑤b：column-span:all 子件切断列流——spanner 前后各成段，
+            // 每段独立二分平衡。spanner 模式容器 = Flex Column + 零 gap，
+            // 每非空段一行包装（Flex Row 装 n 幻影列），spanner 为容器直
+            // 系全宽块；段内列首、spanner 后新段首列的列首均按断口截断
+            // margin-top（spanner 强制断行 = 截断边）。
+            let is_spanner = |c: &NodeId| -> bool {
+                matches!(
+                    self.styles.get(c),
+                    Some(ccs) if matches!(
+                        ccs.get(crate::css::property::PropertyId::ColumnSpan),
+                        Some(crate::css::property::DeclValue::ColumnSpan(Some(true)))
+                    )
+                )
+            };
+            let mut plans: Vec<Vec<NodeId>> = vec![Vec::new()];
+            for &c in &children {
+                if is_spanner(&c) {
+                    plans.push(Vec::new());
+                } else {
+                    let i = plans.len() - 1;
+                    plans[i].push(c);
+                }
+            }
+            let seq_sig: Vec<usize> = {
+                let mut sig = Vec::new();
+                let mut seen = vec![false; plans.len()];
+                for &c in &children {
+                    if is_spanner(&c) {
+                        sig.push(usize::MAX);
+                    } else {
+                        let i = plans
+                            .iter()
+                            .position(|p| p.contains(&c))
+                            .unwrap_or(plans.len() - 1);
+                        if !seen[i] {
+                            sig.push(i);
+                            seen[i] = true;
+                        }
+                    }
+                }
+                sig
+            };
             let mut st = self.multicol_state.remove(&mc).unwrap_or_default();
-            // 幻影列结构：数量不符 → 重建节点并临时均分（单元高与分配无关，
-            // 仅供测量）；仅列宽变化 → 原节点回写宽度。
             let mut structure_changed = false;
-            if st.phantoms.len() != n {
-                let phantoms: Vec<taffy::NodeId> = (0..n)
-                    .map(|_| {
-                        self.taffy
+            let has_span = seq_sig.contains(&usize::MAX);
+            if st.span_mode != has_span {
+                // 模式切换：拆净旧行/幻影（真实子件随重挂归位）。
+                for r in &st.rows {
+                    let _ = self.taffy.set_children(*r, &[]);
+                }
+                for p in &st.phantoms {
+                    let _ = self.taffy.set_children(*p, &[]);
+                }
+                st.rows.clear();
+                st.phantoms.clear();
+                st.assignment = vec![(usize::MAX, usize::MAX); children.len()];
+                st.span_mode = has_span;
+                structure_changed = true;
+            }
+            if has_span {
+                // 容器样式每帧重断言——restyle 会以 map_style 重写回
+                // Row + gap（多列请求的默认映射）。
+                let mut ms = crate::layout::map_style(&cs, &self.media);
+                ms.display = taffy::prelude::Display::Flex;
+                ms.flex_direction = taffy::prelude::FlexDirection::Column;
+                ms.gap = taffy::prelude::Size {
+                    width: taffy::prelude::LengthPercentage::length(0.0),
+                    height: taffy::prelude::LengthPercentage::length(0.0),
+                };
+                let _ = self.taffy.set_style(ctid, ms);
+            } else if structure_changed {
+                // 切回行模式：容器还原 map_style 的 Flex Row + gap。
+                let _ = self
+                    .taffy
+                    .set_style(ctid, crate::layout::map_style(&cs, &self.media));
+            }
+            // 行与幻影：数量不符 → 重建节点并临时均分（单元高与分配无关，
+            // 仅供测量）；仅列宽变化 → 原节点回写宽度。
+            let need_rows = if has_span { plans.len() } else { 0 };
+            let need_phantoms = if has_span { plans.len() * n } else { n };
+            if st.rows.len() != need_rows || st.phantoms.len() != need_phantoms {
+                for r in &st.rows {
+                    let _ = self.taffy.set_children(*r, &[]);
+                }
+                for p in &st.phantoms {
+                    let _ = self.taffy.set_children(*p, &[]);
+                }
+                st.rows.clear();
+                st.phantoms.clear();
+                if has_span {
+                    for plan in &plans {
+                        let row = self
+                            .taffy
                             .new_leaf(taffy::prelude::Style {
-                                display: taffy::prelude::Display::Block,
+                                display: taffy::prelude::Display::Flex,
+                                flex_direction: taffy::prelude::FlexDirection::Row,
                                 size: taffy::prelude::Size {
-                                    width: taffy::prelude::Dimension::length(colw),
+                                    width: taffy::prelude::Dimension::percent(1.0),
                                     height: taffy::prelude::Dimension::auto(),
+                                },
+                                gap: taffy::prelude::Size {
+                                    width: taffy::prelude::LengthPercentage::length(gap),
+                                    height: taffy::prelude::LengthPercentage::length(0.0),
                                 },
                                 ..Default::default()
                             })
-                            .expect("multicol phantom column")
-                    })
-                    .collect();
-                let _ = self.taffy.set_children(ctid, &phantoms);
-                for (i, &p) in phantoms.iter().enumerate() {
-                    self.taffy_parent.insert(p, ctid);
-                    let lo = children.len() * i / n;
-                    let hi = children.len() * (i + 1) / n;
-                    let ids: Vec<taffy::NodeId> = children[lo..hi]
-                        .iter()
-                        .filter_map(|c| self.taffy_node.get(c).copied())
-                        .collect();
-                    let _ = self.taffy.set_children(p, &ids);
-                    for c in children[lo..hi]
-                        .iter()
-                        .filter_map(|c| self.taffy_node.get(c))
-                    {
-                        self.taffy_parent.insert(*c, p);
+                            .expect("multicol segment row");
+                        let phantoms: Vec<taffy::NodeId> = (0..n)
+                            .map(|_| {
+                                self.taffy
+                                    .new_leaf(taffy::prelude::Style {
+                                        display: taffy::prelude::Display::Block,
+                                        size: taffy::prelude::Size {
+                                            width: taffy::prelude::Dimension::length(colw),
+                                            height: taffy::prelude::Dimension::auto(),
+                                        },
+                                        ..Default::default()
+                                    })
+                                    .expect("multicol phantom column")
+                            })
+                            .collect();
+                        let _ = self.taffy.set_children(row, &phantoms);
+                        for &p in &phantoms {
+                            self.taffy_parent.insert(p, row);
+                        }
+                        // 临时均分（测量基座；分配随二分结果重挂）。
+                        for (j, &p) in phantoms.iter().enumerate() {
+                            let lo = plan.len() * j / n;
+                            let hi = plan.len() * (j + 1) / n;
+                            let ids: Vec<taffy::NodeId> = plan[lo..hi]
+                                .iter()
+                                .filter_map(|c| self.taffy_node.get(c).copied())
+                                .collect();
+                            let _ = self.taffy.set_children(p, &ids);
+                            for c in plan[lo..hi].iter().filter_map(|c| self.taffy_node.get(c)) {
+                                self.taffy_parent.insert(*c, p);
+                            }
+                        }
+                        st.rows.push(row);
+                        st.phantoms.extend(phantoms);
                     }
+                    // 容器子序 = 段行 + spanner（树序）。
+                    let seq_nodes: Vec<taffy::NodeId> = {
+                        let mut v = Vec::new();
+                        let mut seen = vec![false; plans.len()];
+                        for &c in &children {
+                            if is_spanner(&c) {
+                                if let Some(&t) = self.taffy_node.get(&c) {
+                                    v.push(t);
+                                }
+                            } else if let Some(i) = plans.iter().position(|p| p.contains(&c)) {
+                                if !seen[i] {
+                                    seen[i] = true;
+                                    v.push(st.rows[i]);
+                                }
+                            }
+                        }
+                        v
+                    };
+                    let _ = self.taffy.set_children(ctid, &seq_nodes);
+                    for t in &seq_nodes {
+                        self.taffy_parent.insert(*t, ctid);
+                    }
+                    st.seq_sig = seq_sig;
+                } else {
+                    let phantoms: Vec<taffy::NodeId> = (0..n)
+                        .map(|_| {
+                            self.taffy
+                                .new_leaf(taffy::prelude::Style {
+                                    display: taffy::prelude::Display::Block,
+                                    size: taffy::prelude::Size {
+                                        width: taffy::prelude::Dimension::length(colw),
+                                        height: taffy::prelude::Dimension::auto(),
+                                    },
+                                    ..Default::default()
+                                })
+                                .expect("multicol phantom column")
+                        })
+                        .collect();
+                    let _ = self.taffy.set_children(ctid, &phantoms);
+                    for (i, &p) in phantoms.iter().enumerate() {
+                        self.taffy_parent.insert(p, ctid);
+                        let lo = children.len() * i / n;
+                        let hi = children.len() * (i + 1) / n;
+                        let ids: Vec<taffy::NodeId> = children[lo..hi]
+                            .iter()
+                            .filter_map(|c| self.taffy_node.get(c).copied())
+                            .collect();
+                        let _ = self.taffy.set_children(p, &ids);
+                        for c in children[lo..hi]
+                            .iter()
+                            .filter_map(|c| self.taffy_node.get(c))
+                        {
+                            self.taffy_parent.insert(*c, p);
+                        }
+                    }
+                    st.phantoms = phantoms;
+                    st.seq_sig = vec![0];
                 }
-                st.phantoms = phantoms;
-                st.assignment = vec![usize::MAX; children.len()];
+                st.assignment = vec![(usize::MAX, usize::MAX); children.len()];
                 structure_changed = true;
             } else if st.colw != colw {
                 for &p in &st.phantoms {
@@ -1781,6 +1960,33 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         let _ = self.taffy.set_style(p, ps);
                     }
                 }
+                structure_changed = true;
+            } else if st.seq_sig != seq_sig {
+                // 行数不变而 spanner 换位：仅重排容器孩子（复用行）。
+                if has_span {
+                    let seq_nodes: Vec<taffy::NodeId> = {
+                        let mut v = Vec::new();
+                        let mut seen = vec![false; plans.len()];
+                        for &c in &children {
+                            if is_spanner(&c) {
+                                if let Some(&t) = self.taffy_node.get(&c) {
+                                    v.push(t);
+                                }
+                            } else if let Some(i) = plans.iter().position(|p| p.contains(&c)) {
+                                if !seen[i] {
+                                    seen[i] = true;
+                                    v.push(st.rows[i]);
+                                }
+                            }
+                        }
+                        v
+                    };
+                    let _ = self.taffy.set_children(ctid, &seq_nodes);
+                    for t in &seq_nodes {
+                        self.taffy_parent.insert(*t, ctid);
+                    }
+                }
+                st.seq_sig = seq_sig;
                 structure_changed = true;
             }
             if structure_changed {
@@ -1794,90 +2000,107 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     );
                 }
             }
-            // 平衡分配（三期⑤a 二分）：试高 h 的顺序装箱 fit——列首块
-            // margin-top 截断（断口语义，css-multicol §7）、非空列放不下
-            // 换列、末列溢出失败、空列承接不可断高块（balancer 下界）；
-            // fit 单调 → 浮点二分 48 次收窄最小可行列高，终值重装箱定分配。
-            let mut units: Vec<(f32, f32, f32)> = Vec::with_capacity(children.len());
-            for c in &children {
-                let h = self
-                    .taffy_node
-                    .get(c)
-                    .and_then(|t| self.taffy.layout(*t).ok())
-                    .map(|l| l.size.height)
-                    .unwrap_or(0.0);
-                let (mt, mb) = match self.styles.get(c) {
-                    Some(ccs) => {
-                        let rctx = crate::css::value::ResolveCtx {
-                            em: ccs.font_size_px(),
-                            rem: 16.0,
-                            viewport_w: self.media.viewport_w,
-                            viewport_h: self.media.viewport_h,
-                        };
-                        let m = ccs.margin();
-                        let res = |lp: Option<&crate::css::value::LengthPercentage>| {
-                            lp.and_then(|v| v.resolve(&rctx, 0.0)).unwrap_or(0.0)
-                        };
-                        (res(m[0]), res(m[3]))
-                    }
-                    None => (0.0, 0.0),
-                };
-                units.push((mt, h, mb));
-            }
-            let total: f32 = units.iter().map(|u| u.0 + u.1 + u.2).sum();
-            let fit = |h: f32| -> Option<Vec<usize>> {
-                let mut assign = Vec::with_capacity(children.len());
-                let (mut col, mut acc) = (0usize, 0.0f32);
-                for &(mt, uh, mb) in &units {
-                    let mut eff = mt + uh + mb;
-                    // 列非空（acc>0）且未到末列时才允许溢出换列；空列可
-                    // 承接不可断高子件（首件无条件入列）。
-                    if acc > 0.0 && acc + eff > h + f32::EPSILON {
-                        if col == n - 1 {
-                            return None;
+            // 平衡分配（三期⑤a 二分 + ⑤b 分段）：每段独立试高 h 的顺序装
+            // 箱 fit——列首块 margin-top 截断（断口语义，css-multicol §7）、
+            // 非空列放不下换列、末列溢出失败、空列承接不可断高块；fit 单调
+            // → 浮点二分 48 次收窄最小可行列高，终值重装箱定分配。
+            let idx_of: HashMap<NodeId, usize> =
+                children.iter().enumerate().map(|(i, c)| (*c, i)).collect();
+            let mut assignment: Vec<(usize, usize)> =
+                vec![(usize::MAX, usize::MAX); children.len()];
+            for (si, plan) in plans.iter().enumerate() {
+                if plan.is_empty() {
+                    continue;
+                }
+                let mut units: Vec<(f32, f32, f32)> = Vec::with_capacity(plan.len());
+                for c in plan {
+                    let h = self
+                        .taffy_node
+                        .get(c)
+                        .and_then(|t| self.taffy.layout(*t).ok())
+                        .map(|l| l.size.height)
+                        .unwrap_or(0.0);
+                    let (mt, mb) = match self.styles.get(c) {
+                        Some(ccs) => {
+                            let rctx = crate::css::value::ResolveCtx {
+                                em: ccs.font_size_px(),
+                                rem: 16.0,
+                                viewport_w: self.media.viewport_w,
+                                viewport_h: self.media.viewport_h,
+                            };
+                            let m = ccs.margin();
+                            let res = |lp: Option<&crate::css::value::LengthPercentage>| {
+                                lp.and_then(|v| v.resolve(&rctx, 0.0)).unwrap_or(0.0)
+                            };
+                            (res(m[0]), res(m[3]))
                         }
-                        col += 1;
-                        acc = 0.0;
-                        // 断口 margin-top 截断：换列后首件不带 mt 计量。
-                        eff = uh + mb;
-                    }
-                    assign.push(col);
-                    acc += eff;
+                        None => (0.0, 0.0),
+                    };
+                    units.push((mt, h, mb));
                 }
-                Some(assign)
-            };
-            let (mut lo, mut hi) = (0.0f32, total);
-            for _ in 0..48 {
-                let mid = (lo + hi) * 0.5;
-                if fit(mid).is_some() {
-                    hi = mid;
-                } else {
-                    lo = mid;
+                let total: f32 = units.iter().map(|u| u.0 + u.1 + u.2).sum();
+                let fit = |h: f32| -> Option<Vec<usize>> {
+                    let mut assign = Vec::with_capacity(plan.len());
+                    let (mut col, mut acc) = (0usize, 0.0f32);
+                    for &(mt, uh, mb) in &units {
+                        let mut eff = mt + uh + mb;
+                        // 列非空（acc>0）且未到末列时才允许溢出换列；空列可
+                        // 承接不可断高子件（首件无条件入列）。
+                        if acc > 0.0 && acc + eff > h + f32::EPSILON {
+                            if col == n - 1 {
+                                return None;
+                            }
+                            col += 1;
+                            acc = 0.0;
+                            // 断口 margin-top 截断：换列后首件不带 mt 计量。
+                            eff = uh + mb;
+                        }
+                        assign.push(col);
+                        acc += eff;
+                    }
+                    Some(assign)
+                };
+                let (mut lo, mut hi) = (0.0f32, total);
+                for _ in 0..48 {
+                    let mid = (lo + hi) * 0.5;
+                    if fit(mid).is_some() {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                let cols = fit(hi + 1.0e-3).or_else(|| fit(total)).unwrap_or_default();
+                for (c, col) in plan.iter().zip(cols) {
+                    if let Some(&i) = idx_of.get(c) {
+                        assignment[i] = (si, col);
+                    }
                 }
             }
-            let assignment = fit(hi + 1.0e-3)
-                .or_else(|| fit(total))
-                .unwrap_or_else(|| vec![usize::MAX; children.len()]);
-            // 断口 margin-top 截断（三期⑤a）：每列首件（列 0 除外）写
-            // margin-top=0（taffy 层），不再列首的恢复原值。计量恒用样式
-            // 原值（ccs.margin()），分配跨帧稳定幂等；文本重排 pass 会以
-            // 样式重写 margin → 每次调用无条件重算截断 diff。
+            // 断口 margin-top 截断（三期⑤a + ⑤b 段内列）：段内非首列的
+            // 列首件写 margin-top=0（taffy 层），不再是列首的恢复原值。
+            // 段首（含 spanner 后新段首列）不截——spanner 边界是强制断行，
+            // css-break-3 规定强断边距保留（Chromium 153 实证 y 保留 mt）。
+            // 计量恒用样式原值（ccs.margin()），分配跨帧稳定幂等；文本重
+            // 排 pass 会以样式重写 margin → 每次调用无条件重算截断 diff。
             let mut trunc_changed = false;
-            // 每列首件（列 0 除外）为截断对象；entry().or_insert() 保树序
-            // 第一件——HashMap::collect 是后写覆盖（曾拿到列尾件）。
-            let mut col_first: std::collections::HashMap<usize, NodeId> =
+            // 段内列首件（列 0 不算）；entry().or_insert() 保树序第一件——
+            // HashMap::collect 是后写覆盖（曾拿到列尾件）。
+            let mut col_first: std::collections::HashMap<(usize, usize), NodeId> =
                 std::collections::HashMap::new();
             for (c, a) in children.iter().zip(assignment.iter()) {
-                if *a != usize::MAX {
+                if *a != (usize::MAX, usize::MAX) && a.1 > 0 {
                     col_first.entry(*a).or_insert(*c);
                 }
             }
             for id in st.truncated.keys().copied().collect::<Vec<_>>() {
-                // 仅当该件仍是非 0 列的列首才保留截断；挪回列 0 或换位都恢复。
-                let keep = children
-                    .iter()
-                    .zip(assignment.iter())
-                    .any(|(c, a)| c == &id && *a > 0 && col_first.get(a).copied() == Some(id));
+                // 仅当该件仍是某段非首列的列首才保留截断；挪回列 0 或换
+                // 位都恢复。
+                let keep = children.iter().zip(assignment.iter()).any(|(c, a)| {
+                    c == &id
+                        && *a != (usize::MAX, usize::MAX)
+                        && a.1 > 0
+                        && col_first.get(a).copied() == Some(id)
+                });
                 if keep {
                     continue;
                 }
@@ -1891,8 +2114,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 trunc_changed = true;
             }
             for (c, a) in children.iter().zip(assignment.iter()) {
+                if *a == (usize::MAX, usize::MAX) || a.1 == 0 {
+                    continue;
+                }
                 let isfirst = col_first.get(a).copied() == Some(*c);
-                if *a == 0 || !isfirst {
+                if !isfirst {
                     continue;
                 }
                 let Some(&tid) = self.taffy_node.get(c) else {
@@ -1917,17 +2143,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
             if trunc_changed || st.assignment != assignment {
                 for (i, &p) in st.phantoms.iter().enumerate() {
+                    let si = if has_span { i / n } else { 0usize };
                     let ids: Vec<taffy::NodeId> = children
                         .iter()
                         .zip(assignment.iter())
-                        .filter(|(_, a)| **a == i)
+                        .filter(|(_, a)| **a == (si, i % n))
                         .filter_map(|(c, _)| self.taffy_node.get(c).copied())
                         .collect();
                     let _ = self.taffy.set_children(p, &ids);
                     for c in children
                         .iter()
                         .zip(assignment.iter())
-                        .filter(|(_, a)| **a == i)
+                        .filter(|(_, a)| **a == (si, i % n))
                         .filter_map(|(c, _)| self.taffy_node.get(c))
                     {
                         self.taffy_parent.insert(*c, p);
@@ -2185,16 +2412,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 self.collect(*c, 0.0, 0.0, out, layout_by_node);
                 continue;
             }
-            // ③multi-column：子节点 taffy 父可能为幻影列（无样式节点）——
-            // 补加幻影相对容器的偏移（单层幻影，v1 契约）。
+            // ③multi-column / ⑤b：子节点 taffy 父可能是合成层（幻影列 →
+            // 段行 → 容器）——沿 taffy_parent 链上溯到样式节点本身，累加
+            // 全部合成层偏移（列相对行、行相对容器的 location 之和）。
             let (mut cx, mut cy) = (x, y);
             if let Some(&tid_c) = self.taffy_node.get(c) {
-                if let Some(&effp) = self.taffy_parent.get(&tid_c) {
-                    if self.taffy_node.get(&id) != Some(&effp) {
+                if let Some(mut effp) = self.taffy_parent.get(&tid_c).copied() {
+                    let mut depth = 0usize;
+                    while self.taffy_node.get(&id) != Some(&effp) && depth < 16 {
                         if let Ok(pl) = self.taffy.layout(effp) {
                             cx += pl.location.x;
                             cy += pl.location.y;
                         }
+                        match self.taffy_parent.get(&effp) {
+                            Some(&pp) => effp = pp,
+                            None => break,
+                        }
+                        depth += 1;
                     }
                 }
             }
@@ -3142,6 +3376,112 @@ mod tests {
         assert_eq!(b(Key(3)).y, 0.0, "列首 margin-top 截断（不截则 y=20）");
         assert_eq!(b(Key(4)).y, 30.0);
         assert_eq!(b(Key(1)).height, 110.0);
+    }
+
+    #[test]
+    fn multicol_span_all_splits_flow() {
+        // 三期⑤b：column-span:all 切断列流——a/b 平衡进 spanner 前段行
+        // （双列并排），spanner 全宽横贯，c/d 收进后段行。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mc { column-count: 2; column-gap: 0px; width: 400px } \
+             blk { height: 100px } sp { column-span: all; height: 50px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("blk")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("blk")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("sp")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(5), mk("blk")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(6), mk("blk")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        // 前段行：a(0,0,200,100) b(200,0,200,100)；spanner 全宽 y=100；
+        // 后段行：c(0,150,200,100) d(200,150,200,100)；容器高 250。
+        assert_eq!(b(Key(2)).x, 0.0);
+        assert_eq!(b(Key(3)).x, 200.0);
+        assert_eq!(b(Key(3)).y, 0.0);
+        assert_eq!(b(Key(4)).x, 0.0, "spanner 全宽横贯");
+        assert_eq!(b(Key(4)).y, 100.0, "spanner 前段行（高 100）之下");
+        assert_eq!(b(Key(4)).width, 400.0);
+        assert_eq!(b(Key(4)).height, 50.0);
+        assert_eq!(b(Key(5)).x, 0.0);
+        assert_eq!(b(Key(5)).y, 150.0, "spanner 之下新段行");
+        assert_eq!(b(Key(6)).x, 200.0);
+        assert_eq!(b(Key(6)).y, 150.0);
+        assert_eq!(b(Key(1)).height, 250.0);
+    }
+
+    #[test]
+    fn multicol_span_all_two_segments_balance() {
+        // 三期⑤b：spanner 分段各段独立二分平衡——a(80) | sp(10) |
+        // b(80) c(80) d(10)：前段行高 80；后段 3 件双列二分
+        // [80,80|80,10] 行高 90（贪心 170）；容器高 80+10+90=180。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mc { column-count: 2; column-gap: 0px; width: 400px } \
+             b80 { height: 80px } b10 { height: 10px } \
+             sp { column-span: all; height: 10px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("b80")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("sp")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("b80")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(5), mk("b80")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(6), mk("b10")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        // 前段行高 80；spanner y=80 h=10；后段行二分 [80,80|80,10] 高 90
+        //（c y=90 col1，d y=90 col2，e y=170 col2）；容器高 180。
+        assert_eq!(b(Key(2)).y, 0.0);
+        assert_eq!(b(Key(2)).x, 0.0, "单件段占列 1");
+        assert_eq!(b(Key(3)).y, 80.0);
+        assert_eq!(b(Key(3)).height, 10.0);
+        assert_eq!(b(Key(4)).x, 0.0);
+        assert_eq!(b(Key(4)).y, 90.0, "后段行列 1 首件");
+        assert_eq!(b(Key(5)).x, 200.0);
+        assert_eq!(b(Key(5)).y, 90.0, "后段行列 2 首件");
+        assert_eq!(b(Key(6)).x, 200.0);
+        assert_eq!(b(Key(6)).y, 170.0, "后段行列 2 尾件");
+        assert_eq!(b(Key(1)).height, 180.0, "段内二分行高 90（贪心 170）");
+    }
+
+    #[test]
+    fn multicol_span_segment_start_margin_kept() {
+        // 三期⑤b：spanner 边界 = 强制断行——后段首件 margin-top 保留
+        // （css-break-3 强断边距保留；Chromium 153 实证 b2 y=360 含 mt20）。
+        // 段内列首仍截断（⑤a 语义），spanner 后新列除外。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mc { column-count: 2; column-gap: 0px; width: 400px } \
+             b1 { height: 80px } sp { column-span: all; height: 50px } \
+             b2 { height: 80px; margin-top: 20px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("b1")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("sp")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("b2")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        assert_eq!(b(Key(2)).y, 0.0);
+        assert_eq!(b(Key(3)).y, 80.0);
+        assert_eq!(b(Key(4)).x, 0.0);
+        assert_eq!(b(Key(4)).y, 150.0, "段首 margin-top 保留（截断则 130）");
+        assert_eq!(b(Key(1)).height, 230.0);
     }
 
     #[test]

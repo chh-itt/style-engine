@@ -75,6 +75,9 @@ pub enum PropertyId {
     /// 三期⑤a：css-break 断行控制（avoid|auto）——v1 所有块不可断，
     /// avoid 即默认语义；解析存储供 conformance 对齐与将来的分裂支持。
     BreakInside,
+    /// 三期⑤b：多列跨列（none|all）——all 子件切断列流，前后各成段
+    /// 独立平衡（行包装模型）。
+    ColumnSpan,
     // 绘制
     BackgroundColor,
     BackgroundImage,
@@ -171,6 +174,7 @@ impl PropertyId {
         Self::ColumnCount,
         Self::ColumnWidth,
         Self::BreakInside,
+        Self::ColumnSpan,
         Self::BackgroundColor,
         Self::BackgroundImage,
         Self::BorderTopLeftRadius,
@@ -250,6 +254,7 @@ impl PropertyId {
             Self::ColumnCount => "column-count",
             Self::ColumnWidth => "column-width",
             Self::BreakInside => "break-inside",
+            Self::ColumnSpan => "column-span",
             Self::FlexDirection => "flex-direction",
             Self::FlexWrap => "flex-wrap",
             Self::FlexGrow => "flex-grow",
@@ -365,6 +370,10 @@ pub enum DeclValue {
     /// auto 的可跨列分裂语义未做（FEATURES.md B 级边界）。仅解析存储，
     /// 布局不读——用于 conformance case 与 Chromium 断行模型对齐。
     BreakInside(Option<bool>),
+    /// column-span（三期⑤b）：all → Some(true)、none → Some(false)；
+    /// 初始 none。all 子件切断列流，前后各成段独立平衡（引擎行包装
+    /// 模型，FEATURES.md ⑤b 边界）。
+    ColumnSpan(Option<bool>),
     // 动画描述符（第五批⑰）：不可动画、不参与 DeclValue 插值
     /// animation-name：none → None。
     AnimationName(Option<String>),
@@ -694,6 +703,18 @@ pub fn parse_break_inside(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         }
         Token::Ident(id) if id.eq_ignore_ascii_case("auto") => {
             Ok(DeclValue::BreakInside(Some(false)))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// column-span（三期⑤b）：all → Some(true)、none → Some(false)；
+/// 其余（auto 等）非法。
+pub fn parse_column_span(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    match p.next()? {
+        Token::Ident(id) if id.eq_ignore_ascii_case("all") => Ok(DeclValue::ColumnSpan(Some(true))),
+        Token::Ident(id) if id.eq_ignore_ascii_case("none") => {
+            Ok(DeclValue::ColumnSpan(Some(false)))
         }
         _ => Err(p.new_error_for_next_token()),
     }
@@ -1746,6 +1767,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::ZIndex => parse_z_index(p),
         P::ColumnCount => parse_column_count(p),
         P::BreakInside => parse_break_inside(p),
+        P::ColumnSpan => parse_column_span(p),
         P::AnimationName => parse_animation_name(p),
         P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
         P::AnimationIterationCount => parse_iteration_count(p),

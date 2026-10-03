@@ -1,0 +1,17 @@
+/* 三期⑤b：column-span:all 分段行包装。break-inside: avoid 与 ⑤a 同因
+ * （无 avoid 时 Chromium 会把空块跨列拆碎）。mc1（keys 2–7）：spanner
+ * 前后各两块 [80,80] | sp(50) | [80,80]，双列每段一行并排——期望几何
+ * wrap(0,0,400,440) mc1(0,0,400,210) a(0,0,200,80) b(200,0,200,80)
+ * sp(0,80,400,50) c(0,130,200,80) d(200,130,200,80)。mc2（keys 8–11）：
+ * spanner 后首件 margin-top 保留（css-break-3 强制断行边距保留，
+ * Chromium 153 实证 b2 y=360 含 mt20）——wrap(0,0,400,440)
+ * mc2(0,210,400,230) a2(0,210,200,80) sp2(0,290,400,50) b2(0,360,200,80)。 */
+body { margin: 0; }
+.wrap { width: 400px; background-color: #f0f0f0; }
+.mc { column-count: 2; column-gap: 0px; background-color: #dddddd; }
+.a { height: 80px; background-color: #3366cc; break-inside: avoid; }
+.b { height: 80px; background-color: #33aa55; break-inside: avoid; }
+.sp { column-span: all; height: 50px; background-color: #cc3322; break-inside: avoid; }
+.c { height: 80px; background-color: #cc8822; break-inside: avoid; }
+.d { height: 80px; background-color: #aa3366; break-inside: avoid; }
+.b2 { height: 80px; margin-top: 20px; background-color: #2288aa; break-inside: avoid; }

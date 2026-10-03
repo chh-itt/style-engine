@@ -1,0 +1,11 @@
+# 三期⑤b：column-span:all 分段行包装（spanner 前后各成段、每段独立
+# 平衡行）。全整数矩形纯色块，Numeric+Pixel 双通道。
+viewport = [400.0, 400.0]
+scale = 1.0
+fonts = []
+features = ["multicol", "column-count", "column-gap", "column-span", "background-color", "break-inside"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]
