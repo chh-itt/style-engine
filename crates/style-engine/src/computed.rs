@@ -561,7 +561,9 @@ pub fn compute_node<'a>(
     }
     style.custom = final_custom;
 
-    // 2) 胜出声明：Parsed 直取；Var 代换重解析（失败 IACVT）
+    // 2) 胜出声明：Parsed 直取；Var 代换重解析（失败 IACVT）；
+    //    PendingShorthand（阶段2②）代换后 expand_shorthand 展开，
+    //    本长手取展开结果，代换失败/文法失败 → IACVT
     for (pid, cand) in &cascaded.winners {
         let value = match cand.value {
             DeclSource::Parsed(v) => Some(v.clone()),
@@ -580,6 +582,29 @@ pub fn compute_node<'a>(
                     }
                     None => None,
                 }
+            }
+            DeclSource::PendingShorthand { shorthand, tokens } => {
+                let raw = token_buf_to_string(tokens);
+                let mut subst = CustomResolver {
+                    inherited: &style.custom,
+                    own_raw: BTreeMap::new(),
+                    memo: BTreeMap::new(),
+                };
+                let mut stack = Vec::new();
+                subst
+                    .substitute(&raw, &mut stack)
+                    .and_then(|text| {
+                        let mut input = cssparser::Parser::new(&text);
+                        crate::css::decl::expand_shorthand(shorthand, &mut input)
+                            .ok()
+                            .and_then(|o| o)
+                    })
+                    .and_then(|longhands| {
+                        longhands
+                            .into_iter()
+                            .find(|(p, _)| p == pid)
+                            .map(|(_, v)| v)
+                    })
             }
         };
         match value {
@@ -740,6 +765,81 @@ mod tests {
             c_style.get(PropertyId::Width),
             Some(DeclValue::LenAuto(None))
         ));
+    }
+
+    #[test]
+    fn var_shorthand_expands_at_computed_time() {
+        // 阶段2②：var() 简写计算值期代换+expand_shorthand 展开——TRBL 槽位
+        // 分配在代换后完成；同块长手与简写逐槽竞争（margin-top 5px 胜简写
+        // 对应槽，其余槽来自展开）。
+        let s = sheet(
+            "div { --m: 10px; margin: var(--m) 20px; margin-top: 5px; \
+             padding: var(--p, 8px) 0 }",
+        );
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let n = tree.insert_child(root, node("div", &[], ""));
+        let style = compute_node(&tree, n, &s, &MediaEnv::default(), None);
+        let px = |v: Option<&DeclValue>, what: &str| match v {
+            Some(DeclValue::LenAuto(Some(LengthPercentage::Px(x)))) => *x,
+            Some(DeclValue::Len(LengthPercentage::Px(x))) => *x,
+            other => panic!("{what} = {other:?}"),
+        };
+        assert_eq!(
+            px(style.get(PropertyId::MarginTop), "margin-top"),
+            5.0,
+            "同块长手胜简写槽"
+        );
+        assert_eq!(px(style.get(PropertyId::MarginRight), "margin-right"), 20.0);
+        assert_eq!(
+            px(style.get(PropertyId::MarginBottom), "margin-bottom"),
+            10.0,
+            "两值 TRBL：上下取第一分量"
+        );
+        assert_eq!(
+            px(style.get(PropertyId::MarginLeft), "margin-left"),
+            20.0,
+            "两值 TRBL：左右取第二分量"
+        );
+        assert_eq!(
+            px(style.get(PropertyId::PaddingTop), "padding-top"),
+            8.0,
+            "fallback 代换"
+        );
+        assert_eq!(
+            px(style.get(PropertyId::PaddingRight), "padding-right"),
+            0.0
+        );
+        assert_eq!(
+            px(style.get(PropertyId::PaddingBottom), "padding-bottom"),
+            8.0
+        );
+        assert_eq!(px(style.get(PropertyId::PaddingLeft), "padding-left"), 0.0);
+    }
+
+    #[test]
+    fn var_shorthand_invalid_substitution_iacvt() {
+        // 代换失败（--undef 无 fallback）→ 简写全部手 IACVT：
+        // margin 非继承 → 初始 0px（LenAuto(Some(Px(0)))）。
+        let s = sheet("div { margin: var(--undef) 20px }");
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let n = tree.insert_child(root, node("div", &[], ""));
+        let style = compute_node(&tree, n, &s, &MediaEnv::default(), None);
+        for pid in [
+            PropertyId::MarginTop,
+            PropertyId::MarginRight,
+            PropertyId::MarginBottom,
+            PropertyId::MarginLeft,
+        ] {
+            assert!(
+                matches!(
+                    style.get(pid),
+                    Some(DeclValue::LenAuto(Some(LengthPercentage::Px(v)))) if *v == 0.0
+                ),
+                "{pid:?} 应 IACVT 归初始 0"
+            );
+        }
     }
 
     #[test]

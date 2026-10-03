@@ -3990,6 +3990,31 @@ mod tests {
     }
 
     #[test]
+    fn var_shorthand_padding_reaches_layout() {
+        // 阶段2②：var() 简写端到端——解析期挂起、计算值期代换+展开，
+        // padding 驱动子件偏移。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.box { --p: 30px; padding: var(--p); width: 200px; height: 100px; } \
+                     div.kid { width: 50px; height: 50px; }"
+                )
+                .is_clean()
+        );
+        let mk = |cls: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(cls.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("box")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("kid")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let kid = frame.find(Key(2)).unwrap();
+        assert_eq!((kid.x, kid.y), (30.0, 30.0));
+    }
+
+    #[test]
     fn grid_autofill_repeats_tracks_to_fit() {
         // 阶段2①：auto-fill 重复计数 = 可用空间容纳的最大次数（空轨保留）。
         // 400 宽 + repeat(auto-fill, 100px) → 4 轨；5 个 80×80 自动回绕第二行。

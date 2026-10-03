@@ -5,7 +5,8 @@
 //! - 含 `var()` 的声明存原始 token 流，替换后重解析；替换失败（引用
 //!   不存在/成环）→ IACVT：该属性按 unset 处理（继承属性继承，否则
 //!   initial），而非丢弃整条声明；
-//! - 简写含 `var()` 时 MVP 不展开（待替换器支持后放开，偏差记录）。
+//! - 简写含 `var()` 时（阶段2②）按长手全集落挂起声明，计算值期代换
+//!   后展开，逐槽级联竞争。
 
 use crate::css::property::{
     BorderStyle, DeclValue, PropertyId, parse_border_style, parse_border_width, parse_color,
@@ -57,6 +58,11 @@ pub enum DeclSource {
     Parsed(DeclValue),
     /// 含 var()：存原始 token，替换后重解析。
     Var(TokenBuf),
+    /// 含 var() 的简写（阶段2②）：解析期无法槽位分配（如 TRBL 分量数
+    /// 未知），按简写长手全集落 N 条挂起声明；计算值期代换后走
+    /// expand_shorthand 展开，代换失败/文法失败 → 各长手 IACVT。
+    /// 级联按长手逐槽竞争（同块后写长手/高优先级长手覆盖对应槽）。
+    PendingShorthand { shorthand: String, tokens: TokenBuf },
 }
 
 /// 一条样式规则（或内联 style）的声明块；同块内后写覆盖先写。
@@ -84,7 +90,7 @@ fn contains_var(buf: &[OwnedToken]) -> bool {
 }
 
 /// 捕获 delimited 输入的全部 token（递归进函数/块；遇顶层 `!` 停止，
-/// 从而排除尾随的 `!important`）。
+/// 从而排除尾随的 `!important`）。注意 break 时 `!` 已被消费。
 pub(crate) fn capture_tokens(p: &mut Parser<'_>, buf: &mut TokenBuf) {
     while let Ok(t) = p.next_including_whitespace() {
         if matches!(t, Token::Comment(_)) {
@@ -114,6 +120,19 @@ pub(crate) fn capture_tokens(p: &mut Parser<'_>, buf: &mut TokenBuf) {
             });
         }
     }
+}
+
+/// capture 之后处理声明尾部。capture_tokens 在顶层 `!` 处 break 且 `!`
+/// 已被消费，故 post_state 落在 `!` 之后——尾部只可能剩 ident
+/// `important`（可带空白）；其余尾 token → Err。返回 important 标记。
+/// （不能用 parse_important：它要求 `!` 仍在输入里。）
+fn finish_after_capture(input: &mut Parser<'_>, post_state: &ParserState) -> Result<bool, ()> {
+    input.reset(post_state);
+    let important = input
+        .try_parse(|p| p.expect_ident_matching("important"))
+        .is_ok();
+    input.expect_exhausted().map_err(|_| ())?;
+    Ok(important)
 }
 
 /// 声明块解析器（配合 cssparser RuleBodyParser 驱动）。
@@ -159,10 +178,9 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationBlockParser {
                 buf.pop();
             }
             self.block.custom.insert(name.to_string(), buf);
-            // 尾部只允许可选 !important（MVP：标记忽略，偏差记录）
-            input.reset(&post_state);
-            let _ = input.try_parse(parse_important);
-            if input.expect_exhausted().is_err() {
+            // 尾部只允许可选 !important（MVP：标记忽略，偏差记录）；
+            // capture 已消费 '!'，这里只需识别 ident important。
+            if finish_after_capture(input, &post_state).is_err() {
                 warn(
                     self,
                     format!("trailing tokens after custom property '{name}'"),
@@ -176,23 +194,42 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationBlockParser {
 
         if contains_var(&buf) {
             if shorthand {
-                // 偏差：var() 简写暂不展开（T2 替换器就绪后放开）
-                warn(
-                    self,
-                    format!("var() in shorthand '{name}' not supported (deviation)"),
-                );
-                return Err(cssparser::ParseError::unexpected_token());
+                // 阶段2②：var() 简写不再拒绝——按简写长手全集落 N 条挂起
+                // 声明，代换与展开推迟到计算值期（computed.rs）。
+                let Some(longhands) = shorthand_longhands(&name) else {
+                    warn(self, format!("unknown declaration '{name}'"));
+                    return Err(cssparser::ParseError::unexpected_token());
+                };
+                let important = match finish_after_capture(input, &post_state) {
+                    Ok(important) => important,
+                    Err(()) => {
+                        warn(self, format!("trailing tokens after '{name}'"));
+                        return Err(cssparser::ParseError::unexpected_token());
+                    }
+                };
+                for pid in longhands {
+                    self.block.decls.push(Declaration {
+                        id: pid,
+                        important,
+                        value: DeclSource::PendingShorthand {
+                            shorthand: name.to_ascii_lowercase(),
+                            tokens: buf.clone(),
+                        },
+                    });
+                }
+                return Ok(());
             }
             let Some(id) = PropertyId::from_css_name(&name) else {
                 warn(self, format!("unknown declaration '{name}'"));
                 return Err(cssparser::ParseError::unexpected_token());
             };
-            input.reset(&post_state);
-            let important = input.try_parse(parse_important).is_ok();
-            if input.expect_exhausted().is_err() {
-                warn(self, format!("trailing tokens after '{name}'"));
-                return Err(cssparser::ParseError::unexpected_token());
-            }
+            let important = match finish_after_capture(input, &post_state) {
+                Ok(important) => important,
+                Err(()) => {
+                    warn(self, format!("trailing tokens after '{name}'"));
+                    return Err(cssparser::ParseError::unexpected_token());
+                }
+            };
             self.block.decls.push(Declaration {
                 id,
                 important,
@@ -200,23 +237,36 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationBlockParser {
             });
             Ok(())
         } else if shorthand {
-            match expand_shorthand(&name, input) {
-                Ok(Some(longhands)) => match finish_tail(input) {
-                    Ok(important) => {
-                        for (id, value) in longhands {
-                            self.block.decls.push(Declaration {
-                                id,
-                                important,
-                                value: DeclSource::Parsed(value),
-                            });
-                        }
-                        Ok(())
+            // important 先于展开判定：capture 已消费顶层 '!'，无法从
+            // input 原位识别（parse_important 要求 '!' 在输入里）。
+            let important = match finish_after_capture(input, &post_state) {
+                Ok(important) => important,
+                Err(()) => {
+                    warn(self, format!("trailing tokens after '{name}'"));
+                    return Err(cssparser::ParseError::unexpected_token());
+                }
+            };
+            // 无 important：从 input 原位展开（既有路径）；有 important：
+            // 值文本已捕获在 buf（不含 !important），重建子 parser 展开。
+            let expanded = if important {
+                let text = token_buf_to_string(&buf);
+                let mut sub = Parser::new(&text);
+                expand_shorthand(&name, &mut sub)
+            } else {
+                input.reset(&start_state);
+                expand_shorthand(&name, input)
+            };
+            match expanded {
+                Ok(Some(longhands)) => {
+                    for (id, value) in longhands {
+                        self.block.decls.push(Declaration {
+                            id,
+                            important,
+                            value: DeclSource::Parsed(value),
+                        });
                     }
-                    Err(_) => {
-                        warn(self, format!("trailing tokens after '{name}'"));
-                        Err(cssparser::ParseError::unexpected_token())
-                    }
-                },
+                    Ok(())
+                }
                 Ok(None) => {
                     warn(self, format!("unknown declaration '{name}'"));
                     Err(cssparser::ParseError::unexpected_token())
@@ -332,6 +382,78 @@ fn shorthand_exists(name: &str) -> bool {
     )
 }
 
+/// 简写 → 长手 PropertyId 全集（var() 简写挂起声明的落点）。锁测试
+/// shorthand_longhands_match_expand 用代表值展开防两表漂移；animation/
+/// flex-flow 展开可输出子集（未指定长手不重置=既有偏差），挂起路径下
+/// 子集成员取不到值 → IACVT 归初始，行为同既有子集语义。
+fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
+    use PropertyId as P;
+    Some(match name.to_ascii_lowercase().as_str() {
+        "margin" => vec![P::MarginTop, P::MarginRight, P::MarginBottom, P::MarginLeft],
+        "padding" => vec![
+            P::PaddingTop,
+            P::PaddingRight,
+            P::PaddingBottom,
+            P::PaddingLeft,
+        ],
+        "inset" => vec![P::Top, P::Right, P::Bottom, P::Left],
+        "overflow" => vec![P::OverflowX, P::OverflowY],
+        "gap" => vec![P::RowGap, P::ColumnGap],
+        "columns" => vec![P::ColumnWidth, P::ColumnCount],
+        "column-rule" => vec![P::ColumnRuleWidth, P::ColumnRuleStyle, P::ColumnRuleColor],
+        "animation" => vec![
+            P::AnimationName,
+            P::AnimationDuration,
+            P::AnimationTimingFunction,
+            P::AnimationDelay,
+            P::AnimationIterationCount,
+            P::AnimationDirection,
+            P::AnimationFillMode,
+        ],
+        "border-radius" => vec![
+            P::BorderTopLeftRadius,
+            P::BorderTopRightRadius,
+            P::BorderBottomRightRadius,
+            P::BorderBottomLeftRadius,
+        ],
+        "border-width" => vec![
+            P::BorderTopWidth,
+            P::BorderRightWidth,
+            P::BorderBottomWidth,
+            P::BorderLeftWidth,
+        ],
+        "border-style" => vec![
+            P::BorderTopStyle,
+            P::BorderRightStyle,
+            P::BorderBottomStyle,
+            P::BorderLeftStyle,
+        ],
+        "border-color" => vec![
+            P::BorderTopColor,
+            P::BorderRightColor,
+            P::BorderBottomColor,
+            P::BorderLeftColor,
+        ],
+        "border" => vec![
+            P::BorderTopWidth,
+            P::BorderTopStyle,
+            P::BorderTopColor,
+            P::BorderRightWidth,
+            P::BorderRightStyle,
+            P::BorderRightColor,
+            P::BorderBottomWidth,
+            P::BorderBottomStyle,
+            P::BorderBottomColor,
+            P::BorderLeftWidth,
+            P::BorderLeftStyle,
+            P::BorderLeftColor,
+        ],
+        "flex" => vec![P::FlexGrow, P::FlexShrink, P::FlexBasis],
+        "flex-flow" => vec![P::FlexDirection, P::FlexWrap],
+        _ => return None,
+    })
+}
+
 fn as_len_auto(v: DeclValue) -> Option<Option<LengthPercentage>> {
     match v {
         DeclValue::LenAuto(x) => Some(x),
@@ -396,7 +518,8 @@ fn sides_decls(ids: [PropertyId; 4], vals: [DeclValue; 4]) -> Vec<(PropertyId, D
 }
 
 /// 简写展开。名字非简写 → Ok(None)；文法错误 → Err（上层容错丢弃）。
-fn expand_shorthand(
+/// pub(crate)：computed.rs 在 var() 简写代换后复用（阶段2②）。
+pub(crate) fn expand_shorthand(
     name: &str,
     p: &mut Parser<'_>,
 ) -> Result<Option<Vec<(PropertyId, DeclValue)>>, cssparser::ParseError<cssparser::BasicParseError>>
@@ -879,7 +1002,9 @@ mod tests {
     fn parsed(d: &Declaration) -> &DeclValue {
         match &d.value {
             DeclSource::Parsed(v) => v,
-            DeclSource::Var(_) => panic!("expected parsed"),
+            DeclSource::Var(_) | DeclSource::PendingShorthand { .. } => {
+                panic!("expected parsed")
+            }
         }
     }
 
@@ -1143,6 +1268,94 @@ mod tests {
         ));
         let (b, _) = block("column-rule-width: none");
         assert!(b.decls.is_empty(), "none 非法列规宽（整条丢弃）");
+    }
+
+    #[test]
+    fn var_shorthand_expands_to_pending_longhands() {
+        // 阶段2②：含 var() 的简写不再丢弃——按长手全集落挂起声明
+        // PendingShorthand（每长手一条、同 tokens），important 沿简写整体。
+        let (b, r) = block("margin: var(--m) 20px !important");
+        assert!(r.is_clean(), "report: {r:?}");
+        assert_eq!(
+            b.decls.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![
+                PropertyId::MarginTop,
+                PropertyId::MarginRight,
+                PropertyId::MarginBottom,
+                PropertyId::MarginLeft,
+            ]
+        );
+        assert!(b.decls.iter().all(|d| d.important), "important 沿简写传播");
+        assert!(b.decls.iter().all(|d| matches!(
+            &d.value,
+            DeclSource::PendingShorthand { shorthand, .. } if shorthand == "margin"
+        )));
+        // tokens 保留原文（计算值期代换后重新展开）。
+        match &b.decls[0].value {
+            DeclSource::PendingShorthand { tokens, .. } => {
+                assert!(!tokens.is_empty(), "tokens 不应为空");
+                let dbg = format!("{tokens:?}");
+                assert!(
+                    dbg.to_lowercase().contains("var"),
+                    "tokens 应保留 var() 原文，得 {dbg:?}"
+                );
+            }
+            other => panic!("expected PendingShorthand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn important_tail_variants_parse() {
+        // 尾部处理回归锁：capture_tokens 消费顶层 '!' 后 post_state 只剩
+        // ident important——custom / var 长手 / 纯简写三条路径都必须识别
+        // important 而不是把整条声明当 trailing tokens 丢弃。
+        let (b, r) = block("--m: 1px !important");
+        assert!(r.is_clean(), "report: {r:?}");
+        assert!(
+            b.custom.contains_key("--m"),
+            "custom 属性不得因 !important 丢弃"
+        );
+        let (b, r) = block("width: var(--a) !important");
+        assert!(r.is_clean(), "report: {r:?}");
+        assert!(matches!(&b.decls[0].value, DeclSource::Var(_)));
+        assert!(b.decls[0].important);
+        let (b, r) = block("margin: 1px 2px !important");
+        assert!(r.is_clean(), "report: {r:?}");
+        assert_eq!(b.decls.len(), 4);
+        assert!(b.decls.iter().all(|d| d.important));
+    }
+
+    #[test]
+    fn shorthand_longhands_match_expand() {
+        // 防漂移：shorthand_longhands 全集与 expand_shorthand 各臂展开集
+        // 必须一致——每个简写名用代表值展开，展开长手 ⊆ 全集。
+        let cases: &[(&str, &str)] = &[
+            ("margin", "1px"),
+            ("padding", "1px"),
+            ("inset", "1px"),
+            ("overflow", "hidden"),
+            ("gap", "10px"),
+            ("columns", "2"),
+            ("column-rule", "1px solid red"),
+            ("animation", "1s foo"),
+            ("border-radius", "1px"),
+            ("border-width", "1px"),
+            ("border-style", "solid"),
+            ("border-color", "red"),
+            ("border", "1px solid red"),
+            ("flex", "1 2 30px"),
+            ("flex-flow", "row wrap"),
+        ];
+        for (name, val) in cases {
+            let mut p = cssparser::Parser::new(val);
+            let expanded = expand_shorthand(name, &mut p)
+                .expect("代表值解析失败")
+                .unwrap_or_else(|| panic!("{name} 未被识别为简写"));
+            let all = shorthand_longhands(name).unwrap_or_else(|| panic!("{name} 不在长手全集表"));
+            for (pid, _) in &expanded {
+                assert!(all.contains(pid), "{name}: 展开 {pid:?} 不在长手全集");
+            }
+        }
     }
 
     #[test]
