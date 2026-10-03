@@ -1,0 +1,11 @@
+# 三期⑤a：multicol 二分平衡（最小可行列高顺序装箱）+ 断口 margin-top
+# 截断（列首件 margin-top 不生效）。全整数矩形纯色块，Numeric+Pixel 双通道。
+viewport = [400.0, 400.0]
+scale = 1.0
+fonts = []
+features = ["multicol", "column-count", "column-gap", "background-color", "break-inside"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

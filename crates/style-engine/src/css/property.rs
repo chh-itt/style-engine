@@ -72,6 +72,9 @@ pub enum PropertyId {
     /// 二期③multi-column：列理想宽（auto|<length>）——width 模式列数
     /// n = max(1, ⌊(内容宽+gap)/(理想宽+gap)⌋)。
     ColumnWidth,
+    /// 三期⑤a：css-break 断行控制（avoid|auto）——v1 所有块不可断，
+    /// avoid 即默认语义；解析存储供 conformance 对齐与将来的分裂支持。
+    BreakInside,
     // 绘制
     BackgroundColor,
     BackgroundImage,
@@ -167,6 +170,7 @@ impl PropertyId {
         Self::GridAutoColumns,
         Self::ColumnCount,
         Self::ColumnWidth,
+        Self::BreakInside,
         Self::BackgroundColor,
         Self::BackgroundImage,
         Self::BorderTopLeftRadius,
@@ -245,6 +249,7 @@ impl PropertyId {
             Self::ColumnGap => "column-gap",
             Self::ColumnCount => "column-count",
             Self::ColumnWidth => "column-width",
+            Self::BreakInside => "break-inside",
             Self::FlexDirection => "flex-direction",
             Self::FlexWrap => "flex-wrap",
             Self::FlexGrow => "flex-grow",
@@ -355,6 +360,11 @@ pub enum DeclValue {
     /// column-count（二期③）：auto → None；<integer [1,∞]> → Some
     /// （0/负/非整数为非法声明，解析期丢弃）。
     ColumnCount(Option<u16>),
+    /// break-inside（三期⑤a）：avoid → Some(true)、auto → Some(false)。
+    /// v1 契约：所有块一律按不可断装箱（avoid 即引擎默认语义）；
+    /// auto 的可跨列分裂语义未做（FEATURES.md B 级边界）。仅解析存储，
+    /// 布局不读——用于 conformance case 与 Chromium 断行模型对齐。
+    BreakInside(Option<bool>),
     // 动画描述符（第五批⑰）：不可动画、不参与 DeclValue 插值
     /// animation-name：none → None。
     AnimationName(Option<String>),
@@ -671,6 +681,20 @@ pub fn parse_column_count(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         } if *n >= 1 => Ok(DeclValue::ColumnCount(Some(
             (*n).min(u16::MAX as i32) as u16
         ))),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// break-inside（三期⑤a）：avoid → Some(true)、auto → Some(false)。
+/// 仅解析存储（v1 所有块不可断，avoid 即默认语义）。
+pub fn parse_break_inside(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    match p.next()? {
+        Token::Ident(id) if id.eq_ignore_ascii_case("avoid") => {
+            Ok(DeclValue::BreakInside(Some(true)))
+        }
+        Token::Ident(id) if id.eq_ignore_ascii_case("auto") => {
+            Ok(DeclValue::BreakInside(Some(false)))
+        }
         _ => Err(p.new_error_for_next_token()),
     }
 }
@@ -1721,6 +1745,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::Opacity | P::FlexGrow | P::FlexShrink => parse_number_value(p),
         P::ZIndex => parse_z_index(p),
         P::ColumnCount => parse_column_count(p),
+        P::BreakInside => parse_break_inside(p),
         P::AnimationName => parse_animation_name(p),
         P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
         P::AnimationIterationCount => parse_iteration_count(p),

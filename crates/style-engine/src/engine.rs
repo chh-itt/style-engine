@@ -56,6 +56,10 @@ struct MulticolState {
     n: usize,
     colw: f32,
     assignment: Vec<usize>,
+    /// 三期⑤a：断口 margin-top 截断的原值备份（taffy 层）——
+    /// 不再列首 / 回退块流时恢复；restyle 时清空（map_style 全量重写
+    /// 已把 margin 复位为样式真值）。
+    truncated: HashMap<NodeId, taffy::prelude::LengthPercentageAuto>,
 }
 
 /// 样式引擎实例。K 为宿主节点键（Copy + Eq + Hash）。
@@ -1686,6 +1690,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 // 映射 Flex，此处覆写）；如曾有幻影结构则子节点归位容器。
                 let mut changed = false;
                 if let Some(prev) = self.multicol_state.remove(&mc) {
+                    // 三期⑤a：回退块流前恢复全部断口 margin-top 截断
+                    // （幻影拆除，子节点回到容器块流）。
+                    for (&id, &orig) in &prev.truncated {
+                        if let Some(&tid) = self.taffy_node.get(&id) {
+                            if let Ok(mut ts) = self.taffy.style(tid).cloned() {
+                                ts.margin.top = orig;
+                                let _ = self.taffy.set_style(tid, ts);
+                            }
+                        }
+                    }
                     let mut children: Vec<taffy::NodeId> = Vec::new();
                     for p in &prev.phantoms {
                         if let Ok(pc) = self.taffy.children(*p) {
@@ -1780,9 +1794,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     );
                 }
             }
-            // 平衡分配：子节点 margin-box 单元高（布局宽已列化）按理想高
-            // 总量/列数 贪心填充；列首空槽可承接不可断高子件（溢出容忍）。
-            let mut units: Vec<f32> = Vec::with_capacity(children.len());
+            // 平衡分配（三期⑤a 二分）：试高 h 的顺序装箱 fit——列首块
+            // margin-top 截断（断口语义，css-multicol §7）、非空列放不下
+            // 换列、末列溢出失败、空列承接不可断高块（balancer 下界）；
+            // fit 单调 → 浮点二分 48 次收窄最小可行列高，终值重装箱定分配。
+            let mut units: Vec<(f32, f32, f32)> = Vec::with_capacity(children.len());
             for c in &children {
                 let h = self
                     .taffy_node
@@ -1806,23 +1822,100 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     }
                     None => (0.0, 0.0),
                 };
-                units.push(mt + h + mb);
+                units.push((mt, h, mb));
             }
-            let total: f32 = units.iter().sum();
-            let ideal = total / n as f32;
-            let mut assignment = Vec::with_capacity(children.len());
-            let (mut col, mut acc) = (0usize, 0.0f32);
-            for &u in &units {
-                // 列非空（acc>0）且未到末列时才允许溢出换列；空列可承接
-                // 不可断高子件（首件无条件入列）。
-                if acc > 0.0 && col < n - 1 && acc + u > ideal + f32::EPSILON {
-                    col += 1;
-                    acc = 0.0;
+            let total: f32 = units.iter().map(|u| u.0 + u.1 + u.2).sum();
+            let fit = |h: f32| -> Option<Vec<usize>> {
+                let mut assign = Vec::with_capacity(children.len());
+                let (mut col, mut acc) = (0usize, 0.0f32);
+                for &(mt, uh, mb) in &units {
+                    let mut eff = mt + uh + mb;
+                    // 列非空（acc>0）且未到末列时才允许溢出换列；空列可
+                    // 承接不可断高子件（首件无条件入列）。
+                    if acc > 0.0 && acc + eff > h + f32::EPSILON {
+                        if col == n - 1 {
+                            return None;
+                        }
+                        col += 1;
+                        acc = 0.0;
+                        // 断口 margin-top 截断：换列后首件不带 mt 计量。
+                        eff = uh + mb;
+                    }
+                    assign.push(col);
+                    acc += eff;
                 }
-                assignment.push(col.min(n - 1));
-                acc += u;
+                Some(assign)
+            };
+            let (mut lo, mut hi) = (0.0f32, total);
+            for _ in 0..48 {
+                let mid = (lo + hi) * 0.5;
+                if fit(mid).is_some() {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
             }
-            if st.assignment != assignment {
+            let assignment = fit(hi + 1.0e-3)
+                .or_else(|| fit(total))
+                .unwrap_or_else(|| vec![usize::MAX; children.len()]);
+            // 断口 margin-top 截断（三期⑤a）：每列首件（列 0 除外）写
+            // margin-top=0（taffy 层），不再列首的恢复原值。计量恒用样式
+            // 原值（ccs.margin()），分配跨帧稳定幂等；文本重排 pass 会以
+            // 样式重写 margin → 每次调用无条件重算截断 diff。
+            let mut trunc_changed = false;
+            // 每列首件（列 0 除外）为截断对象；entry().or_insert() 保树序
+            // 第一件——HashMap::collect 是后写覆盖（曾拿到列尾件）。
+            let mut col_first: std::collections::HashMap<usize, NodeId> =
+                std::collections::HashMap::new();
+            for (c, a) in children.iter().zip(assignment.iter()) {
+                if *a != usize::MAX {
+                    col_first.entry(*a).or_insert(*c);
+                }
+            }
+            for id in st.truncated.keys().copied().collect::<Vec<_>>() {
+                // 仅当该件仍是非 0 列的列首才保留截断；挪回列 0 或换位都恢复。
+                let keep = children
+                    .iter()
+                    .zip(assignment.iter())
+                    .any(|(c, a)| c == &id && *a > 0 && col_first.get(a).copied() == Some(id));
+                if keep {
+                    continue;
+                }
+                let orig = st.truncated.remove(&id);
+                if let (Some(&tid), Some(orig)) = (self.taffy_node.get(&id), orig) {
+                    if let Ok(mut ts) = self.taffy.style(tid).cloned() {
+                        ts.margin.top = orig;
+                        let _ = self.taffy.set_style(tid, ts);
+                    }
+                }
+                trunc_changed = true;
+            }
+            for (c, a) in children.iter().zip(assignment.iter()) {
+                let isfirst = col_first.get(a).copied() == Some(*c);
+                if *a == 0 || !isfirst {
+                    continue;
+                }
+                let Some(&tid) = self.taffy_node.get(c) else {
+                    continue;
+                };
+                let Ok(mut ts) = self.taffy.style(tid).cloned() else {
+                    continue;
+                };
+                // taffy 0.14 LengthPercentageAuto 无公开字段——零值用
+                // TaffyZero::ZERO 常量比对。已为零（含重排 pass 后重截）
+                // 只登记占位；被重排 pass 重写回样式值的重新截断。
+                let zero =
+                    <taffy::prelude::LengthPercentageAuto as taffy::prelude::TaffyZero>::ZERO;
+                if ts.margin.top == zero {
+                    st.truncated.entry(*c).or_insert(zero);
+                    continue;
+                }
+                st.truncated.insert(*c, ts.margin.top);
+                ts.margin.top = zero;
+                let _ = self.taffy.set_style(tid, ts);
+                trunc_changed = true;
+            }
+            if trunc_changed || st.assignment != assignment {
                 for (i, &p) in st.phantoms.iter().enumerate() {
                     let ids: Vec<taffy::NodeId> = children
                         .iter()
@@ -2986,6 +3079,69 @@ mod tests {
         assert_eq!(b(Key(5)).x, 200.0);
         assert_eq!(b(Key(5)).y, 10.0);
         assert_eq!(b(Key(2)).width, 200.0, "列宽 = 400/2");
+    }
+
+    #[test]
+    fn multicol_bisection_balances_uneven() {
+        // 三期⑤a：二分平衡（试高顺序装箱，fit 单调 → 浮点二分最小可行
+        // 列高）。[80,80,80,10] 双列：贪心 ideal=125 给 [80|80,80,10]
+        // max170；二分得 [80,80|80,10] max160（Chromium 平衡语义）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mc { column-count: 2; column-gap: 0px; width: 400px } \
+             h1 { height: 80px } h2 { height: 10px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+        for (k, name) in [(2u32, "h1"), (3, "h1"), (4, "h1"), (5, "h2")] {
+            assert!(engine.insert(Some(Key(1)), Key(k), mk(name)).is_ok());
+        }
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        // 列 1 [80,80]、列 2 [80,10]；容器高 160（贪心 170）。
+        assert_eq!(b(Key(2)).y, 0.0);
+        assert_eq!(b(Key(3)).y, 80.0, "列 1 两件 80");
+        assert_eq!(b(Key(4)).x, 200.0);
+        assert_eq!(b(Key(4)).y, 0.0, "列 2 首件 80");
+        assert_eq!(b(Key(5)).x, 200.0);
+        assert_eq!(b(Key(5)).y, 80.0, "列 2 尾件 10");
+        assert_eq!(b(Key(1)).height, 160.0, "二分平衡列高（贪心 170）");
+    }
+
+    #[test]
+    fn multicol_break_margin_top_truncated() {
+        // 三期⑤a：断口 margin-top 截断（css-multicol §7）——列首件
+        // margin-top 不生效。b2(mt20,h30) 平衡进列 2 顶（二分含截断建模：
+        // 列 1=[80] 列 2=[30,80] max110 < 无截断建模的 130）；列中件
+        // margin 保留（b1 下方若有 margin 仍占位）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mc { column-count: 2; column-gap: 0px; width: 400px } \
+             b1 { height: 80px } \
+             b2 { height: 30px; margin-top: 20px } \
+             b3 { height: 80px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("b1")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("b2")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("b3")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b = |k: Key| frame.find(k).unwrap();
+        // 列 1 [80]；列 2 [b2(截断 mt→y0), b3(y30)]；容器高 110。
+        assert_eq!(b(Key(2)).y, 0.0);
+        assert_eq!(b(Key(3)).x, 200.0);
+        assert_eq!(b(Key(3)).y, 0.0, "列首 margin-top 截断（不截则 y=20）");
+        assert_eq!(b(Key(4)).y, 30.0);
+        assert_eq!(b(Key(1)).height, 110.0);
     }
 
     #[test]

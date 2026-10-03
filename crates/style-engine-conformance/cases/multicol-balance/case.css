@@ -1,0 +1,17 @@
+/* 三期⑤a：multicol 二分平衡 + 断口 margin-top 截断。
+ * break-inside: avoid——Chromium 对无 avoid 的空块会跨列拆碎（实测
+ * 平衡高 125 而非 160）；avoid 强制整件装箱，与引擎 v1 不可断契约
+ * 一致。mc1（keys 2–6）：四块 [80,80,80,10] 双列——二分最小可行列高
+ * 160 → [a,b|c,d]。mc2（keys 7–10）：三块 [80, mt20+30, 80]——含截
+ * 断建模的最小列高 110 → [a|b,c]，b 的 margin-top 在列首被截断。
+ * 期望几何：wrap(0,0,400,270) mc1(0,0,400,160) mc2(0,160,400,110)
+ * a(0,0,200,80) b(0,80,200,80) c(200,0,200,80) d(200,80,200,10)
+ * a2(0,160,200,80) b2(200,160,200,30) c2(200,190,200,80)。 */
+body { margin: 0; }
+.wrap { width: 400px; background-color: #f0f0f0; }
+.mc { column-count: 2; column-gap: 0px; background-color: #dddddd; }
+.a { height: 80px; background-color: #3366cc; break-inside: avoid; }
+.b { height: 80px; background-color: #33aa55; break-inside: avoid; }
+.c { height: 80px; background-color: #cc8822; break-inside: avoid; }
+.d { height: 10px; background-color: #aa3366; break-inside: avoid; }
+.b2 { height: 30px; margin-top: 20px; background-color: #2288aa; break-inside: avoid; }

@@ -98,6 +98,8 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         // ③multi-column 初始：count/width 均 auto（缺席语义）
         P::ColumnCount => DeclValue::ColumnCount(None),
         P::ColumnWidth => DeclValue::LenAuto(None),
+        // ⑤a css-break 初始：auto（可断）——v1 布局不读，块一律不可断。
+        P::BreakInside => DeclValue::BreakInside(None),
         P::FlexDirection => DeclValue::FlexDirection(FlexDirection::Row),
         P::FlexWrap => DeclValue::FlexWrap(FlexWrap::NoWrap),
         P::FlexGrow => DeclValue::Number(0.0),
