@@ -10,26 +10,36 @@ env:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    # 三平台矩阵：test 全平台跑；fmt/clippy/cargo-hack 幂集仅 ubuntu
+    # （lint 类检查平台无关，省分钟数）。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Install cargo-hack
+        if: matrix.os == 'ubuntu-latest'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+        if: matrix.os == 'ubuntu-latest'
       - name: clippy（短格式，全特性，警告即错）
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-features --message-format short -- -D warnings
-      # 含 Numeric Channel（golden 已入库，仅对比无需浏览器）；
+      # 含 Numeric/Pixel Channel（golden 已入库，仅对比+软渲染，无需浏览器）；
       # golden 重生成属本地 Playwright 步骤（tools/dump_rects.py），不入 CI。
-      - run: cargo test --workspace --all-features
-      # 特性幂集守卫：当前各 crate 无自定义特性（default/no-default 同形），
-      # 预防未来新增特性面漏检。
-      - run: cargo hack check --workspace --feature-powerset --no-dev-deps
+      # --locked：CI 一律按入库 Cargo.lock 解析（三期 Stage 4 锁定版本策略）。
+      - run: cargo test --workspace --all-features --locked
+      # 特性幂集守卫：default/no-default/layout/text 组合全编译。
+      - run: cargo hack check --workspace --feature-powerset --no-dev-deps --locked
+        if: matrix.os == 'ubuntu-latest'
       # LFS（路线图㉗：建仓启用 git-lfs 收 *.ttf/*.otf/*.woff2 后取消注释）
       # - run: git lfs install && git lfs pull
 
@@ -43,5 +53,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
-      - run: cargo check --workspace --all-features
-      - run: cargo test --workspace --all-features
+      - run: cargo check --workspace --all-features --locked
+      - run: cargo test --workspace --all-features --locked
