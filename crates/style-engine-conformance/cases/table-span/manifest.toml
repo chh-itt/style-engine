@@ -1,0 +1,12 @@
+# 三期④b 表格 colspan+行组+caption：真实 <table> 标记，td.b colspan=3
+# 宽 300 → 列 2–4 各 100；caption 置顶不参与列发现；tbody 行组透明包装。
+# 全整数盒纯色，Numeric 与 Pixel 双通道验收。
+viewport = [400.0, 300.0]
+scale = 1.0
+fonts = []
+features = ["table", "table-colspan", "table-row-group", "table-caption", "background-color"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

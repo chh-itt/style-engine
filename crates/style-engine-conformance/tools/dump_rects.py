@@ -41,6 +41,14 @@ COLLECT_JS = """
 
 REPO_ROOT = CASES.parent.parent.parent
 
+# UA 装饰中和：Chromium UA 对表格的默认装饰（border-spacing 2px、td/th
+# padding 1px）会把非布局语义混进基准；引擎侧无这些装饰。仅作用于
+# table/td/th——既有 div 用例几何零影响。
+UA_NORMALIZE_CSS = (
+    "table { border-collapse: collapse; border-spacing: 0; } "
+    "td, th { padding: 0; }"
+)
+
 
 def inject_fonts(page, manifest) -> None:
     """第四批⑥：manifest.fonts 项 = "族名=相对仓库根路径"——以 data: URL
@@ -64,6 +72,21 @@ def inject_fonts(page, manifest) -> None:
     page.evaluate("() => document.fonts.ready")
 
 
+def inject_ua_normalize(page) -> None:
+    """把 UA 中和样式插到 case.css <link> 之前（保持 UA → 中和 → case 的
+    级联顺序：case.css 同特异性规则仍能覆盖中和样式）。"""
+    page.evaluate(
+        """(css) => {
+        const s = document.createElement('style');
+        s.textContent = css;
+        const link = document.querySelector('link[rel="stylesheet"]');
+        if (link) link.parentElement.insertBefore(s, link);
+        else document.head.appendChild(s);
+    }""",
+        UA_NORMALIZE_CSS,
+    )
+
+
 def dump_case(case_dir: Path, browser) -> None:
     manifest = tomllib.loads((case_dir / "manifest.toml").read_text("utf-8"))
     vw, vh = manifest.get("viewport", [800.0, 600.0])
@@ -73,6 +96,7 @@ def dump_case(case_dir: Path, browser) -> None:
     )
     page.goto((case_dir / "case.html").as_uri())
     page.wait_for_load_state("networkidle")
+    inject_ua_normalize(page)
     inject_fonts(page, manifest)
     boxes = page.evaluate(COLLECT_JS)
     meta = {

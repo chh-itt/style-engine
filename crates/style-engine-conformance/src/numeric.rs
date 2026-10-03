@@ -15,9 +15,6 @@ use style_engine::tree::StyleNode;
 
 use crate::pixel::PixelBudget;
 
-/// fixture 节点：(data-key, 父下标, class 列表, 文本)。
-pub type FixtureNode = (u64, Option<usize>, Vec<String>, Option<String>);
-
 /// 每分量容差（默认 ADR-0003 的 0.5px）。
 #[derive(Clone, Copy, Debug)]
 pub struct Tolerance {
@@ -185,20 +182,20 @@ pub fn build_case_engine(case: &NumericCase) -> Result<StyleEngine<u64>, String>
             .map_err(|e| format!("case {} 字体读取失败 {rel}: {e}", case.name))?;
         engine.add_font(bytes);
     }
-    for (i, (key, parent, classes, text)) in case.nodes.iter().enumerate() {
-        let _ = i;
+    for node in &case.nodes {
         engine
             .insert(
-                parent.map(|p| case.nodes[p].0),
-                *key,
+                node.parent.map(|p| case.nodes[p].key),
+                node.key,
                 StyleNode {
-                    name: Some("div".into()),
-                    classes: classes.iter().cloned().collect(),
-                    text: text.clone(),
+                    name: Some(node.name.clone()),
+                    classes: node.classes.iter().cloned().collect(),
+                    text: node.text.clone(),
+                    attrs: node.attrs.iter().cloned().collect(),
                     ..Default::default()
                 },
             )
-            .map_err(|e| format!("case {} key {key} 插入失败: {e}", case.name))?;
+            .map_err(|e| format!("case {} key {} 插入失败: {e}", case.name, node.key))?;
     }
     Ok(engine)
 }
@@ -214,10 +211,10 @@ pub fn run_case(case: &NumericCase) -> Result<Vec<EngineBox>, String> {
     Ok(case
         .nodes
         .iter()
-        .map(|(key, ..)| {
-            let b = frame.find(*key).expect("引擎盒缺失（数据 key 未落框）");
+        .map(|node| {
+            let b = frame.find(node.key).expect("引擎盒缺失（数据 key 未落框）");
             EngineBox {
-                key: *key,
+                key: node.key,
                 x: b.x,
                 y: b.y,
                 w: b.width,
@@ -263,10 +260,27 @@ pub fn diff(engine: &[EngineBox], golden: &[GoldenBox], tol: Tolerance) -> Vec<N
     diffs
 }
 
-/// 迷你 fixture 解析：仅支持 `<div class="a b" data-key="N">` 嵌套 +
-/// 文本节点（white-space:normal 折叠语义）；其余标签/内容忽略。
-/// 这是约定输入格式而非通用 HTML 解析——用例必须遵守（见 docs）。
+/// fixture 节点：key、父索引（parse 顺序）、小写标签名、class 列表、
+/// 折叠文本、其余属性（colspan/rowspan 等）原样携带。
+#[derive(Debug, Clone)]
+pub struct FixtureNode {
+    pub key: u64,
+    pub parent: Option<usize>,
+    pub name: String,
+    pub classes: Vec<String>,
+    pub text: Option<String>,
+    pub attrs: Vec<(String, String)>,
+}
+
+/// 迷你 fixture 解析：支持 `<div>` 与表格标记（table/caption/thead/
+/// tbody/tfoot/tr/td/th）的 `class`/`data-key` 属性嵌套 + 文本节点
+/// （white-space:normal 折叠语义）；其余标签/内容忽略，其余属性（如
+/// colspan）原样挂在 FixtureNode.attrs。这是约定输入格式而非通用 HTML
+/// 解析——用例必须遵守（见 docs）。
 pub fn parse_fixture_divs(html: &str) -> Result<Vec<FixtureNode>, String> {
+    const FIXTURE_TAGS: [&str; 9] = [
+        "div", "table", "caption", "thead", "tbody", "tfoot", "tr", "td", "th",
+    ];
     let clean = strip_comments(html);
     let bytes = clean.as_bytes();
     let mut i = 0usize;
@@ -282,14 +296,15 @@ pub fn parse_fixture_divs(html: &str) -> Result<Vec<FixtureNode>, String> {
             let tag = &clean[i + 1..i + close];
             i += close + 1;
             if let Some(name) = tag.strip_prefix('/') {
-                if name.trim().eq_ignore_ascii_case("div") {
+                let name = name.trim().to_ascii_lowercase();
+                if FIXTURE_TAGS.contains(&name.as_str()) {
                     stack.pop();
                 }
             } else {
                 let mut parts = tag.split_ascii_whitespace();
                 let tag_name = parts.next().unwrap_or("").to_ascii_lowercase();
-                if tag_name == "div" {
-                    let (mut classes, mut key) = (Vec::new(), None);
+                if FIXTURE_TAGS.contains(&tag_name.as_str()) {
+                    let (mut classes, mut key, mut attrs) = (Vec::new(), None, Vec::new());
                     for (k, v) in attr_iter(tag) {
                         match k.to_ascii_lowercase().as_str() {
                             "class" => {
@@ -298,13 +313,20 @@ pub fn parse_fixture_divs(html: &str) -> Result<Vec<FixtureNode>, String> {
                             "data-key" => {
                                 key = Some(v.parse::<u64>().map_err(|_| "data-key 非法")?)
                             }
-                            _ => {}
+                            _ => attrs.push((k.to_ascii_lowercase(), v.to_string())),
                         }
                     }
                     let Some(key) = key else {
-                        return Err("div 缺 data-key（fixture 约定必需）".into());
+                        return Err(format!("{tag_name} 缺 data-key（fixture 约定必需）"));
                     };
-                    nodes.push((key, stack.last().copied(), classes, None));
+                    nodes.push(FixtureNode {
+                        key,
+                        parent: stack.last().copied(),
+                        name: tag_name,
+                        classes,
+                        text: None,
+                        attrs,
+                    });
                     stack.push(nodes.len() - 1);
                 }
             }
@@ -337,12 +359,12 @@ fn flush_text(buf: &mut String, nodes: &mut [FixtureNode], stack: &[usize]) {
     }
     let top = stack[stack.len() - 1];
     let entry = &mut nodes[top];
-    match &mut entry.3 {
+    match &mut entry.text {
         Some(t) => {
             t.push(' ');
             t.push_str(&collapsed);
         }
-        None => entry.3 = Some(collapsed),
+        None => entry.text = Some(collapsed),
     }
 }
 
