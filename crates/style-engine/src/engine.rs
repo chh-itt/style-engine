@@ -85,6 +85,12 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     calc_deferred: Vec<crate::layout::DeferredCalc>,
     /// taffy 父链（结算基准 = 父内容尺寸；build_taffy_subtree 填充）。
     taffy_parent: HashMap<taffy::NodeId, taffy::NodeId>,
+    /// 三期② absolute 锚定跳走：node → 重挂包含块（Some(cb)=cb≠直父；
+    /// None=ICB）。settle_absolute_anchors 每帧重建，collect 消费。
+    abs_cb: HashMap<NodeId, Option<NodeId>>,
+    /// 三期②：taffy 结构偏离样式镜像的活跃标（重挂过 absolute 即置位；
+    /// 全部归位后的下一帧清零——稳态零 absolute 页面跳过整段结构对比）。
+    abs_structured: bool,
     /// ②table：display:table 节点注册表（restyle 收集，settle_tables 结算）。
     tables: Vec<NodeId>,
     /// ②table：上次结算列宽缓存（px；全等免重排——稳态帧零额外布局 pass）。
@@ -146,6 +152,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             taffy_node: HashMap::new(),
             calc_deferred: Vec::new(),
             taffy_parent: HashMap::new(),
+            abs_cb: HashMap::new(),
+            abs_structured: false,
             tables: Vec::new(),
             table_cols: HashMap::new(),
             multicols: Vec::new(),
@@ -483,6 +491,118 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// 三期② absolute 锚定跳走（A 级缺口收口）：CSS 中 absolute 子件的包含
+    /// 块 = 最近 positioned 或 transform≠none 祖先（均无 → 初始包含块 ICB），
+    /// 而 taffy 0.14 只按直父 padding box 锚定绝对子件——直父与 cb 之间存在
+    /// static 包装层时 inset 百分比基准、静态位置与 auto 边距全部错位。
+    /// 本 pass 在样式最终就绪（含 @keyframes 覆写——动画可翻转 has_transform）
+    /// 后、布局前执行：用 set_children 移动语义把 absolute 子件重挂到 cb
+    /// 节点（cb==直父的常规情形零变化；跳走后 taffy 的 inset 基准/静态位置
+    /// 随 cb 正确）。table/multicol 子树维持 v1 契约（settle_columns：absolute
+    /// 子件包含块仍为容器）不参与。collect() 按 abs_cb 推导视口坐标；
+    /// 稳态帧 desired 与当前子列表全等免 set_children，无 absolute 且结构
+    /// 已归位时整段跳过。
+    fn settle_absolute_anchors(&mut self) {
+        let Some(viewport) = self.taffy_root else {
+            return;
+        };
+        // 1) DFS 求重挂映射：abs_cb[node] = Some(cb)（cb≠直父）| None（ICB）；
+        //    abs_in[cb]（None=ICB）= 该 cb 名下需重挂的 absolute 子件。
+        let mut abs_cb: HashMap<NodeId, Option<NodeId>> = HashMap::new();
+        let mut abs_in: HashMap<Option<NodeId>, Vec<NodeId>> = HashMap::new();
+        // 栈项：(节点, 样式父, 最近 cb 候选（None=尚无）, 豁免子树)
+        let mut stack: Vec<(NodeId, Option<NodeId>, Option<NodeId>, bool)> =
+            vec![(self.tree.root(), None, None, false)];
+        while let Some((id, parent, cb, exempt)) = stack.pop() {
+            let cb_next = if self.is_positioned(id) || self.is_transform_cb(id) {
+                Some(id)
+            } else {
+                cb
+            };
+            // v1 契约豁免：table/multicol 容器及其子树——子件列表由
+            // settle_tables/settle_columns 管理，此处不触碰。
+            let exempt_next = exempt || self.tables.contains(&id) || self.multicols.contains(&id);
+            if !exempt_next && parent.is_some() && self.is_absolute(id) && cb != parent {
+                // 注意用继承的 cb（严格祖先候选），不得用 cb_next——
+                // absolute 节点自身 positioned 会把自己选成自己的 cb。
+                abs_cb.insert(id, cb);
+                abs_in.entry(cb).or_default().push(id);
+            }
+            for c in self.tree.children(id) {
+                stack.push((*c, Some(id), cb_next, exempt_next));
+            }
+        }
+        self.abs_cb = abs_cb;
+        if self.abs_cb.is_empty() && !self.abs_structured {
+            return;
+        }
+        // 2) 结构归位：逐非豁免节点比较 desired taffy 子列表（样式子件剔除
+        // 重挂走的 + 重挂进来的）与当前列表，有差才 set_children（move 语义
+        // 顺带从旧父摘除——上帧重挂残留随之归位）。
+        let mut moved = false;
+        let mut stack: Vec<(NodeId, bool)> = vec![(self.tree.root(), false)];
+        while let Some((id, exempt)) = stack.pop() {
+            let exempt_next = exempt || self.tables.contains(&id) || self.multicols.contains(&id);
+            for c in self.tree.children(id) {
+                stack.push((*c, exempt_next));
+            }
+            if exempt_next {
+                continue;
+            }
+            let Some(&tid) = self.taffy_node.get(&id) else {
+                continue;
+            };
+            let mut desired: Vec<taffy::NodeId> = self
+                .tree
+                .children(id)
+                .iter()
+                .filter(|c| !self.abs_cb.contains_key(*c))
+                .filter_map(|c| self.taffy_node.get(c).copied())
+                .collect();
+            if let Some(list) = abs_in.get(&Some(id)) {
+                desired.extend(list.iter().filter_map(|n| self.taffy_node.get(n).copied()));
+            }
+            if self.taffy.children(tid).unwrap_or_default() != desired {
+                let _ = self.taffy.set_children(tid, &desired);
+                moved = true;
+            }
+            // taffy_parent 同步（collect 幻影补偿共用该表）：重挂子件指 cb，
+            // 恢复直父锚定的子件回写直父，防陈旧项误触发补偿。
+            for c in self.tree.children(id) {
+                let Some(&ctid) = self.taffy_node.get(c) else {
+                    continue;
+                };
+                let expected = match self.abs_cb.get(c) {
+                    Some(Some(cb)) => self.taffy_node.get(cb).copied(),
+                    Some(None) => Some(viewport),
+                    None => Some(tid),
+                };
+                if let Some(e) = expected {
+                    if self.taffy_parent.get(&ctid) != Some(&e) {
+                        self.taffy_parent.insert(ctid, e);
+                    }
+                }
+            }
+        }
+        // 3) ICB：无 positioned/transformed 祖先的 absolute 直接挂合成视口根
+        //（无 border/padding → location 相对视口原点；inset 百分比基准 =
+        // 视口尺寸，与 CSS ICB 语义一致）。
+        let mut vp_desired: Vec<taffy::NodeId> = self
+            .taffy_node
+            .get(&self.tree.root())
+            .copied()
+            .into_iter()
+            .collect();
+        if let Some(list) = abs_in.get(&None) {
+            vp_desired.extend(list.iter().filter_map(|n| self.taffy_node.get(n).copied()));
+        }
+        if self.taffy.children(viewport).unwrap_or_default() != vp_desired {
+            let _ = self.taffy.set_children(viewport, &vp_desired);
+            moved = true;
+        }
+        self.abs_structured = moved || !self.abs_cb.is_empty();
+    }
+
     /// 推送节点滚动偏移（绘制消费；T4 生效）。
     pub fn set_scroll_offset(
         &mut self,
@@ -518,6 +638,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // 第五批⑰：@keyframes 动画采样——每帧级联后、布局前覆写（布局与
         // 绘制消费动画值；布局每帧全量重算，动画值变更无需独立失效标）
         self.apply_animations();
+        // 三期② absolute 锚定跳走：样式最终就绪（动画可翻转 has_transform
+        // → cb 集合逐帧变化）后、布局前，把 absolute 子件重挂到 CSS 包含块
+        //（taffy 0.14 只按直父 padding box 锚定绝对子件）。
+        self.settle_absolute_anchors();
         if let Some(root) = self.taffy_root {
             let _ = self.taffy.compute_layout(
                 root,
@@ -929,6 +1053,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.taffy_root = None;
         self.calc_deferred.clear();
         self.taffy_parent.clear();
+        self.abs_cb.clear();
+        self.abs_structured = false;
         self.tables.clear();
         self.table_cols.clear();
         self.multicols.clear();
@@ -1743,8 +1869,24 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let mut y = oy;
         if let Some(&tid) = self.taffy_node.get(&id) {
             if let Ok(l) = self.taffy.layout(tid) {
-                x = l.location.x + ox;
-                y = l.location.y + oy;
+                // 三期②：重挂 absolute 的坐标 = cb border box 原点 + 自身
+                // location（taffy 绝对锚定 = cb padding box，location 已含
+                // cb border 偏移）；ICB → 视口原点。cb 为样式树祖先，本 DFS
+                // 先序保证 layout_by_node[cb] 已就绪（嵌套 absolute 同序）。
+                if let Some(cb) = self.abs_cb.get(&id) {
+                    let (bx, by) = match cb {
+                        Some(cb_id) => layout_by_node
+                            .get(cb_id)
+                            .map(|&(bx, by, _, _)| (bx, by))
+                            .unwrap_or((ox, oy)),
+                        None => (0.0, 0.0),
+                    };
+                    x = bx + l.location.x;
+                    y = by + l.location.y;
+                } else {
+                    x = l.location.x + ox;
+                    y = l.location.y + oy;
+                }
                 let box_rect = (x, y, l.size.width, l.size.height);
                 layout_by_node.insert(id, box_rect);
                 if let Some(&key) = self.node_to_key.get(&id) {
@@ -1759,6 +1901,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
         }
         for c in self.tree.children(id) {
+            // 三期②：重挂 absolute 的坐标独立于样式父链——递归基准归零，
+            // 由节点自身 cb 分支推导；并跳过幻影 effp 补偿（防双重偏移）。
+            if self.abs_cb.contains_key(c) {
+                self.collect(*c, 0.0, 0.0, out, layout_by_node);
+                continue;
+            }
             // ③multi-column：子节点 taffy 父可能为幻影列（无样式节点）——
             // 补加幻影相对容器的偏移（单层幻影，v1 契约）。
             let (mut cx, mut cy) = (x, y);
@@ -2853,6 +3001,184 @@ mod tests {
         assert_eq!(b3.width, 200.0);
         // taffy 锚定直父（mid）：x = mid.x，y = outer padding
         assert_eq!((b3.x, b3.y), (50.0, 20.0));
+    }
+
+    #[test]
+    fn absolute_anchor_jumps_over_static_wrapper() {
+        // 三期②锚定跳走：cb（transformed mid）与 absolute 叶之间存在 static
+        // 包装层时，taffy 直父锚定会把 inset 基准错挂在 wrap 上（旧：
+        // 75+30=105）；跳走后 inset 相对 cb padding box（新：50+30=80）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.outer { position: relative; width: 400px; padding: 20px; } \
+                 div.mid { transform: translate(0px, 0px); width: 200px; margin-left: 30px; } \
+                 div.wrap { margin-left: 25px; } \
+                 div.leaf { position: absolute; top: 20px; left: 30px; }"
+                )
+                .is_clean()
+        );
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "outer").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "mid").is_ok());
+        assert!(mk(&mut engine, Key(3), Some(Key(2)), "wrap").is_ok());
+        assert!(mk(&mut engine, Key(4), Some(Key(3)), "leaf").is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b2 = frame.find(Key(2)).unwrap();
+        assert_eq!((b2.x, b2.y), (50.0, 20.0)); // 外 padding 20 + margin 30
+        // wrap 只给水平 margin：taffy 0.14 末子 margin-bottom 塌陷会把父级
+        // 顶下 15px（CSS 2.1 §8.3.1 应落在父底缘之外），本测聚焦锚定跳走，
+        // 不掺入该塌陷行为（已知偏差记录于 FEATURES.md）。
+        let b3 = frame.find(Key(3)).unwrap();
+        assert_eq!(b3.x, 75.0); // wrap 流内位置 = mid 内容原点 + margin 25（旧锚定基准）
+        let b4 = frame.find(Key(4)).unwrap();
+        // cb = mid：x = mid border box 原点 50 + inset 30；y = 20 + inset 20
+        assert_eq!(
+            (b4.x, b4.y),
+            (80.0, 40.0),
+            "absolute 应跳过 static 包装层锚定到 cb"
+        );
+    }
+
+    #[test]
+    fn absolute_icb_anchor_skips_all_static_ancestors() {
+        // 三期②ICB：无 positioned/transformed 祖先 → 包含块 = 初始包含块，
+        // inset 相对视口原点（旧：直父 wrap 流内位置 50+10/25+10）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.outer { width: 400px; padding: 40px; margin-left: 10px; } \
+                 div.wrap { margin-top: 25px; } \
+                 div.leaf { position: absolute; top: 10px; left: 10px; }"
+                )
+                .is_clean()
+        );
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "outer").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "wrap").is_ok());
+        assert!(mk(&mut engine, Key(3), Some(Key(2)), "leaf").is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b3 = frame.find(Key(3)).unwrap();
+        assert_eq!(
+            (b3.x, b3.y),
+            (10.0, 10.0),
+            "无 positioned/transformed 祖先应锚定 ICB（视口原点 + inset）"
+        );
+    }
+
+    #[test]
+    fn absolute_anchor_reparents_nested_absolute_cb() {
+        // 三期②嵌套：absolute 节点自身成为后代 absolute 的 cb（abs1 为
+        // positioned）。abs1 锚 ICB（50,40）；abs2 跳过 static wrap 锚定
+        // abs1 → (55,45)（旧：wrap 流内 70,60 + inset = 75,65）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.outer { width: 300px; padding: 10px; } \
+                 div.abs1 { position: absolute; top: 40px; left: 50px; width: 100px; height: 50px; } \
+                 div.wrap { margin-left: 20px; margin-top: 20px; } \
+                 div.abs2 { position: absolute; top: 5px; left: 5px; }"
+            )
+            .is_clean());
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "outer").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "abs1").is_ok());
+        assert!(mk(&mut engine, Key(3), Some(Key(2)), "wrap").is_ok());
+        assert!(mk(&mut engine, Key(4), Some(Key(3)), "abs2").is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b2 = frame.find(Key(2)).unwrap();
+        assert_eq!((b2.x, b2.y), (50.0, 40.0), "abs1 无 positioned 祖先 → ICB");
+        let b4 = frame.find(Key(4)).unwrap();
+        assert_eq!(
+            (b4.x, b4.y),
+            (55.0, 45.0),
+            "abs2 应锚定 absolute 祖先 abs1（嵌套 cb 链）"
+        );
+    }
+
+    #[test]
+    fn absolute_anchor_restores_after_style_change() {
+        // 三期②恢复路径：样式表替换抹去 transformed/positioned 祖先后，
+        // cb 集合变化 → 重挂残留归位，叶改锚 ICB（80,40 → 30,20）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.outer { position: relative; width: 400px; padding: 20px; } \
+                 div.mid { transform: translate(0px, 0px); width: 200px; margin-left: 30px; } \
+                 div.wrap { margin-left: 25px; } \
+                 div.leaf { position: absolute; top: 20px; left: 30px; }"
+                )
+                .is_clean()
+        );
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "outer").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "mid").is_ok());
+        assert!(mk(&mut engine, Key(3), Some(Key(2)), "wrap").is_ok());
+        assert!(mk(&mut engine, Key(4), Some(Key(3)), "leaf").is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b4 = frame.find(Key(4)).unwrap();
+        assert_eq!((b4.x, b4.y), (80.0, 40.0));
+        // 替换样式表：去掉 transform 与 relative → cb 链瓦解 → ICB
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.outer { width: 400px; padding: 20px; } \
+                 div.mid { width: 200px; margin-left: 30px; } \
+                 div.wrap { margin-left: 25px; margin-top: 15px; } \
+                 div.leaf { position: absolute; top: 20px; left: 30px; }"
+                )
+                .is_clean()
+        );
+        let frame2 = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b4b = frame2.find(Key(4)).unwrap();
+        assert_eq!(
+            (b4b.x, b4b.y),
+            (30.0, 20.0),
+            "cb 消失后应重锚 ICB（重挂残留归位）"
+        );
     }
 
     #[test]

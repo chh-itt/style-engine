@@ -1,0 +1,9 @@
+/* 三期②absolute 锚定跳走：cb（transformed mid）与 absolute 叶之间的 static
+ * 包装层不得捕获 inset 基准。mid 有 transform → 叶 cb=mid（padding box 原点
+ * 30,0）→ leaf=(60,20)；旧直父锚定挂在 wrap（55,0）→ (85,20)，x 差 25px，
+ * 落入 Class 3/4 零容忍被拦截。所有盒整数边界、纯色填充，Pixel 通道期望 0 差。 */
+body { margin: 0; }
+.host { width: 340px; height: 240px; background-color: #f0f0f0; }
+.mid { transform: translate(0px, 0px); width: 200px; height: 100px; margin-left: 30px; background-color: #ddeeff; }
+.wrap { width: 120px; height: 40px; margin-left: 25px; background-color: #ffeedd; }
+.leaf { position: absolute; top: 20px; left: 30px; width: 80px; height: 40px; background-color: #cc3333; }

@@ -1,0 +1,12 @@
+# 三期②absolute 锚定跳走用例：cb（transformed mid）与 absolute 叶之间夹 static
+# 包装层 wrap，叶 inset 必须相对 mid padding box（60,20）而非 wrap 流内位置
+# （85,20）。全部整数盒纯色，Numeric 与 Pixel 双通道验收。
+viewport = [400.0, 300.0]
+scale = 1.0
+fonts = []
+features = ["transform", "position-absolute", "background-color"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]
