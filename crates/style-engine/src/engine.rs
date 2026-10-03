@@ -963,8 +963,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.settle_column_rules(&layout_by_node);
         // ADR-0007：滚动容器可滚动外延（宿主推进偏移的量程）。识别 = overflow
         // ∈ {auto, scroll}（两轴独立）；外延 = padding box 与全部后代 border box
-        // 并集相对 padding box 原点的最大超出。近似：绝对定位后代一并并入，
-        // 随定位模型细化；偏移本身归宿主（set_scroll_offset），引擎不夹紧。
+        // 并集相对 padding box 原点的最大超出。三期⑥：后代带 transform 时
+        // （含祖先链复合，与 ADR-0009 绘制期同一终结 resolve_transform_affine），
+        // 贡献 = 变换后 AABB，仅正向溢出并入（LTR 左/上不扩量程，Chromium 同）。
+        // 近似：绝对定位后代一并并入，随定位模型细化；偏移归宿主
+        // （set_scroll_offset），引擎不夹紧。
         let mut scrollable: HashMap<K, (f32, f32)> = HashMap::new();
         if self.root_key.is_some() {
             let border_px = |cs: &ComputedStyle,
@@ -1033,13 +1036,50 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let (pw, ph) = ((w - bl - br).max(0.0), (h - bt - bb).max(0.0));
                 let mut ex = px0 + pw;
                 let mut ey = py0 + ph;
-                let mut stack: Vec<NodeId> = self.tree.children(id).to_vec();
-                while let Some(c) = stack.pop() {
-                    if let Some(&(cx, cy, cw, ch)) = layout_by_node.get(&c) {
-                        ex = ex.max(cx + cw);
-                        ey = ey.max(cy + ch);
+                let mut stack: Vec<(NodeId, Option<[f32; 6]>)> =
+                    self.tree.children(id).iter().map(|&c| (c, None)).collect();
+                while let Some((c, acc)) = stack.pop() {
+                    // acc = 祖先链复合仿射（None = 尚未遇变换，恒等）；
+                    // 各仿射均以未变换视口系为基（ADR-0009 布局盒不变），先
+                    // 后代 own、再祖先 acc —— 与绘制流 cur∘M 嵌套完全一致。
+                    let mut eff = acc;
+                    if let Some(ccs) = self.styles.get(&c) {
+                        if ccs.has_transform() {
+                            if let Some(&(lx, ly, lw, lh)) = layout_by_node.get(&c) {
+                                let own = crate::paint::resolve_transform_affine(
+                                    ccs,
+                                    lx,
+                                    ly,
+                                    lw,
+                                    lh,
+                                    &self.media,
+                                );
+                                eff = Some(match acc {
+                                    Some(a) => crate::paint::mul_affine(&a, &own),
+                                    None => own,
+                                });
+                            }
+                        }
                     }
-                    stack.extend(self.tree.children(c).iter().copied());
+                    if let Some(&(cx, cy, cw, ch)) = layout_by_node.get(&c) {
+                        if let Some(a) = eff {
+                            // 变换后四角 AABB；仅 max 并入（左/上不扩量程）。
+                            let mut maxx = f32::NEG_INFINITY;
+                            let mut maxy = f32::NEG_INFINITY;
+                            for (px, py) in
+                                [(cx, cy), (cx + cw, cy), (cx, cy + ch), (cx + cw, cy + ch)]
+                            {
+                                maxx = maxx.max(a[0] * px + a[2] * py + a[4]);
+                                maxy = maxy.max(a[1] * px + a[3] * py + a[5]);
+                            }
+                            ex = ex.max(maxx);
+                            ey = ey.max(maxy);
+                        } else {
+                            ex = ex.max(cx + cw);
+                            ey = ey.max(cy + ch);
+                        }
+                    }
+                    stack.extend(self.tree.children(c).iter().map(|&g| (g, eff)));
                 }
                 let max_x = if ox { (ex - px0 - pw).max(0.0) } else { 0.0 };
                 let max_y = if oy { (ey - py0 - ph).max(0.0) } else { 0.0 };
@@ -3839,6 +3879,114 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, crate::paint::PaintOp::PopScroll))
         );
+    }
+
+    #[test]
+    fn scroll_range_includes_transformed_child() {
+        // 三期⑥：transform ≠ none 的后代以变换后 AABB 贡献正向溢出。
+        // 容器 200×100，子件 200×50 translate(0,100px) → AABB y 100..150
+        // → 量程 max_y = 50（原盒 0..50 不够、平移后盒才到 150）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.list { width: 200px; height: 100px; overflow-y: scroll; } \
+                     div.item { width: 200px; height: 50px; transform: translate(0, 100px); }"
+                )
+                .is_clean()
+        );
+        let list = || StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once("list".to_string()).collect(),
+            ..Default::default()
+        };
+        let item = || StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once("item".to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), list()).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), item()).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert_eq!(frame.scrollable.get(&Key(1)), Some(&(0.0, 50.0)));
+    }
+
+    #[test]
+    fn scroll_range_nested_transform_composes() {
+        // 三期⑥：祖先链复合（包裹层 translate(0,40) × 内层 translate(0,40)
+        // → 内层有效 AABB y 80..180 → max_y 80；只算 own 会得 40）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.list { width: 200px; height: 100px; overflow-y: scroll; } \
+                     div.wrap { transform: translate(0, 40px); } \
+                     div.inner { width: 200px; height: 100px; transform: translate(0, 40px); }"
+                )
+                .is_clean()
+        );
+        let mk = |cls: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(cls.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("list")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("wrap")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("inner")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert_eq!(frame.scrollable.get(&Key(1)), Some(&(0.0, 80.0)));
+    }
+
+    #[test]
+    fn scroll_range_rotate_aabb_positive_side_only() {
+        // 三期⑥：rotate(45deg) 100×100 于 100×100 容器 → 变换后 AABB
+        // 半延 = 50·(|cos45|+|sin45|) ≈ 70.71，正侧越界 ≈ 20.71；负侧
+        // （左/上 -20.71）不扩 LTR 量程。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.list { width: 100px; height: 100px; overflow: scroll; } \
+                     div.item { width: 100px; height: 100px; transform: rotate(45deg); }"
+                )
+                .is_clean()
+        );
+        let mk = |cls: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(cls.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("list")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("item")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let (mx, my) = frame.scrollable.get(&Key(1)).copied().unwrap();
+        let want = 50.0_f32 * (45f32.to_radians().sin() + 45f32.to_radians().cos()) - 50.0;
+        assert!((mx - want).abs() < 1e-3, "max_x {mx} want {want}");
+        assert!((my - want).abs() < 1e-3, "max_y {my} want {want}");
+    }
+
+    #[test]
+    fn scroll_range_transform_up_extends_nothing() {
+        // 三期⑥：负向平移（AABB 越过左/上边界）不扩 LTR 正向量程；
+        // 全部越出后仅 padding box 自身贡献 → 不可滚。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.list { width: 200px; height: 100px; overflow-y: scroll; } \
+                     div.item { width: 200px; height: 50px; transform: translate(0, -100px); }"
+                )
+                .is_clean()
+        );
+        let mk = |cls: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(cls.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("list")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("item")).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        assert!(!frame.scrollable.contains_key(&Key(1)));
     }
 
     #[test]

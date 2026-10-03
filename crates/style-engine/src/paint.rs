@@ -724,8 +724,8 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
 }
 
 /// 2D 仿射复合 [a, b, c, d, e, f]（列向量约定：x' = a·x + c·y + e）。
-/// 返回 m∘n（先 n 后 m）：M = M·N 的块乘。
-fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
+/// 返回 m∘n（先 n 后 m）：M = M·N 的块乘。三期⑥：滚动量程结算复用。
+pub(crate) fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
     [
         m[0] * n[0] + m[2] * n[1],
         m[1] * n[0] + m[3] * n[1],
@@ -741,7 +741,8 @@ fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
 /// 默认 50% 50%：A = T(o)·M·T(−o)。rotate 顺时针（y-down 屏幕坐标）。
 /// op 坐标为视口系（盒左上角在 (x,y)），origin = (x,y) + 盒内百分比基点
 /// ——二期⑦修复：旧实现漏加盒偏移，offset 盒绕错中心旋转/整体错位。
-fn resolve_transform_affine(
+/// 三期⑥：滚动量程结算复用同一终结（pub(crate)）。
+pub(crate) fn resolve_transform_affine(
     style: &ComputedStyle,
     x: f32,
     y: f32,
