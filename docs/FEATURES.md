@@ -53,6 +53,7 @@
 - 字体描述符深化：unicode-range / font-display / ascent-override 等无引擎语义（第五批⑯已记 @font-face 主体契约）。重估条件：多字重/子集化字体需求。
 - 背景图片 repeat / size / position：当前拉伸至 padding box MVP。重估条件：视觉需求出现（repeat/cover/contain 是独立绘制批）。
 - git-lfs（第五批㉗暂缓，记录重估条件）：字体基准资产（NotoSansSC.ttf/DejaVuSans.ttf 等 demo+conformance 双侧共享）暂以普通 git 对象入库；重估条件=仓库二进制总量显著增长（如新增多字重字体族/图片基准资产）或克隆体积成为协作痛点——届时迁 LFS 需同步改 CI checkout（lfs: true）与 dumper 路径无差（file 语义不变）
+- DisplayList serde 序列化（阶段3 决策）：`DisplayList`/`PaintOp` v1 不提供 serde derive——不引入 serde 依赖（C4 依赖纪律），且 `PaintOp` 为中立公共枚举（`#[non_exhaustive]`），宿主可零成本自行编写转换层。重估条件=出现跨进程合成、录制回放或可视化调试工具链需求；届时优先独立 feature gate（如 `serde`）而非默认依赖
 
 ## MVP 实现偏差核对（T4/T6 落地后现状；分级冻结见各条【】标注）
 

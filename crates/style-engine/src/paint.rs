@@ -237,6 +237,7 @@ pub struct TextSpanPaint {
 
 /// 一帧的绘制清单。
 #[derive(Debug, Clone, Default, PartialEq)]
+#[must_use = "绘制清单被丢弃则该帧无法渲染"]
 pub struct DisplayList {
     /// 树序基元序列。
     pub ops: Vec<PaintOp>,

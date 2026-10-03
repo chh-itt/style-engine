@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 
 /// 单节点计算样式（全集物化）。
 #[derive(Debug, Default, Clone, PartialEq)]
+#[must_use = "计算样式被丢弃则该次级联求解无意义"]
 pub struct ComputedStyle {
     values: BTreeMap<PropertyId, DeclValue>,
     /// 已解析 custom properties（终值文本）。

@@ -20,9 +20,47 @@
 //! 帧计算是纯的（同输入同输出、幂等）。错误双轨：CSS 内容错误按规范
 //! 容错并记录在 [`ParseReport`]；宿主违约以 [`ContractError`] 上浮。
 //!
+//! # 快速上手
+//!
+//! ```rust
+//! use style_engine::{StyleEngine, StyleNode};
+//!
+//! # fn main() -> Result<(), style_engine::ContractError> {
+//! let mut engine = StyleEngine::new();
+//! assert!(engine.set_stylesheet(".btn { background-color: #3366cc; }").is_clean());
+//!
+//! // 宿主树镜像：根 1 → 按钮 2（K 取宿主自己的 Copy + Eq + Hash 键）。
+//! engine.insert(None, 1, StyleNode::default())?;
+//! let mut btn = StyleNode::default();
+//! btn.name = Some("button".into());
+//! btn.classes = ["btn"].iter().map(|s| s.to_string()).collect();
+//! engine.insert(Some(1), 2, btn)?;
+//!
+//! let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+//! let hit = frame.find(2).expect("node laid out");
+//! assert!(hit.width > 0.0);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # API 冻结策略（C3）
+//!
+//! - 公共枚举全量 `#[non_exhaustive]`（变体集=演进面，宿主 `match` 必带
+//!   通配臂）；结构体按宿主构造面决策——[`StyleNode`](crate::tree::StyleNode)
+//!   等宿主可构造类型保持穷举。
+//! - `#![deny(missing_docs)]`：公共项无文档即编译失败。
+//! - 线程承诺：`StyleEngine`/`Frame`/`ComputedStyle`/`DisplayList` 均
+//!   `Send + Sync`（静态断言锁定）。
+//! - `DisplayList` 序列化：v1 **不提供** serde 实现（不引入 serde 依赖；
+//!   `PaintOp` 为中立公共枚举，宿主可自行编写转换）。重估条件=出现跨进程
+//!   合成或录制回放需求。
+//!
 //! 设计文档见仓库根目录 `CONTEXT.md` 与 `docs/adr/`。
 
-#![forbid(unsafe_code)]
+// unsafe 策略：全 crate 禁止（deny），唯一豁免点 = engine.rs 的
+// SendSyncTaffy（taffy 0.14 CompactLength nan-boxing 非 Send/Sync 的
+// 包装，见该类型 SAFETY 注释）——其余任何 unsafe 直接编译失败。
+#![deny(unsafe_code)]
 // 阶段3 API 冻结：公共项文档强制（C3 契约——新增 pub 项必须带文档）。
 #![deny(missing_docs)]
 // 阶段3 API 冻结：公共枚举全量 #[non_exhaustive]（变体集=演进面，宿主
@@ -54,6 +92,7 @@ pub use error::{ContractError, ParseReport};
 pub use paint::{DisplayList, PaintOp};
 #[cfg(feature = "text")]
 pub use text::TextSystem;
+pub use tree::StyleNode;
 
 // 公共再导出：下游（如 style-engine-soft 零依赖测试）构造 FontFamilyList
 // 等属性值需要 SmallVec 容器——复用本 crate 锁定版本，避免版本漂移。

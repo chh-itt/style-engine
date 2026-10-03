@@ -15,7 +15,10 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# 阶段3：forbid → deny——唯一豁免点 = style-engine SendSyncTaffy（taffy
+# 0.14 CompactLength nan-boxing 非 Send/Sync 的包装，SAFETY 论证见该类型
+# 文档）；其余任何 unsafe 仍直接编译失败。
+unsafe_code = "deny"
 
 [workspace.dependencies]
 # --- CSS 语法层（servo 系，ADR-0004） ---

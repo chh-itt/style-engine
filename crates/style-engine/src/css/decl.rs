@@ -171,7 +171,12 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationBlockParser {
     ) -> Result<(), cssparser::ParseError<Self::Error>> {
         let loc = input.current_source_location();
         let warn = |slf: &mut Self, msg: String| {
-            slf.report.push(loc.line + 1, loc.column + 1, msg);
+            slf.report.push(
+                loc.line + 1,
+                loc.column + 1,
+                crate::error::ParseSeverity::Dropped,
+                msg,
+            );
         };
         let start_state = input.state();
         let mut buf = TokenBuf::new();

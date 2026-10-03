@@ -15,6 +15,7 @@ use std::hash::Hash;
 
 /// 布局帧条目（border-box；坐标相对视口、滚动前）。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use = "布局结果被丢弃则该节点无法绘制"]
 pub struct LayoutEntry<K: Copy> {
     /// 宿主节点键。
     pub key: K,
@@ -30,6 +31,7 @@ pub struct LayoutEntry<K: Copy> {
 
 /// 一帧的布局与绘制结果。
 #[derive(Debug, Clone)]
+#[must_use = "帧结果（布局+DisplayList）被丢弃则该帧无法绘制"]
 pub struct Frame<K: Copy> {
     /// 单调递增帧号。
     pub generation: u64,
@@ -74,8 +76,69 @@ struct MulticolState {
     /// 三期⑤a：断口 margin-top 截断的原值备份（taffy 层）——
     /// 不再列首 / 回退块流时恢复；restyle 时清空（map_style 全量重写
     /// 已把 margin 复位为样式真值）。
-    truncated: HashMap<NodeId, taffy::prelude::LengthPercentageAuto>,
+    truncated: HashMap<NodeId, MarginTopBackup>,
 }
+
+/// 断口 margin-top 备份的 Send/Sync 镜像：taffy 0.14 `LengthPercentageAuto`
+/// 为 nan-boxing（内部 `*const ()`），非 `Send`/`Sync`，直接入 `HashMap`
+/// 会拖垮 `StyleEngine` 的线程承诺（阶段3 静态断言）。改用显式三态镜像
+/// 记录，恢复时重建；margin 不产生 calc 值（CSS 层已解析），其余 tag 不
+/// 可达（按 Auto 兜底）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MarginTopBackup {
+    Length(f32),
+    Percent(f32),
+    Auto,
+}
+
+impl MarginTopBackup {
+    fn capture(v: taffy::prelude::LengthPercentageAuto) -> Self {
+        use taffy::style::CompactLength;
+        let raw = v.into_raw();
+        match raw.tag() {
+            CompactLength::LENGTH_TAG => Self::Length(raw.value()),
+            CompactLength::PERCENT_TAG => Self::Percent(raw.value()),
+            _ => Self::Auto,
+        }
+    }
+
+    fn restore(self) -> taffy::prelude::LengthPercentageAuto {
+        match self {
+            Self::Length(v) => taffy::prelude::LengthPercentageAuto::length(v),
+            Self::Percent(v) => taffy::prelude::LengthPercentageAuto::percent(v),
+            Self::Auto => taffy::prelude::LengthPercentageAuto::auto(),
+        }
+    }
+}
+
+/// taffy 0.14 `TaffyTree` 的 Send/Sync 包装：`TaffyTree` 类型面非
+/// `Send`/`Sync`——内部 `taffy::Style` 携带 nan-boxing 的 `CompactLength`
+/// （`*const ()`）。该指针仅在 taffy `calc` 特性下承载 calc 句柄；引擎
+/// 从不构造 taffy calc 值（CSS `calc()` 在解析/计算层解析为纯 f32），
+/// 所有 `CompactLength` 均为 NaN-boxed 位模式载荷（等同 f32），跨线程
+/// 转移安全。上游已知限制：taffy 未为 CompactLength 提供 Send/Sync impl。
+struct SendSyncTaffy(taffy::TaffyTree);
+
+impl std::ops::Deref for SendSyncTaffy {
+    type Target = taffy::TaffyTree;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SendSyncTaffy {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+// SAFETY: 见类型文档——引擎不构造 taffy calc 值，`CompactLength` 的
+// `*const ()` 恒为 NaN-boxed 位模式（非真实指针）；`TaffyTree` 其余
+// 字段均为普通数据。
+#[allow(unsafe_code)]
+unsafe impl Send for SendSyncTaffy {}
+#[allow(unsafe_code)]
+unsafe impl Sync for SendSyncTaffy {}
 
 /// 样式引擎实例。K 为宿主节点键（Copy + Eq + Hash）。
 pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
@@ -97,7 +160,7 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     scale: f32,
     now: f64,
     // taffy 镜像
-    taffy: taffy::TaffyTree,
+    taffy: SendSyncTaffy,
     taffy_root: Option<taffy::NodeId>,
     taffy_node: HashMap<NodeId, taffy::NodeId>,
     /// ①calc 直通：延迟结算条目（restyle 重建，settle_calc 消费）。
@@ -174,7 +237,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             viewport: (0.0, 0.0),
             scale: 1.0,
             now: 0.0,
-            taffy: taffy::TaffyTree::new(),
+            taffy: SendSyncTaffy(taffy::TaffyTree::new()),
             #[cfg(feature = "text")]
             text: crate::text::TextSystem::new(),
             taffy_root: None,
@@ -656,10 +719,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.epoch
     }
 
+    /// 诊断 API（C6 可观测性）：读取节点最近一次 restyle 的计算样式。
+    /// 帧前调用返回上一帧样式；未知 key 返回 None——诊断路径不上浮
+    /// [`ContractError`](crate::error::ContractError)。
+    #[must_use]
+    pub fn computed_style(&self, key: K) -> Option<&ComputedStyle> {
+        let id = *self.key_to_node.get(&key)?;
+        self.styles.get(&id)
+    }
+
     // ---------- 帧驱动 ----------
 
     /// 推进一帧：结构同步 → 重算样式 → taffy 布局 → 收集布局盒。
     pub fn frame(&mut self, viewport: (f32, f32), scale: f32, now: f64) -> Frame<K> {
+        // C6 可观测性：帧级 span（`style_engine::engine` target；无订阅者时
+        // 惰性构建零成本）。pass 字段随收敛环逐 pass 记录。
+        let frame_span = tracing::info_span!(target: "style_engine::engine", "frame", pass = tracing::field::Empty);
+        let _frame_guard = frame_span.enter();
         self.viewport = viewport;
         self.scale = scale;
         self.now = now;
@@ -671,6 +747,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // @container 规则单 pass，与拆分前逐位等价）。
         let cap = if self.sheet.has_container_rules { 3 } else { 1 };
         for pass in 0..cap {
+            frame_span.record("pass", pass);
             if self.dirty_style {
                 self.restyle();
             }
@@ -1183,7 +1260,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 
     fn rebuild_taffy(&mut self) {
-        self.taffy = taffy::TaffyTree::new();
+        self.taffy = SendSyncTaffy(taffy::TaffyTree::new());
         self.taffy_node.clear();
         self.taffy_root = None;
         self.calc_deferred.clear();
@@ -1822,7 +1899,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     for (&id, &orig) in &prev.truncated {
                         if let Some(&tid) = self.taffy_node.get(&id) {
                             if let Ok(mut ts) = self.taffy.style(tid).cloned() {
-                                ts.margin.top = orig;
+                                ts.margin.top = orig.restore();
                                 let _ = self.taffy.set_style(tid, ts);
                             }
                         }
@@ -2224,7 +2301,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let orig = st.truncated.remove(&id);
                 if let (Some(&tid), Some(orig)) = (self.taffy_node.get(&id), orig) {
                     if let Ok(mut ts) = self.taffy.style(tid).cloned() {
-                        ts.margin.top = orig;
+                        ts.margin.top = orig.restore();
                         let _ = self.taffy.set_style(tid, ts);
                     }
                 }
@@ -2250,10 +2327,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let zero =
                     <taffy::prelude::LengthPercentageAuto as taffy::prelude::TaffyZero>::ZERO;
                 if ts.margin.top == zero {
-                    st.truncated.entry(*c).or_insert(zero);
+                    st.truncated
+                        .entry(*c)
+                        .or_insert(MarginTopBackup::capture(zero));
                     continue;
                 }
-                st.truncated.insert(*c, ts.margin.top);
+                st.truncated
+                    .insert(*c, MarginTopBackup::capture(ts.margin.top));
                 ts.margin.top = zero;
                 let _ = self.taffy.set_style(tid, ts);
                 trunc_changed = true;
@@ -2737,6 +2817,19 @@ fn has_declared_len(cs: &ComputedStyle, pid: crate::css::property::PropertyId) -
 mod tests {
     use super::*;
     use crate::tree::NodeState;
+
+    /// API 冻结（阶段3）：公共类型线程安全承诺（C3）——静态断言防回归。
+    /// StyleEngine/Frame 须可跨线程移动（宿主在渲染线程消费 DisplayList）。
+    #[test]
+    fn public_types_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<StyleEngine<Key>>();
+        assert_send_sync::<Frame<Key>>();
+        assert_send_sync::<ComputedStyle>();
+        assert_send_sync::<crate::paint::DisplayList>();
+        assert_send_sync::<ParseReport>();
+        assert_send_sync::<crate::error::ContractError>();
+    }
 
     #[test]
     fn rich_text_spans_reach_paint() {

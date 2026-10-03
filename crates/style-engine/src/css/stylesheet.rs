@@ -726,6 +726,7 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
                 self.report.push(
                     loc.line + 1,
                     loc.column + 1,
+                    crate::error::ParseSeverity::Dropped,
                     format!("invalid selector '{source}': {msg}"),
                 );
                 Err(ParseError::unexpected_token())
@@ -771,6 +772,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     self.report.push(
                         loc.line + 1,
                         loc.column + 1,
+                        crate::error::ParseSeverity::Dropped,
                         format!("invalid @media condition '{name}'"),
                     );
                     Err(ParseError::unexpected_token())
@@ -785,6 +787,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     self.report.push(
                         loc.line + 1,
                         loc.column + 1,
+                        crate::error::ParseSeverity::Dropped,
                         format!("invalid @container condition '{name}'"),
                     );
                     Err(ParseError::unexpected_token())
@@ -816,6 +819,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     self.report.push(
                         loc.line + 1,
                         loc.column + 1,
+                        crate::error::ParseSeverity::Dropped,
                         format!("invalid @keyframes name '{name}'"),
                     );
                     Err(ParseError::unexpected_token())
@@ -827,6 +831,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
             self.report.push(
                 loc.line + 1,
                 loc.column + 1,
+                crate::error::ParseSeverity::Skipped,
                 format!("unsupported at-rule '@{name}' skipped"),
             );
             Err(ParseError::unexpected_token())
@@ -975,6 +980,7 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for KeyframesParser {
             self.report.push(
                 loc.line + 1,
                 loc.column + 1,
+                crate::error::ParseSeverity::Dropped,
                 "invalid keyframe selector".to_string(),
             );
             return Err(ParseError::unexpected_token());
@@ -1052,8 +1058,12 @@ pub fn parse_stylesheet(source: &str) -> Stylesheet {
         }
     }
     for (line, column) in skipped {
-        sp.report
-            .push(line, column, "invalid rule skipped".to_string());
+        sp.report.push(
+            line,
+            column,
+            crate::error::ParseSeverity::Dropped,
+            "invalid rule skipped".to_string(),
+        );
     }
     Stylesheet {
         has_container_rules: sp.rules.iter().any(|r| r.container.is_some()),

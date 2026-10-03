@@ -20,6 +20,31 @@
   存量 0 缺失，新增 pub 项无文档即编译失败。
 - 公共枚举冻结策略记录于 `crates/style-engine/src/lib.rs` 模块头：枚举全量
   non_exhaustive；结构体按宿主构造面决策（StyleNode 等宿主可构造类型保持穷举）。
+- **#[must_use] 提示**（API 冻结·下）：`Frame`/`LayoutEntry`/`ComputedStyle`/
+  `DisplayList` 类型级 + `StyleEngine::computed_style` 访问器——结果被丢弃即编译警告。
+- **线程承诺静态断言**：`StyleEngine`/`Frame`/`ComputedStyle`/`DisplayList`/
+  `ParseReport`/`ContractError` 均 `Send + Sync`（测试锁定）。落地面两处：
+  taffy 0.14 `CompactLength`（nan-boxing `*const ()`）非 `Send`/`Sync`（上游
+  未提供 impl）——多列断口 margin 备份改显式三态镜像（`MarginTopBackup`），
+  `TaffyTree` 经 `SendSyncTaffy` 包装（引擎不构造 taffy calc 值，该指针恒为
+  位模式载荷，SAFETY 注释论证）；相应地 crate 级 `forbid(unsafe_code)` 放宽为
+  `deny` + 唯一豁免点（`SendSyncTaffy` 两个 unsafe impl，精确 `#[allow]`），
+  其余任何 unsafe 仍直接编译失败。
+- **`ParseWarning` 增 `severity: ParseSeverity`**（`#[non_exhaustive]` 枚举：
+  `Dropped`=无效内容按规范丢弃 / `Skipped`=认识但跳过）；`ParseReport::push`
+  签名加 severity 参数（crate 内私有面）；全部 7 处上报点定级完成。
+- **诊断 API（C6）**：`StyleEngine::computed_style(key) -> Option<&ComputedStyle>`
+  ——宿主可在帧外检查任意节点的级联求解结果。
+- **可观测性**：帧级 `tracing` span（`target: style_engine::engine`，`pass` 字段
+  记录收敛轮次）；`ParseReport::push` 同步发 `warn!`（`target: style_engine::css`，
+  含 line/column/severity）。tracing 已是 workspace 依赖，零新增。
+- **`ContractError` source 链契约**：全 5 变体均为根因，`Error::source()` 恒
+  `None`（测试锁定）。
+- **crate 级 rustdoc**：`lib.rs` 新增「快速上手」doc-test（解析→插树→帧→命中查询
+  全链路）与「API 冻结策略（C3）」段。
+- **`DisplayList` serde 决策**：v1 不提供序列化实现（不引入 serde 依赖；宿主可
+  基于 `PaintOp` 中立枚举自写转换）；重估条件=跨进程合成/录制回放需求，届时优先
+  独立 feature gate。记录于 `lib.rs` 模块头与 `docs/FEATURES.md` T2 第 17 项。
 
 ### 阶段2 — 特性扩展（0.1.0 之上，全部为增量）
 

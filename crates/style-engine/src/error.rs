@@ -43,8 +43,23 @@ impl fmt::Display for ContractError {
 
 impl std::error::Error for ContractError {}
 
+// 阶段3 API 冻结：ContractError 全变体皆为根因（不包装底层错误），
+// `Error::source()` 恒为 None——宿主无需（也无法）沿 source 链下钻；
+// 后续如引入包装型变体，按 `Error::source` 语义实现链条。
+
+/// 警告严重级（CSS 容错语义分类）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParseSeverity {
+    /// 无效内容已按 CSS 规范丢弃（声明/选择器/prelude 不生效）。
+    Dropped,
+    /// 语法认识但按规范或能力边界整条跳过（如未支持的 at-rule）。
+    Skipped,
+}
+
 /// 单条 CSS 容错记录（未知声明、无效值等）。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParseWarning {
     /// 1-based 行号。
     pub line: u32,
@@ -52,6 +67,8 @@ pub struct ParseWarning {
     pub column: u32,
     /// 人读信息，例如 `unknown declaration 'colour'`。
     pub message: String,
+    /// 严重级（容错语义分类，见 [`ParseSeverity`]）。
+    pub severity: ParseSeverity,
 }
 
 /// 一次 Stylesheet 解析的容错报告。
@@ -72,18 +89,46 @@ impl ParseReport {
         self.warnings.is_empty()
     }
 
-    pub(crate) fn push(&mut self, line: u32, column: u32, message: impl Into<String>) {
+    pub(crate) fn push(
+        &mut self,
+        line: u32,
+        column: u32,
+        severity: ParseSeverity,
+        message: impl Into<String>,
+    ) {
         let message = message.into();
-        tracing::warn!(target: "style_engine::css", line, column, message, "css parse warning");
+        tracing::warn!(target: "style_engine::css", line, column, ?severity, message, "css parse warning");
         self.warnings.push(ParseWarning {
             line,
             column,
             message,
+            severity,
         });
     }
 
     /// 合并另一份报告（顺序保留），常用于子解析器上报。
     pub(crate) fn extend(&mut self, other: ParseReport) {
         self.warnings.extend(other.warnings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 阶段3 API 冻结：ContractError 全变体为根因，source() 恒 None。
+    #[test]
+    fn contract_error_is_always_root_cause() {
+        use std::error::Error;
+        for e in [
+            ContractError::UnknownNode,
+            ContractError::DuplicateNode,
+            ContractError::Cycle,
+            ContractError::RootExists,
+            ContractError::InvalidSpan,
+        ] {
+            let boxed: Box<dyn Error> = Box::new(e);
+            assert!(boxed.source().is_none());
+        }
     }
 }
