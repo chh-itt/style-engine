@@ -78,6 +78,13 @@ pub enum PropertyId {
     /// 三期⑤b：多列跨列（none|all）——all 子件切断列流，前后各成段
     /// 独立平衡（行包装模型）。
     ColumnSpan,
+    /// 三期⑤c：多列列规三长手。style 复用 BorderStyle 值族（none/hidden
+    /// 不画；v1 仅 solid 实绘，dashed/dotted 近似 solid——B 级偏差）；
+    /// width 关键字物化定值（缺席=medium）；color 复用 Color 值族
+    /// （初始 currentcolor，v1 不继承）。
+    ColumnRuleWidth,
+    ColumnRuleStyle,
+    ColumnRuleColor,
     // 绘制
     BackgroundColor,
     BackgroundImage,
@@ -175,6 +182,9 @@ impl PropertyId {
         Self::ColumnWidth,
         Self::BreakInside,
         Self::ColumnSpan,
+        Self::ColumnRuleWidth,
+        Self::ColumnRuleStyle,
+        Self::ColumnRuleColor,
         Self::BackgroundColor,
         Self::BackgroundImage,
         Self::BorderTopLeftRadius,
@@ -255,6 +265,9 @@ impl PropertyId {
             Self::ColumnWidth => "column-width",
             Self::BreakInside => "break-inside",
             Self::ColumnSpan => "column-span",
+            Self::ColumnRuleWidth => "column-rule-width",
+            Self::ColumnRuleStyle => "column-rule-style",
+            Self::ColumnRuleColor => "column-rule-color",
             Self::FlexDirection => "flex-direction",
             Self::FlexWrap => "flex-wrap",
             Self::FlexGrow => "flex-grow",
@@ -374,6 +387,12 @@ pub enum DeclValue {
     /// 初始 none。all 子件切断列流，前后各成段独立平衡（引擎行包装
     /// 模型，FEATURES.md ⑤b 边界）。
     ColumnSpan(Option<bool>),
+    /// column-rule-width（三期⑤c）：thin/medium/thick → 定值 1/3/5px；
+    /// 无 none 关键字（列规有无由 column-rule-style:none 表达），初始
+    /// medium（声明缺席时引擎回退 3px）。
+    ColumnRuleWidth(Option<LengthPercentage>),
+    /// column-rule-style（三期⑤c）：复用 BorderStyle 值族，初始 none。
+    ColumnRuleStyle(BorderStyle),
     // 动画描述符（第五批⑰）：不可动画、不参与 DeclValue 插值
     /// animation-name：none → None。
     AnimationName(Option<String>),
@@ -718,6 +737,53 @@ pub fn parse_column_span(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         }
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+/// border-style 关键字族（none/hidden/solid/dashed/dotted）——三期⑤c
+/// column-rule-style 复用同一关键字集。
+pub(crate) fn parse_border_style_keywords(p: &mut Parser<'_>) -> ValResult<BorderStyle> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "none" | "hidden" => BorderStyle::None,
+            "solid" => BorderStyle::Solid,
+            "dashed" => BorderStyle::Dashed,
+            "dotted" => BorderStyle::Dotted,
+            _ => return None,
+        ))
+    })
+}
+
+/// column-rule-width（三期⑤c）：<length [0,∞]>|thin|medium|thick；关键字
+/// 物化定值（thin=1/medium=3/thick=5px）。无 none 关键字（与 border-width
+/// 不同——列规的有无由 column-rule-style:none 表达）；负长度的钳制由
+/// 布局侧 max(0) 承担。
+pub fn parse_column_rule_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let kw = p.try_parse(|p| -> ValResult<LengthPercentage> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) => {
+                if name.eq_ignore_ascii_case("thin") {
+                    Ok(LengthPercentage::Px(1.0))
+                } else if name.eq_ignore_ascii_case("medium") {
+                    Ok(LengthPercentage::Px(3.0))
+                } else if name.eq_ignore_ascii_case("thick") {
+                    Ok(LengthPercentage::Px(5.0))
+                } else {
+                    Err(p.new_error_for_next_token())
+                }
+            }
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    match kw {
+        Ok(len) => Ok(DeclValue::ColumnRuleWidth(Some(len))),
+        Err(_) => parse_length_percentage(p).map(|l| DeclValue::ColumnRuleWidth(Some(l))),
+    }
+}
+
+/// column-rule-style（三期⑤c）：关键字族与 border-style 相同。
+pub fn parse_column_rule_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_border_style_keywords(p).map(DeclValue::ColumnRuleStyle)
 }
 
 /// z-index：auto → ZIndex(None)；数字 → ZIndex(Some(n))。
@@ -1768,6 +1834,8 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::ColumnCount => parse_column_count(p),
         P::BreakInside => parse_break_inside(p),
         P::ColumnSpan => parse_column_span(p),
+        P::ColumnRuleWidth => parse_column_rule_width(p),
+        P::ColumnRuleStyle => parse_column_rule_style(p),
         P::AnimationName => parse_animation_name(p),
         P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
         P::AnimationIterationCount => parse_iteration_count(p),
@@ -1780,7 +1848,8 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         | P::BorderTopColor
         | P::BorderRightColor
         | P::BorderBottomColor
-        | P::BorderLeftColor => parse_color(p),
+        | P::BorderLeftColor
+        | P::ColumnRuleColor => parse_color(p),
         P::Display => parse_display(p),
         P::Position => parse_position(p),
         P::OverflowX | P::OverflowY => parse_overflow(p),

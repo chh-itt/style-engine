@@ -9,8 +9,8 @@
 
 use crate::css::property::{
     BorderStyle, DeclValue, PropertyId, parse_border_style, parse_border_width, parse_color,
-    parse_column_count, parse_declaration, parse_flex_direction, parse_flex_wrap, parse_len,
-    parse_len_auto, parse_overflow,
+    parse_column_count, parse_column_rule_style, parse_column_rule_width, parse_declaration,
+    parse_flex_direction, parse_flex_wrap, parse_len, parse_len_auto, parse_overflow,
 };
 use crate::css::value::{ColorValue, LengthPercentage, ValResult, parse_number};
 use crate::error::ParseReport;
@@ -320,6 +320,7 @@ fn shorthand_exists(name: &str) -> bool {
             | "overflow"
             | "gap"
             | "columns"
+            | "column-rule"
             | "animation"
             | "border-radius"
             | "border-width"
@@ -479,6 +480,55 @@ fn expand_shorthand(
                 (
                     P::ColumnCount,
                     DeclValue::ColumnCount(count.unwrap_or(None)),
+                ),
+            ]
+        }
+        "column-rule" => {
+            // 三期⑤c 列规简写：<'column-rule-width'> || <'column-rule-style'>
+            // || <'column-rule-color'>（任一顺序、至少一项；未指定长手重置
+            // 初始——width medium、style none、color currentcolor）。
+            let mut width: Option<DeclValue> = None;
+            let mut style: Option<DeclValue> = None;
+            let mut color: Option<DeclValue> = None;
+            while !p.is_exhausted() {
+                let mut progressed = false;
+                if width.is_none() {
+                    if let Ok(v) = p.try_parse(parse_column_rule_width) {
+                        width = Some(v);
+                        progressed = true;
+                    }
+                }
+                if !progressed && style.is_none() {
+                    if let Ok(v) = p.try_parse(parse_column_rule_style) {
+                        style = Some(v);
+                        progressed = true;
+                    }
+                }
+                if !progressed && color.is_none() {
+                    if let Ok(v) = p.try_parse(parse_color) {
+                        color = Some(v);
+                        progressed = true;
+                    }
+                }
+                if !progressed {
+                    return Err(p.new_error_for_next_token());
+                }
+            }
+            if width.is_none() && style.is_none() && color.is_none() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![
+                (
+                    P::ColumnRuleWidth,
+                    width.unwrap_or(DeclValue::ColumnRuleWidth(Some(LengthPercentage::Px(3.0)))),
+                ),
+                (
+                    P::ColumnRuleStyle,
+                    style.unwrap_or(DeclValue::ColumnRuleStyle(BorderStyle::None)),
+                ),
+                (
+                    P::ColumnRuleColor,
+                    color.unwrap_or(DeclValue::Color(ColorValue::CurrentColor)),
                 ),
             ]
         }
@@ -1022,6 +1072,77 @@ mod tests {
             DeclValue::LenAuto(Some(LengthPercentage::Px(100.0)))
         ));
         assert!(matches!(parsed(&b.decls[1]), DeclValue::ColumnCount(None)));
+    }
+
+    #[test]
+    fn column_rule_shorthand_and_longhands() {
+        // 三期⑤c 列规简写：<'column-rule-width'> || <'column-rule-style'>
+        // || <'column-rule-color'>；未指定长手重置初始（width medium、
+        // style none、color currentcolor）。
+        let (b, r) = block("column-rule: 4px solid red");
+        assert!(r.is_clean());
+        assert_eq!(
+            b.decls.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![
+                PropertyId::ColumnRuleWidth,
+                PropertyId::ColumnRuleStyle,
+                PropertyId::ColumnRuleColor,
+            ]
+        );
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ColumnRuleWidth(Some(LengthPercentage::Px(4.0)))
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ColumnRuleStyle(BorderStyle::Solid)
+        ));
+        assert!(matches!(
+            parsed(&b.decls[2]),
+            DeclValue::Color(ColorValue::Absolute(_))
+        ));
+        // 任一顺序：仅色 + 样式 → width 重置 medium（物化 3px）。
+        let (b, r) = block("column-rule: red dashed");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ColumnRuleWidth(Some(LengthPercentage::Px(3.0)))
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ColumnRuleStyle(BorderStyle::Dashed)
+        ));
+        // 关键字宽度物化（thin=1/medium=3/thick=5）；hidden 归 none。
+        let (b, r) = block("column-rule: thick hidden");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ColumnRuleWidth(Some(LengthPercentage::Px(5.0)))
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ColumnRuleStyle(BorderStyle::None)
+        ));
+        // 长手直用：width 关键字/长度；无 none 关键字（列规有无由 style:none 表达）。
+        let (b, r) = block(
+            "column-rule-width: thin; column-rule-style: dotted; \
+                            column-rule-color: currentcolor",
+        );
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ColumnRuleWidth(Some(LengthPercentage::Px(1.0)))
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ColumnRuleStyle(BorderStyle::Dotted)
+        ));
+        assert!(matches!(
+            parsed(&b.decls[2]),
+            DeclValue::Color(ColorValue::CurrentColor)
+        ));
+        let (b, _) = block("column-rule-width: none");
+        assert!(b.decls.is_empty(), "none 非法列规宽（整条丢弃）");
     }
 
     #[test]

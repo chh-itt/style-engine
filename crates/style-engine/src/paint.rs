@@ -212,6 +212,18 @@ impl PartialEq for ImageRes {
     }
 }
 
+/// 多列列规条带（三期⑤c）：settle_column_rules 结算的几何，坐标相对
+/// multicol 容器 border-box 原点（paint 层加容器原点）；引擎逐帧全量
+/// 重建（列平衡几何随内容漂移，无稳态缓存）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnRuleSeg {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: AlphaColor<Srgb>,
+}
+
 /// 绘制输入上下文（树镜像 + 布局 + 滚动 + 环境）。
 pub struct PaintCtx<'a> {
     pub tree: &'a StyleTree,
@@ -225,6 +237,8 @@ pub struct PaintCtx<'a> {
     pub wrap_widths: &'a HashMap<NodeId, Option<f32>>,
     /// 背景图注册表（第五批⑨）：url() 引用 → 宿主预解码 RGBA。
     pub images: &'a HashMap<String, ImageRes>,
+    /// 多列列规条带（三期⑤c）：NodeId → 段列表（引擎逐帧重建）。
+    pub column_rules: &'a HashMap<NodeId, Vec<ColumnRuleSeg>>,
 }
 
 /// 构建绘制清单（树序遍历；布局按节点给出 border-box）。
@@ -537,6 +551,22 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         });
     }
 
+    // 3b) 多列列规（三期⑤c）：settle_column_rules 结算的条带，坐标相对
+    // 容器 border-box 原点。装饰绘制序：内容之下（子件前）、边框之上——
+    // 列规只落在列间 gap 中，不与内容重叠（css-multicol）。
+    if let Some(segs) = ctx.column_rules.get(&id) {
+        for seg in segs {
+            out.ops.push(PaintOp::FillRect {
+                x: x + seg.x,
+                y: y + seg.y,
+                width: seg.width,
+                height: seg.height,
+                radius: [0.0; 8],
+                color: seg.color,
+            });
+        }
+    }
+
     // 4) 文本（叶内容；原点 = 内容盒左上）
     if let Some(text) = tree.node(id).text.as_ref() {
         if !text.is_empty() {
@@ -768,7 +798,11 @@ fn resolve_transform_affine(
 }
 
 /// currentColor / light-dark 终结为绝对 sRGBA。
-fn resolve_color(cv: &ColorValue, style: &ComputedStyle, env: &MediaEnv) -> AlphaColor<Srgb> {
+pub(crate) fn resolve_color(
+    cv: &ColorValue,
+    style: &ComputedStyle,
+    env: &MediaEnv,
+) -> AlphaColor<Srgb> {
     match (*cv).pick_scheme(env.dark) {
         ColorValue::Absolute(c) => c,
         ColorValue::CurrentColor => match style.color() {
@@ -862,6 +896,7 @@ mod tests {
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
             images: &images,
+            column_rules: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
@@ -995,6 +1030,7 @@ mod tests {
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
             images: &images,
+            column_rules: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望顺序：a(x=10) → c(x=210)（流带）→ b(x=110)（flex 子项 z=5 进
@@ -1047,6 +1083,7 @@ mod tests {
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
             images: &images,
+            column_rules: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望顺序：b(z0,x=110) → c(z1,x=210) → a(z2,x=10)；根无背景不产生 FillRect
@@ -1109,6 +1146,7 @@ mod tests {
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
             images: &images,
+            column_rules: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望：n1(Neg) → n2(Flow) → n3(auto) → n5(faded) → n4(z2)
@@ -1344,6 +1382,7 @@ mod tests {
             spans: &HashMap::new(),
             wrap_widths: &HashMap::new(),
             images: &images,
+            column_rules: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         match &out.ops[0] {
@@ -1367,6 +1406,56 @@ mod tests {
         let (tree, id, style) = setup("background-image: url(res://missing)", None);
         let out = run(&tree, id, style, &HashMap::new());
         assert!(out.ops.is_empty(), "{:?}", out.ops);
+    }
+
+    #[test]
+    fn column_rule_strips_paint_relative_to_container_origin() {
+        // 三期⑤c：settle_column_rules 条带（相对容器 border-box 原点）→
+        // FillRect 视口系 = 容器原点 + 条带偏移；radius 全零、纯色直传。
+        let (tree, id, style) = setup("column-rule: 4px solid red", None);
+        let mut styles = HashMap::new();
+        styles.insert(id, style);
+        let mut layout = HashMap::new();
+        layout.insert(id, (10.0, 20.0, 400.0, 90.0));
+        let mut rules: HashMap<NodeId, Vec<ColumnRuleSeg>> = HashMap::new();
+        rules.insert(
+            id,
+            vec![ColumnRuleSeg {
+                x: 198.0,
+                y: 0.0,
+                width: 4.0,
+                height: 90.0,
+                color: AlphaColor::new([1.0, 0.0, 0.0, 1.0]),
+            }],
+        );
+        let mut out = DisplayList::default();
+        let ctx = PaintCtx {
+            tree: &tree,
+            styles: &styles,
+            layout: &layout,
+            scroll: &HashMap::new(),
+            env: &MediaEnv::default(),
+            spans: &HashMap::new(),
+            wrap_widths: &HashMap::new(),
+            images: &HashMap::new(),
+            column_rules: &rules,
+        };
+        build_display_list(&ctx, id, 1, &mut out);
+        match &out.ops[0] {
+            PaintOp::FillRect {
+                x,
+                y,
+                width,
+                height,
+                radius,
+                color,
+            } => {
+                assert_eq!((*x, *y, *width, *height), (208.0, 20.0, 4.0, 90.0));
+                assert_eq!(*radius, [0.0; 8]);
+                assert_eq!(color.components, [1.0, 0.0, 0.0, 1.0]);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

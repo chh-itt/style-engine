@@ -1,0 +1,11 @@
+# 三期⑤c：多列列规——column-rule 简写（width solid color）、gap 居中条带、
+# 列高全程（内容高 160）。全整数矩形纯色块，Numeric+Pixel 双通道。
+viewport = [400.0, 400.0]
+scale = 1.0
+fonts = []
+features = ["multicol", "column-count", "column-gap", "column-rule", "background-color", "break-inside"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

@@ -1,0 +1,13 @@
+/* 三期⑤c：多列列规（column-rule）。两列 [80,80|80,10] 平衡高 160，
+ * gap 20px → 列宽 190；红色 4px 实心规条带居中于 gap：x 198..202、
+ * y 0..160（列规是绘制装饰非 DOM 盒——numeric 通道两侧都只含 6 个
+ * 内容盒矩形，条带几何由 pixel 通道把关）。
+ * 期望几何：wrap(0,0,400,160) mc(0,0,400,160)
+ * a(0,0,190,80) b(0,80,190,80) c(210,0,190,80) d(210,80,190,10)。 */
+body { margin: 0; }
+.wrap { width: 400px; background-color: #f0f0f0; }
+.mc { column-count: 2; column-gap: 20px; column-rule: 4px solid red; background-color: #dddddd; }
+.a { height: 80px; background-color: #3366cc; break-inside: avoid; }
+.b { height: 80px; background-color: #33aa55; break-inside: avoid; }
+.c { height: 80px; background-color: #cc8822; break-inside: avoid; }
+.d { height: 10px; background-color: #aa3366; break-inside: avoid; }

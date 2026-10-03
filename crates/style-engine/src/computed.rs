@@ -101,6 +101,10 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         // ⑤a css-break 初始：auto（可断）——v1 布局不读，块一律不可断。
         P::BreakInside => DeclValue::BreakInside(None),
         P::ColumnSpan => DeclValue::ColumnSpan(None),
+        // ⑤c 列规初始：width=medium、style=none、color=currentcolor。
+        P::ColumnRuleWidth => DeclValue::ColumnRuleWidth(Some(LengthPercentage::Px(3.0))),
+        P::ColumnRuleStyle => DeclValue::ColumnRuleStyle(crate::css::property::BorderStyle::None),
+        P::ColumnRuleColor => DeclValue::Color(ColorValue::CurrentColor),
         P::FlexDirection => DeclValue::FlexDirection(FlexDirection::Row),
         P::FlexWrap => DeclValue::FlexWrap(FlexWrap::NoWrap),
         P::FlexGrow => DeclValue::Number(0.0),

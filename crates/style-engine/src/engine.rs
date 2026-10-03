@@ -116,6 +116,9 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     multicols: Vec<NodeId>,
     /// ③multi-column：稳态缓存（幻影列节点 + 当前分配；全等免重排）。
     multicol_state: HashMap<NodeId, MulticolState>,
+    /// 三期⑤c：列规条带（相对容器 border-box 原点）——settle_column_rules
+    /// 逐帧全量重建（几何随列平衡/文本换行漂移，无稳态签名可复用）。
+    column_rules: HashMap<NodeId, Vec<crate::paint::ColumnRuleSeg>>,
     styles: HashMap<NodeId, ComputedStyle>,
     /// span 级样式（T5c）：NodeId → (字节起点, 字节终点, 覆盖后的 ComputedStyle)。
     span_styles: HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
@@ -176,6 +179,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             table_cells: HashMap::new(),
             multicols: Vec::new(),
             multicol_state: HashMap::new(),
+            column_rules: HashMap::new(),
             styles: HashMap::new(),
             span_styles: HashMap::new(),
             parents: HashMap::new(),
@@ -954,6 +958,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if self.root_key.is_some() {
             self.collect(self.tree.root(), 0.0, 0.0, &mut boxes, &mut layout_by_node);
         }
+        // 三期⑤c：列规几何结算（collect 后 layout_by_node 最新鲜；
+        // DisplayList 构建前完成，PaintCtx 直引同一张表）。
+        self.settle_column_rules(&layout_by_node);
         // ADR-0007：滚动容器可滚动外延（宿主推进偏移的量程）。识别 = overflow
         // ∈ {auto, scroll}（两轴独立）；外延 = padding box 与全部后代 border box
         // 并集相对 padding box 原点的最大超出。近似：绝对定位后代一并并入，
@@ -1052,6 +1059,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 spans: &self.span_styles,
                 wrap_widths: &self.wrap_widths,
                 images: &self.images,
+                column_rules: &self.column_rules,
             },
             self.tree.root(),
             self.generation,
@@ -2175,6 +2183,116 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             st.assignment = assignment;
             self.multicol_state.insert(mc, st);
         }
+    }
+
+    /// 三期⑤c：列规几何结算——每行每相邻列间一条竖直条带（视口系，
+    /// 相对容器 border-box 原点；paint 层加容器原点）。语义：style ∈
+    /// BorderStyle（none/hidden 不画）；v1 仅 solid 实绘，dashed/dotted
+    /// 近似 solid（B 级偏差，与 border 策略一致）；width 缺席 = medium
+    /// 3px，显式负值钳 0（0 宽不画）；color 走 currentcolor 终结。
+    /// 行模式条带 y/高 = 幻影列盒（Flex 拉伸全等 = 容器内容高）；span
+    /// 模式逐段独立。空列照画（CSS 未设内容存在性条件；用例规避）。
+    fn settle_column_rules(&mut self, layout_by_node: &HashMap<NodeId, (f32, f32, f32, f32)>) {
+        self.column_rules.clear();
+        for &mc in &self.multicols {
+            let Some(segs) = self.column_rule_segs(mc, layout_by_node) else {
+                continue;
+            };
+            if !segs.is_empty() {
+                self.column_rules.insert(mc, segs);
+            }
+        }
+    }
+
+    /// 单容器的列规条带（只读；None = 不画/无几何）。
+    fn column_rule_segs(
+        &self,
+        mc: NodeId,
+        layout_by_node: &HashMap<NodeId, (f32, f32, f32, f32)>,
+    ) -> Option<Vec<crate::paint::ColumnRuleSeg>> {
+        use crate::css::property::{DeclValue, PropertyId};
+        let cs = self.styles.get(&mc)?;
+        let rule_style = match cs.get(PropertyId::ColumnRuleStyle) {
+            Some(DeclValue::ColumnRuleStyle(s)) => *s,
+            _ => crate::css::property::BorderStyle::None,
+        };
+        if matches!(rule_style, crate::css::property::BorderStyle::None) {
+            return None;
+        }
+        let st = self.multicol_state.get(&mc)?;
+        if st.n < 2 || st.phantoms.is_empty() {
+            return None;
+        }
+        let rctx = crate::css::value::ResolveCtx {
+            em: cs.font_size_px(),
+            rem: 16.0,
+            viewport_w: self.media.viewport_w,
+            viewport_h: self.media.viewport_h,
+        };
+        let rule_w = match cs.get(PropertyId::ColumnRuleWidth) {
+            Some(DeclValue::ColumnRuleWidth(Some(lp))) => {
+                lp.resolve(&rctx, 0.0).unwrap_or(3.0).max(0.0)
+            }
+            _ => 3.0, // medium
+        };
+        if rule_w <= 0.0 {
+            return None;
+        }
+        let rule_color = match cs.get(PropertyId::ColumnRuleColor) {
+            Some(DeclValue::Color(cv)) => crate::paint::resolve_color(cv, cs, &self.media),
+            _ => crate::paint::resolve_color(
+                &crate::css::value::ColorValue::CurrentColor,
+                cs,
+                &self.media,
+            ),
+        };
+        let (bx, by) = layout_by_node.get(&mc).map(|&(x, y, _, _)| (x, y))?;
+        let n = st.n;
+        // 行集合：span 模式逐段（rows[i] 行 + 段内幻影切片）；行模式单行
+        // （容器直系幻影）。幻影 location 相对父 border-box 原点（行模式
+        // 父 = 容器；span 模式再上行一层 row.location）。
+        let row_specs: Vec<(Option<taffy::NodeId>, std::ops::Range<usize>)> = if st.span_mode {
+            st.rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (Some(*r), i * n..(i + 1) * n))
+                .collect()
+        } else {
+            vec![(None, 0..st.phantoms.len())]
+        };
+        let mut segs = Vec::new();
+        for (row, range) in row_specs {
+            let row_y = match row {
+                Some(r) => self.taffy.layout(r).map(|l| l.location.y).unwrap_or(0.0),
+                None => 0.0,
+            };
+            // (x, y, w, h) 各幻影列（重建帧缺布局的段跳过，下帧自然补齐）。
+            let phs: Vec<(f32, f32, f32, f32)> = st.phantoms[range]
+                .iter()
+                .filter_map(|p| self.taffy.layout(*p).ok())
+                .map(|l| (l.location.x, l.location.y, l.size.width, l.size.height))
+                .collect();
+            if phs.len() < 2 {
+                continue;
+            }
+            let rel_y = row_y + phs[0].1;
+            let row_h = phs[0].3;
+            for i in 1..phs.len() {
+                let (ax, _, aw, _) = phs[i - 1];
+                let (cx, _, _, _) = phs[i];
+                // 条带中心 = 前列右缘 + 半 gap；宽度 = rule_w。
+                let gap = cx - (ax + aw);
+                let center = ax + aw + gap * 0.5;
+                segs.push(crate::paint::ColumnRuleSeg {
+                    x: bx + center - rule_w * 0.5,
+                    y: by + rel_y,
+                    width: rule_w,
+                    height: row_h,
+                    color: rule_color,
+                });
+            }
+        }
+        Some(segs)
     }
 
     fn restyle(&mut self) {
@@ -3482,6 +3600,104 @@ mod tests {
         assert_eq!(b(Key(4)).x, 0.0);
         assert_eq!(b(Key(4)).y, 150.0, "段首 margin-top 保留（截断则 130）");
         assert_eq!(b(Key(1)).height, 230.0);
+    }
+
+    #[test]
+    fn multicol_rule_row_mode_gap_centered() {
+        // 三期⑤c：行模式列规——条带落在列间 gap 正中（center = 前列右缘 +
+        // 半 gap），y/高 = 幻影列盒（容器内容高）；宽 4px 居中 ⇒ x = 198。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mc { column-count: 2; column-gap: 20px; width: 400px; \
+              column-rule: 4px solid red } \
+             it { height: 30px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+        for k in 2..=7 {
+            assert!(engine.insert(Some(Key(1)), Key(k), mk("it")).is_ok());
+        }
+        let _frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let mc_id = engine.key_to_node[&Key(1)];
+        let segs = engine.column_rules.get(&mc_id).expect("行模式列规存在");
+        assert_eq!(segs.len(), 1, "相邻列对数 = n−1");
+        let s = &segs[0];
+        // 列位 0..190 | 210..400：center = 190+10 = 200；x = 200−2。
+        assert_eq!(s.x, 198.0);
+        assert_eq!(s.y, 0.0);
+        assert_eq!(s.width, 4.0);
+        assert_eq!(s.height, 90.0, "条带高 = 列盒高（3×30）");
+        let c = s.color.components;
+        assert!(c[0] > 0.9 && c[3] == 1.0, "red currentcolor 终结（{c:?}）");
+    }
+
+    #[test]
+    fn multicol_rule_span_mode_per_segment() {
+        // 三期⑤c：span 模式列规逐段绘制——前段行（y 0..80）与后段行
+        // （y 90..170）各一条；spanner 横贯处不画（列间断点消失）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "mc { column-count: 2; column-gap: 0px; width: 400px; \
+              column-rule: 2px solid blue } \
+             b80 { height: 80px } sp { column-span: all; height: 10px }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("b80")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(3), mk("sp")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), mk("b80")).is_ok());
+        let _frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let mc_id = engine.key_to_node[&Key(1)];
+        let segs = engine.column_rules.get(&mc_id).expect("span 模式逐段列规");
+        assert_eq!(segs.len(), 2, "每段一行一条");
+        let mut ys: Vec<f32> = segs.iter().map(|s| s.y).collect();
+        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(ys, vec![0.0, 90.0], "前段行 y=0；后段行 y=90（80+10）");
+        for s in segs {
+            assert_eq!(s.x, 199.0, "gap0 居中：x = 200−1");
+            assert_eq!(s.width, 2.0);
+            assert_eq!(s.height, 80.0);
+        }
+    }
+
+    #[test]
+    fn multicol_rule_style_none_or_zero_width_no_paint() {
+        // 三期⑤c：style:none / 宽 0 / 缺省（style 初始 none）→ 无条带。
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let run = |sheet: &str| {
+            let mut engine: StyleEngine<Key> = StyleEngine::new();
+            assert!(engine.set_stylesheet(sheet).is_clean());
+            assert!(engine.insert(None, Key(1), mk("mc")).is_ok());
+            for k in 2..=5 {
+                assert!(engine.insert(Some(Key(1)), Key(k), mk("it")).is_ok());
+            }
+            let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+            let mc_id = engine.key_to_node[&Key(1)];
+            engine.column_rules.get(&mc_id).is_none()
+        };
+        assert!(run(
+            "mc { column-count: 2; width: 400px; column-rule: none } \
+             it { height: 30px }"
+        ));
+        assert!(run(
+            "mc { column-count: 2; width: 400px; column-rule: 0 solid red } \
+             it { height: 30px }"
+        ));
+        assert!(run(
+            "mc { column-count: 2; width: 400px; column-rule-color: red } \
+             it { height: 30px }",
+        ));
     }
 
     #[test]
