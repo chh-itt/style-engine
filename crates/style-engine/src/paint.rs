@@ -22,36 +22,56 @@ use std::collections::HashMap;
 pub enum PaintOp {
     /// 纯色矩形（背景）。
     FillRect {
+        /// 盒左缘 x（视口坐标，px，border-box）。
         x: f32,
+        /// 盒顶缘 y（视口坐标，px，border-box）。
         y: f32,
+        /// 盒宽 px（border-box）。
         width: f32,
+        /// 盒高 px（border-box）。
         height: f32,
         /// 每角 (横, 纵) 圆角 px（第五批⑪椭圆圆角；序 tl.x tl.y tr.x tr.y
         /// br.x br.y bl.x bl.y）。
         radius: [f32; 8],
+        /// 填充色（绝对 sRGBA）。
         color: AlphaColor<Srgb>,
     },
     /// 渐变背景（linear/radial，语义同 CSS）。
     Gradient {
+        /// 盒左缘 x（视口坐标，px，border-box）。
         x: f32,
+        /// 盒顶缘 y（视口坐标，px，border-box）。
         y: f32,
+        /// 盒宽 px（border-box）。
         width: f32,
+        /// 盒高 px（border-box）。
         height: f32,
+        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
         radius: [f32; 8],
+        /// 渐变参数（CSS linear-gradient/radial-gradient）。
         gradient: Gradient,
         /// 径向几何（T4c）：圆心与半径已按盒子解析为绝对 px（线性渐变为 None）。
         radial: Option<RadialGeom>,
     },
     /// 阴影（第五批⑩：模糊=sink 多环近似；inset=盒内反转填充）。
     Shadow {
+        /// 盒左缘 x（视口坐标，px，border-box）。
         x: f32,
+        /// 盒顶缘 y（视口坐标，px，border-box）。
         y: f32,
+        /// 盒宽 px（border-box）。
         width: f32,
+        /// 盒高 px（border-box）。
         height: f32,
+        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
         radius: [f32; 8],
+        /// 阴影颜色（box-shadow <color>，绝对 sRGBA）。
         color: AlphaColor<Srgb>,
+        /// 水平偏移 px（box-shadow <offset-x>，右为正）。
         offset_x: f32,
+        /// 垂直偏移 px（box-shadow <offset-y>，下为正）。
         offset_y: f32,
+        /// 模糊半径 px（box-shadow <blur-radius>）。
         blur: f32,
         /// 外扩/内缩（px）。
         spread: f32,
@@ -61,36 +81,57 @@ pub enum PaintOp {
     /// 背景图（第五批⑨）：宿主预解码 RGBA（零副作用——引擎不取 URL，
     /// 引用经 add_image 注册）；源尺寸与像素自带（DisplayList 自足）。
     Image {
+        /// 绘制盒左缘 x（视口坐标，px，border-box）。
         x: f32,
+        /// 绘制盒顶缘 y（视口坐标，px，border-box）。
         y: f32,
+        /// 绘制盒宽 px（border-box）。
         width: f32,
+        /// 绘制盒高 px（border-box）。
         height: f32,
         /// 每角 (横, 纵) 圆角（第五批⑪序）——sink 据此决定是否裁剪。
         radius: [f32; 8],
+        /// 源图像素宽（内在尺寸）。
         source_w: u32,
+        /// 源图像素高（内在尺寸）。
         source_h: u32,
+        /// 预解码 RGBA 像素（宿主注册）。
         pixels: ImageRes,
     },
     /// 边框（四边独立：top/right/bottom/left；style none 或 width 0 的边由 sink 忽略）。
     Border {
+        /// 盒左缘 x（视口坐标，px，border-box）。
         x: f32,
+        /// 盒顶缘 y（视口坐标，px，border-box）。
         y: f32,
+        /// 盒宽 px（border-box）。
         width: f32,
+        /// 盒高 px（border-box）。
         height: f32,
+        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
         radius: [f32; 8],
+        /// 四边边框，序 [top, right, bottom, left]。
         sides: [BorderSide; 4],
     },
     /// 文本（T5 转换为字形 run；spans 为 T5c 富文本覆盖，可为空）。
     Text {
+        /// 文本起点 x（视口坐标，px，内容盒左上）。
         x: f32,
+        /// 文本起点 y（视口坐标，px，内容盒左上）。
         y: f32,
+        /// 待排版绘制的 UTF-8 文本（叶节点全文）。
         text: String,
+        /// 基础文本色（color，绝对 sRGBA；span 可覆盖）。
         color: AlphaColor<Srgb>,
         /// span 覆盖样式（T5c）：绘制期已终结；空 = 无富文本。
         spans: Vec<TextSpanPaint>,
+        /// 字号 px（font-size）。
         font_size: f32,
+        /// 字体族列表（font-family，按序回退）。
         font_family: FontFamilyList,
+        /// 字重（font-weight 数值，400 = normal）。
         font_weight: f32,
+        /// 是否斜体（font-style: italic）。
         italic: bool,
         /// 换行约束（T5c-2）：测量与绘制共用同一 max_advance 保证折行一致；None = 无界。
         max_advance: Option<f32>,
@@ -104,21 +145,33 @@ pub enum PaintOp {
     },
     /// 裁剪层开始（overflow 非 visible）。
     PushClip {
+        /// 裁剪盒左缘 x（视口坐标，px，border-box）。
         x: f32,
+        /// 裁剪盒顶缘 y（视口坐标，px，border-box）。
         y: f32,
+        /// 裁剪盒宽 px（border-box）。
         width: f32,
+        /// 裁剪盒高 px（border-box）。
         height: f32,
+        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
         radius: [f32; 8],
     },
+    /// 裁剪层结束（对应最近的 PushClip）。
     PopClip,
     /// 透明度层开始（opacity < 1，ADR-0008）：整节点子树以 alpha 合成。
     PushOpacity {
+        /// 整层不透明度（0.0–1.0，CSS opacity）。
         alpha: f32,
+        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
         x: f32,
+        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
         y: f32,
+        /// 受影响节点盒宽 px（border-box）。
         width: f32,
+        /// 受影响节点盒高 px（border-box）。
         height: f32,
     },
+    /// 透明度层结束（对应最近的 PushOpacity）。
     PopOpacity,
     /// 2D 仿射变换层开始（ADR-0009）：本节点子树全部绘制经矩阵变换；
     /// 布局盒保持未变换坐标（taffy 不可见 transform）。
@@ -126,41 +179,59 @@ pub enum PaintOp {
         /// [a, b, c, d, e, f]：x' = a·x + c·y + e，y' = b·x + d·y + f。
         affine: [f32; 6],
     },
+    /// 变换层结束（对应最近的 PushTransform）。
     PopTransform,
     /// 滚动偏移层开始。
     PushScroll {
+        /// 水平滚动偏移 px（等价 scrollLeft，子树内容随之平移）。
         dx: f32,
+        /// 垂直滚动偏移 px（等价 scrollTop，子树内容随之平移）。
         dy: f32,
     },
+    /// 滚动偏移层结束（对应最近的 PushScroll）。
     PopScroll,
 }
 
 /// 单边边框（T4b：宽度/样式/颜色已在 paint 层终结为绝对值）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct BorderSide {
+    /// 边宽 px（border-width，已终结为绝对值）。
     pub width: f32,
+    /// 边框样式（border-style；none 或宽 0 由 sink 忽略）。
     pub style: BorderStyle,
+    /// 边框色（border-color，绝对 sRGBA）。
     pub color: AlphaColor<Srgb>,
 }
 
 /// 已解析的径向几何（绝对 px；椭圆分别给 rx/ry，圆时相等）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadialGeom {
+    /// 圆心 x（px，盒子坐标）。
     pub cx: f32,
+    /// 圆心 y（px，盒子坐标）。
     pub cy: f32,
+    /// 水平半径 px。
     pub rx: f32,
+    /// 垂直半径 px。
     pub ry: f32,
 }
 
 /// 富文本 span（T5c）：绘制期已终结的覆盖样式；区间 [start, end) 为文本字节偏移。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpanPaint {
+    /// span 起始字节偏移（含）。
     pub start: u32,
+    /// span 结束字节偏移（不含）。
     pub end: u32,
+    /// 文本色（color，绝对 sRGBA）。
     pub color: AlphaColor<Srgb>,
+    /// 字号 px（font-size）。
     pub font_size: f32,
+    /// 字重（font-weight 数值，400 = normal）。
     pub font_weight: f32,
+    /// 是否斜体（font-style: italic）。
     pub italic: bool,
+    /// 字体族列表（font-family，按序回退）。
     pub font_family: crate::css::property::FontFamilyList,
 }
 
@@ -177,8 +248,11 @@ pub struct DisplayList {
 /// 格式——零副作用）；DisplayList 自足携带像素。rgba 以
 /// `Arc<dyn AsRef<[u8]>>` 承载（peniko Blob 同型，免去去size化转换）。
 pub struct ImageRes {
+    /// 图像像素宽（内在尺寸）。
     pub width: u32,
+    /// 图像像素高（内在尺寸）。
     pub height: u32,
+    /// 预解码 RGBA 字节（每像素 4 字节，sRGB）。
     pub rgba: std::sync::Arc<dyn std::convert::AsRef<[u8]> + Send + Sync>,
 }
 
@@ -217,19 +291,29 @@ impl PartialEq for ImageRes {
 /// 重建（列平衡几何随内容漂移，无稳态缓存）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnRuleSeg {
+    /// 段左缘 x（px，multicol 容器 border-box 坐标）。
     pub x: f32,
+    /// 段顶缘 y（px，multicol 容器 border-box 坐标）。
     pub y: f32,
+    /// 段宽 px。
     pub width: f32,
+    /// 段高 px。
     pub height: f32,
+    /// 规条颜色（column-rule-color，绝对 sRGBA）。
     pub color: AlphaColor<Srgb>,
 }
 
 /// 绘制输入上下文（树镜像 + 布局 + 滚动 + 环境）。
 pub struct PaintCtx<'a> {
+    /// 样式树镜像（提供节点结构与叶文本）。
     pub tree: &'a StyleTree,
+    /// 节点 → 计算样式。
     pub styles: &'a HashMap<NodeId, ComputedStyle>,
+    /// 节点 → 布局盒 (x, y, w, h)（视口坐标，px，border-box）。
     pub layout: &'a HashMap<NodeId, (f32, f32, f32, f32)>,
+    /// 节点 → 滚动偏移 (dx, dy)（px，等价 scrollLeft/scrollTop）。
     pub scroll: &'a HashMap<NodeId, (f32, f32)>,
+    /// 媒体环境（媒体查询求值输入）。
     pub env: &'a MediaEnv,
     /// span 级样式（T5c）：已按节点基样式级联求解。
     pub spans: &'a HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,

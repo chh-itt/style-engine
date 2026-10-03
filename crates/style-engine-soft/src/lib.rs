@@ -25,6 +25,9 @@
 //! 字节零副作用：字体由宿主经 [`FontBank`] 提供（族名 → TTF 字节）；
 //! `render` 不带字体库时跳过 Text（v0 行为）。
 
+// 阶段3 API 冻结：公共项文档强制（C3 契约）。
+#![deny(missing_docs)]
+
 mod ttf;
 
 use style_engine::css::property::{
@@ -36,7 +39,9 @@ use style_engine::{DisplayList, PaintOp};
 
 /// 纯软件画布：RGBA8 直 alpha、sRGB 编码值（与 DisplayList 色彩语义一致）。
 pub struct SoftCanvas {
+    /// 画布宽度 px。
     pub width: u32,
+    /// 画布高度 px。
     pub height: u32,
     /// 行主序 RGBA8，`pixels.len() == width * height * 4`。
     pub pixels: Vec<u8>,
@@ -50,14 +55,17 @@ pub struct FontBank {
 }
 
 impl FontBank {
+    /// 创建空字体库。
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 注册字体：family 名 + 完整字体文件字节（重复 family 后注册者优先）。
     pub fn add(&mut self, family: &str, data: Vec<u8>) {
         self.entries.push((family.to_string(), data));
     }
 
+    /// 按 family 名取字体文件字节；未注册返回 None。
     pub fn get(&self, family: &str) -> Option<&[u8]> {
         self.entries
             .iter()
@@ -65,6 +73,7 @@ impl FontBank {
             .map(|(_, data)| data.as_slice())
     }
 
+    /// 是否未注册任何字体。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -253,6 +262,16 @@ fn apply_op(
                 }
                 GradientKind::Radial(_) => {
                     // paint 层已解析绝对几何（RadialGeom，源空间）；渐变线 = 水平半径
+                    let g = radial.unwrap_or(RadialGeom {
+                        cx: x + width / 2.0,
+                        cy: y + height / 2.0,
+                        rx: width.max(1.0) / 2.0,
+                        ry: height.max(1.0) / 2.0,
+                    });
+                    (Some(g), (0.0, 0.0, g.rx.max(1e-6)))
+                }
+                // 阶段3 API 冻结：GradientKind 未来变体按缺省径向几何降级（非穷举演进契约）。
+                _ => {
                     let g = radial.unwrap_or(RadialGeom {
                         cx: x + width / 2.0,
                         cy: y + height / 2.0,

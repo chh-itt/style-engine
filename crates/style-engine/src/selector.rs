@@ -30,6 +30,7 @@ use cssparser_sel as sel_css;
 pub struct SelString(String);
 
 impl SelString {
+    /// 内部字符串只读访问。
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -97,14 +98,23 @@ impl SelectorImplTrait for StyleSelectorImpl {
 
 /// 非树结构伪类（T0 子集，FEATURES.md）。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PseudoClass {
+    /// :hover（悬停）。
     Hover,
+    /// :active（按下）。
     Active,
+    /// :focus（聚焦）。
     Focus,
+    /// :focus-visible（键盘聚焦可见）。
     FocusVisible,
+    /// :focus-within（自身或后代聚焦）。
     FocusWithin,
+    /// :disabled（禁用）。
     Disabled,
+    /// :enabled（可用）。
     Enabled,
+    /// :checked（选中）。
     Checked,
 }
 
@@ -178,8 +188,11 @@ impl NonTSPseudoClass for PseudoClass {
 
 /// 伪元素（T0 仅解析接受；匹配恒 false，生成内容随 T5 落地）。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PseudoElement {
+    /// ::before。
     Before,
+    /// ::after。
     After,
 }
 
@@ -241,10 +254,12 @@ pub fn parse_selector_list(source: &str) -> Result<StyleSelectorList, String> {
 pub struct TreeNode<'a>(&'a StyleTree, crate::tree::NodeId);
 
 impl<'a> TreeNode<'a> {
+    /// 挂载样式树与节点键。
     pub fn new(tree: &'a StyleTree, id: crate::tree::NodeId) -> Self {
         Self(tree, id)
     }
 
+    /// 当前节点键。
     pub fn id(&self) -> crate::tree::NodeId {
         self.1
     }

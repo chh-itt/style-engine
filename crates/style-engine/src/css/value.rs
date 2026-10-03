@@ -10,6 +10,7 @@ use peniko::color::{self, AlphaColor, Srgb};
 
 /// 值解析错误（cssparser 0.38 的 `ParseError` 已无输入生命周期参数）。
 pub type ValError = ParseError<BasicParseError>;
+/// 带值解析错误的 `Result` 别名。
 pub type ValResult<T> = Result<T, ValError>;
 
 /// 值定值上下文：字号、根字号与视口（全部由引擎/宿主提供，crate 无副作用）。
@@ -27,9 +28,13 @@ pub struct ResolveCtx {
 
 /// `<length-percentage>`：px/em/rem/%/vw/vh/calc()。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LengthPercentage {
+    /// 绝对像素值（px）。
     Px(f32),
+    /// 相对当前节点字号（em）。
     Em(f32),
+    /// 相对根节点字号（rem）。
     Rem(f32),
     /// 小数（50% → 0.5）。
     Percent(f32),
@@ -37,10 +42,12 @@ pub enum LengthPercentage {
     Vw(f32),
     /// 视口高度小数（50vh → 0.5）。
     Vh(f32),
+    /// calc() 表达式（CSS Values 4 子集）。
     Calc(Box<CalcNode>),
 }
 
 impl LengthPercentage {
+    /// 零长度便捷值（0px）。
     pub fn zero() -> Self {
         Self::Px(0.0)
     }
@@ -59,25 +66,37 @@ impl LengthPercentage {
     }
 }
 
+/// calc() 数值的单位量纲。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CalcUnit {
+    /// 无单位数字（仅可作乘除系数）。
     Number,
+    /// 像素（px）。
     Px,
+    /// 相对当前节点字号（em）。
     Em,
+    /// 相对根节点字号（rem）。
     Rem,
     /// 小数（50% → 0.5）。
     Percent,
+    /// 视口宽度小数（50vw → 0.5）。
     Vw,
+    /// 视口高度小数（50vh → 0.5）。
     Vh,
 }
 
 /// `calc()` 表达式树（CSS Values 4 子集：四则运算、嵌套 calc、括号）。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum CalcNode {
     /// 带单位数值；`Number` 仅允许作为乘除系数（解析期校验）。
     Value(f32, CalcUnit),
+    /// 加法（a + b）。
     Sum(Box<CalcNode>, Box<CalcNode>),
+    /// 减法（a - b）。
     Sub(Box<CalcNode>, Box<CalcNode>),
+    /// 乘法（a × b；一侧须为纯数字系数）。
     Product(Box<CalcNode>, Box<CalcNode>),
     /// 除以非零数字（CSS 约束）。
     Divide(Box<CalcNode>, f32),
@@ -96,6 +115,7 @@ impl CalcNode {
         }
     }
 
+    /// 定值：按 ctx 与百分比参照把表达式解析为 px 长度（无法定值时为 None）。
     pub fn resolve(&self, ctx: &ResolveCtx, percent_basis: f32) -> Option<f32> {
         match self {
             Self::Value(v, u) => Some(match u {
@@ -153,8 +173,11 @@ pub struct Angle(pub f32);
 
 /// CSS 颜色：绝对色、currentColor 或 light-dark()。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum ColorValue {
+    /// currentcolor 关键字（继承 color 属性计算值）。
     CurrentColor,
+    /// 绝对颜色（已转 sRGB，分量 [0,1] 编码值）。
     Absolute(AlphaColor<Srgb>),
     /// MVP 偏差：参数仅存绝对色（currentcolor/嵌套 light-dark 走容错丢弃）。
     LightDark(AlphaColor<Srgb>, AlphaColor<Srgb>),
@@ -177,6 +200,7 @@ fn to_srgb_clamped(c: color::DynamicColor) -> AlphaColor<Srgb> {
     a
 }
 
+/// 解析 `<length-percentage>`：px/em/rem/%/vw/vh/calc()。
 pub fn parse_length_percentage(p: &mut Parser<'_>) -> ValResult<LengthPercentage> {
     match p.next()?.clone() {
         Token::Dimension {
@@ -302,6 +326,7 @@ fn parse_calc_value(p: &mut Parser<'_>) -> ValResult<CalcNode> {
     }
 }
 
+/// 解析 `<angle>`（deg/grad/rad/turn，归一为度；无单位数字视为 deg）。
 pub fn parse_angle(p: &mut Parser<'_>) -> ValResult<Angle> {
     match p.next()?.clone() {
         Token::Dimension {
@@ -326,6 +351,7 @@ pub fn parse_angle(p: &mut Parser<'_>) -> ValResult<Angle> {
     }
 }
 
+/// 解析 `<number>`（无单位数字）。
 pub fn parse_number(p: &mut Parser<'_>) -> ValResult<f32> {
     match p.next()?.clone() {
         Token::Number { value, .. } => Ok(value),
@@ -333,6 +359,7 @@ pub fn parse_number(p: &mut Parser<'_>) -> ValResult<f32> {
     }
 }
 
+/// 解析 `<color>`：关键字、#十六进制或颜色函数（light-dark() 及 CSS Color 4 文法）。
 pub fn parse_color_value(p: &mut Parser<'_>) -> ValResult<ColorValue> {
     match p.next()?.clone() {
         Token::Ident(ref name) => parse_color_keyword(name, p),

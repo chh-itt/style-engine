@@ -220,6 +220,8 @@ fn map_align(a: style_engine::css::property::TextAlign) -> parley::layout::Align
         T::Left => parley::layout::Alignment::Left,
         T::Right => parley::layout::Alignment::Right,
         T::Justify => parley::layout::Alignment::Justify,
+        // 阶段3 API 冻结：TextAlign 未来变体降级为 start（非穷举演进契约）。
+        _ => parley::layout::Alignment::Start,
     }
 }
 
@@ -233,6 +235,8 @@ fn family_of(list: &style_engine::css::property::FontFamilyList) -> std::borrow:
         Some(style_engine::css::property::FamilyName::Cursive) => "cursive".into(),
         Some(style_engine::css::property::FamilyName::Fantasy) => "fantasy".into(),
         Some(style_engine::css::property::FamilyName::SystemUi) => "system-ui".into(),
+        // 阶段3 API 冻结：FamilyName 未来变体降级为通用族（非穷举演进契约）。
+        Some(_) => "sans-serif".into(),
         None => "sans-serif".into(),
     }
 }
@@ -803,6 +807,27 @@ fn peniko_gradient(
         }
         style_engine::css::property::GradientKind::Radial(_) => {
             // T4c：圆心/半径已在 paint 层解析为绝对值（含盒原点）；缺失时退回盒心对角线近似
+            let diag =
+                (((f64::from(w) / 2.0).powi(2) + (f64::from(h) / 2.0).powi(2)).sqrt()) as f32;
+            let geom = radial.unwrap_or(style_engine::paint::RadialGeom {
+                cx: x + w * 0.5,
+                cy: y + h * 0.5,
+                rx: diag,
+                ry: diag,
+            });
+            Gradient {
+                kind: GradientKind::Radial(RadialGradientPosition::new(
+                    Point::new(
+                        f64::from(geom.cx) + state.offset.x,
+                        f64::from(geom.cy) + state.offset.y,
+                    ),
+                    geom.ry.max(0.5),
+                )),
+                ..Default::default()
+            }
+        }
+        // 阶段3 API 冻结：GradientKind 未来变体按缺省径向几何降级（与 Radial 臂同，非穷举演进契约）。
+        _ => {
             let diag =
                 (((f64::from(w) / 2.0).powi(2) + (f64::from(h) / 2.0).powi(2)).sqrt()) as f32;
             let geom = radial.unwrap_or(style_engine::paint::RadialGeom {

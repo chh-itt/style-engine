@@ -18,12 +18,19 @@ bitflags! {
     /// 交互状态位（宿主推送；非树结构伪类匹配依据）。
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct NodeState: u16 {
+        /// :hover（悬停）。
         const HOVER = 1 << 0;
+        /// :active（按下）。
         const ACTIVE = 1 << 1;
+        /// :focus（聚焦）。
         const FOCUS = 1 << 2;
+        /// :focus-visible（键盘聚焦可见）。
         const FOCUS_VISIBLE = 1 << 3;
+        /// :focus-within（自身或后代聚焦）。
         const FOCUS_WITHIN = 1 << 4;
+        /// :disabled（禁用）。
         const DISABLED = 1 << 5;
+        /// :checked（选中）。
         const CHECKED = 1 << 6;
     }
 }
@@ -60,7 +67,9 @@ pub struct StyleNode {
 /// 以节点基样式为 parent，得到与选择器规则一致的覆盖语义）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpan {
+    /// 文本字节区间 [range.0, range.1)。
     pub range: (u32, u32),
+    /// 区间内覆盖基样式的声明（以节点基样式为父级联）。
     pub declarations: DeclarationBlock,
 }
 
@@ -87,6 +96,7 @@ impl Default for StyleTree {
 }
 
 impl StyleTree {
+    /// 新建镜像树（根节点固定存在）。
     pub fn new() -> Self {
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(StyleNode::default());
@@ -98,14 +108,17 @@ impl StyleTree {
         }
     }
 
+    /// 根节点键。
     pub fn root(&self) -> NodeId {
         self.root
     }
 
+    /// 按键读节点样式输入。
     pub fn node(&self, id: NodeId) -> &StyleNode {
         &self.nodes[id]
     }
 
+    /// 按键读写节点样式输入（宿主推送镜像通道）。
     pub fn node_mut(&mut self, id: NodeId) -> &mut StyleNode {
         &mut self.nodes[id]
     }
@@ -158,10 +171,12 @@ impl StyleTree {
         }
     }
 
+    /// 父节点键（根为 None）。
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.parent.get(id).copied().flatten()
     }
 
+    /// 子节点键（镜像宿主顺序）。
     pub fn children(&self, id: NodeId) -> &[NodeId] {
         self.children.get(id).map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -171,10 +186,12 @@ impl StyleTree {
         self.nodes.len()
     }
 
+    /// 是否为空（根恒存在，故恒为 false）。
     pub fn is_empty(&self) -> bool {
         self.nodes.len() == 0
     }
 
+    /// 是否为根节点。
     pub fn is_root(&self, id: NodeId) -> bool {
         id == self.root
     }

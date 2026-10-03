@@ -27,6 +27,7 @@ pub struct ContainerCtx {
 
 /// 级联来源层。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Origin {
     /// 引擎内置默认（在 ComputedStyle 初值层落地）。
     Default,
@@ -53,21 +54,28 @@ impl Origin {
 /// 一条候选声明（含级联键）。
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
+    /// 声明来源层（枚举序即优先级）。
     pub origin: Origin,
+    /// 是否带 !important。
     pub important: bool,
     /// 命中选择器特异性；内联取 u32::MAX。
     pub specificity: u32,
     /// 规则源顺序；内联取 u32::MAX（同键后者胜）。
     pub order: u32,
+    /// 胜出声明值（已解析或 var() 挂起 token）。
     pub value: &'a crate::css::decl::DeclSource,
 }
 
 /// 候选 custom property（MVP：仅 normal 层级）。
 #[derive(Debug, Clone, Copy)]
 pub struct CustomCandidate<'a> {
+    /// 声明来源层（枚举序即优先级）。
     pub origin: Origin,
+    /// 命中选择器特异性。
     pub specificity: u32,
+    /// 规则源顺序。
     pub order: u32,
+    /// 胜出的 custom property 原始 token（计算值期代换）。
     pub tokens: &'a TokenBuf,
 }
 
@@ -114,7 +122,9 @@ fn push_custom<'a>(out: &mut CascadeOutput<'a>, name: String, cand: CustomCandid
 /// 单条命中的规则。
 #[derive(Debug)]
 pub struct MatchedRule<'a> {
+    /// 命中的样式表规则。
     pub rule: &'a Rule,
+    /// 命中选择器的特异性。
     pub specificity: u32,
 }
 

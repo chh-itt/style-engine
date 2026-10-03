@@ -23,10 +23,13 @@ use std::collections::BTreeMap;
 /// 拥有化的 token（自定义属性与 var() 值的存储形态）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnedToken {
+    /// token 源文本（反序列化形态）。
     pub text: String,
+    /// 序列化类型（重组文本时判定是否需补分隔空白）。
     pub ser: TokenSerializationType,
 }
 
+/// token 流缓冲（custom property 与 var() 值的存储形态；栈内联 8 个）。
 pub type TokenBuf = SmallVec<[OwnedToken; 8]>;
 
 /// 把 token 流反序列化为字符串（保分隔语义），供替换后重解析。
@@ -48,12 +51,17 @@ pub fn token_buf_to_string(buf: &[OwnedToken]) -> String {
 /// 单条声明。`important` 参与级联排序。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declaration {
+    /// 长手属性标识。
     pub id: PropertyId,
+    /// 是否带 !important（参与级联排序）。
     pub important: bool,
+    /// 声明值来源（已解析 / var() 挂起 / 简写挂起）。
     pub value: DeclSource,
 }
 
+/// 声明值来源：无 var() 已解析直存；含 var() 存原始 token，计算值期代换。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum DeclSource {
     /// 无 var()，已按属性文法解析成功。
     Parsed(DeclValue),
@@ -63,18 +71,25 @@ pub enum DeclSource {
     /// 未知），按简写长手全集落 N 条挂起声明；计算值期代换后走
     /// expand_shorthand 展开，代换失败/文法失败 → 各长手 IACVT。
     /// 级联按长手逐槽竞争（同块后写长手/高优先级长手覆盖对应槽）。
-    PendingShorthand { shorthand: String, tokens: TokenBuf },
+    PendingShorthand {
+        /// 简写名（小写，如 "margin"）。
+        shorthand: String,
+        /// 简写值原始 token（计算值期代换后展开）。
+        tokens: TokenBuf,
+    },
 }
 
 /// 一条样式规则（或内联 style）的声明块；同块内后写覆盖先写。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeclarationBlock {
+    /// 长手声明（简写已展开；同块内后写覆盖先写）。
     pub decls: Vec<Declaration>,
     /// custom properties（--*）：原始 token，按需替换。
     pub custom: BTreeMap<String, TokenBuf>,
 }
 
 impl DeclarationBlock {
+    /// 无长手声明且无 custom property 时为 true。
     pub fn is_empty(&self) -> bool {
         self.decls.is_empty() && self.custom.is_empty()
     }
@@ -139,6 +154,7 @@ fn finish_after_capture(input: &mut Parser<'_>, post_state: &ParserState) -> Res
 /// 声明块解析器（配合 cssparser RuleBodyParser 驱动）。
 #[derive(Default)]
 pub struct DeclarationBlockParser {
+    /// 解析期容错警告（行:列 + 文本）。
     pub report: ParseReport,
     block: DeclarationBlock,
 }

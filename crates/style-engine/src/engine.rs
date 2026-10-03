@@ -16,10 +16,15 @@ use std::hash::Hash;
 /// 布局帧条目（border-box；坐标相对视口、滚动前）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutEntry<K: Copy> {
+    /// 宿主节点键。
     pub key: K,
+    /// 盒左缘 x（视口坐标，px，滚动前）。
     pub x: f32,
+    /// 盒顶缘 y（视口坐标，px，滚动前）。
     pub y: f32,
+    /// 盒宽 px（border-box）。
     pub width: f32,
+    /// 盒高 px（border-box）。
     pub height: f32,
 }
 
@@ -151,6 +156,7 @@ impl<K: Copy + Eq + Hash + 'static> Default for StyleEngine<K> {
 }
 
 impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
+    /// 创建空引擎（树镜像/样式表/环境全空，等待宿主推送）。
     pub fn new() -> Self {
         Self {
             tree: StyleTree::new(),

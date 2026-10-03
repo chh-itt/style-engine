@@ -263,14 +263,17 @@ fn is_custom_name(name: &str) -> bool {
 }
 
 impl ComputedStyle {
+    /// 读取属性计算值（无则 None）。
     pub fn get(&self, id: PropertyId) -> Option<&DeclValue> {
         self.values.get(&id)
     }
 
+    /// 读取已解析 custom property 终值文本（guaranteed-invalid → None）。
     pub fn custom(&self, name: &str) -> Option<&str> {
         self.custom.get(name).map(String::as_str)
     }
 
+    /// display（默认 block）。
     pub fn display(&self) -> Display {
         match self.values.get(&PropertyId::Display) {
             Some(DeclValue::Display(d)) => *d,
@@ -278,6 +281,7 @@ impl ComputedStyle {
         }
     }
 
+    /// position（默认 static）。
     pub fn position(&self) -> Position {
         match self.values.get(&PropertyId::Position) {
             Some(DeclValue::Position(p)) => *p,
@@ -343,6 +347,7 @@ impl ComputedStyle {
         )
     }
 
+    /// overflow-x（默认 visible）。
     pub fn overflow_x(&self) -> Overflow {
         match self.values.get(&PropertyId::OverflowX) {
             Some(DeclValue::Overflow(o)) => *o,
@@ -350,6 +355,7 @@ impl ComputedStyle {
         }
     }
 
+    /// overflow-y（默认 visible）。
     pub fn overflow_y(&self) -> Overflow {
         match self.values.get(&PropertyId::OverflowY) {
             Some(DeclValue::Overflow(o)) => *o,
@@ -357,6 +363,7 @@ impl ComputedStyle {
         }
     }
 
+    /// flex-direction（默认 row）。
     pub fn flex_direction(&self) -> FlexDirection {
         match self.values.get(&PropertyId::FlexDirection) {
             Some(DeclValue::FlexDirection(d)) => *d,
@@ -364,6 +371,7 @@ impl ComputedStyle {
         }
     }
 
+    /// flex-wrap（默认 nowrap）。
     pub fn flex_wrap(&self) -> FlexWrap {
         match self.values.get(&PropertyId::FlexWrap) {
             Some(DeclValue::FlexWrap(w)) => *w,
@@ -407,6 +415,7 @@ impl ComputedStyle {
         ]
     }
 
+    /// color（默认不透黑）。
     pub fn color(&self) -> ColorValue {
         match self.values.get(&PropertyId::Color) {
             Some(DeclValue::Color(c)) => *c,
@@ -414,6 +423,7 @@ impl ComputedStyle {
         }
     }
 
+    /// background-color（默认透明）。
     pub fn background_color(&self) -> ColorValue {
         match self.values.get(&PropertyId::BackgroundColor) {
             Some(DeclValue::Color(c)) => *c,
@@ -429,6 +439,7 @@ impl ComputedStyle {
         }
     }
 
+    /// font-weight（默认 400）。
     pub fn font_weight(&self) -> f32 {
         match self.values.get(&PropertyId::FontWeight) {
             Some(DeclValue::Number(n)) => *n,
@@ -436,6 +447,7 @@ impl ComputedStyle {
         }
     }
 
+    /// font-style（默认 normal）。
     pub fn font_style(&self) -> FontStyle {
         match self.values.get(&PropertyId::FontStyle) {
             Some(DeclValue::FontStyle(s)) => *s,
@@ -443,6 +455,7 @@ impl ComputedStyle {
         }
     }
 
+    /// font-family 列表（全集物化保证存在）。
     pub fn font_family(&self) -> &FontFamilyList {
         match self.values.get(&PropertyId::FontFamily) {
             Some(DeclValue::FontFamily(list)) => list,
@@ -450,6 +463,7 @@ impl ComputedStyle {
         }
     }
 
+    /// line-height（全集物化保证存在）。
     pub fn line_height(&self) -> &LineHeight {
         match self.values.get(&PropertyId::LineHeight) {
             Some(DeclValue::LineHeight(lh)) => lh,
@@ -457,6 +471,7 @@ impl ComputedStyle {
         }
     }
 
+    /// text-align（默认 start）。
     pub fn text_align(&self) -> TextAlign {
         match self.values.get(&PropertyId::TextAlign) {
             Some(DeclValue::TextAlign(a)) => *a,
@@ -500,6 +515,7 @@ impl ComputedStyle {
         }
     }
 
+    /// white-space（默认 normal）。
     pub fn white_space(&self) -> WhiteSpace {
         match self.values.get(&PropertyId::WhiteSpace) {
             Some(DeclValue::WhiteSpace(w)) => *w,
@@ -507,6 +523,7 @@ impl ComputedStyle {
         }
     }
 
+    /// opacity（默认 1.0）。
     pub fn opacity(&self) -> f32 {
         match self.values.get(&PropertyId::Opacity) {
             Some(DeclValue::Number(n)) => *n,
@@ -514,6 +531,7 @@ impl ComputedStyle {
         }
     }
 
+    /// z-index 数值（auto 或缺席取 0.0）。
     pub fn z_index(&self) -> f32 {
         match self.values.get(&PropertyId::ZIndex) {
             Some(DeclValue::Number(n)) => *n,

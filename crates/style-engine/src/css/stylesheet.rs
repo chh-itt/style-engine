@@ -18,9 +18,11 @@ use cssparser::{BasicParseError, ParseError, Parser, Token};
 /// 单条样式规则。
 #[derive(Debug, Clone)]
 pub struct Rule {
+    /// 选择器列表（已预解析）。
     pub selectors: StyleSelectorList,
     /// 规则源顺序（级联排序的次级键）。
     pub order: u32,
+    /// 声明块（属性 → 值）。
     pub declarations: crate::css::decl::DeclarationBlock,
     /// 所属 @media 条件；None = 无条件。
     pub media: Option<MediaQuery>,
@@ -31,8 +33,11 @@ pub struct Rule {
 /// 解析完成的样式表。
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
+    /// 样式规则列表（源顺序）。
     pub rules: Vec<Rule>,
+    /// @keyframes 规则列表。
     pub keyframes: Vec<KeyframesRule>,
+    /// 解析期告警与容错丢弃记录。
     pub report: ParseReport,
     /// 表内存在 @container 规则（engine 帧内收敛快路径判据，解析后单源导出）。
     pub has_container_rules: bool,
@@ -43,14 +48,18 @@ pub struct Stylesheet {
 /// @keyframes 规则：动画名 + 帧序表（offset 升序由采样端排序消费）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyframesRule {
+    /// 动画名（animation-name 引用）。
     pub name: String,
+    /// 帧序列（offset 升序由采样端排序）。
     pub frames: Vec<Keyframe>,
 }
 
 /// 单帧：offset ∈ [0,1]（from=0、to=1、百分比/100）+ 声明块。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keyframe {
+    /// 帧位置 0.0–1.0（from=0、to=1、百分比/100）。
     pub offset: f32,
+    /// 该帧声明块。
     pub declarations: DeclarationBlock,
 }
 
@@ -58,21 +67,33 @@ pub struct Keyframe {
 
 /// 配色方案偏好。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ColorScheme {
+    /// 浅色（prefers-color-scheme: light）。
     Light,
+    /// 深色（prefers-color-scheme: dark）。
     Dark,
 }
 
 /// 单个媒体特性（MVP 子集）。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MediaFeature {
+    /// `(width: v)`，v 为 px。
     Width(f32),
+    /// `(min-width: v)`，v 为 px。
     MinWidth(f32),
+    /// `(max-width: v)`，v 为 px。
     MaxWidth(f32),
+    /// `(height: v)`，v 为 px。
     Height(f32),
+    /// `(min-height: v)`，v 为 px。
     MinHeight(f32),
+    /// `(max-height: v)`，v 为 px。
     MaxHeight(f32),
+    /// `(prefers-color-scheme: …)`。
     PrefersColorScheme(ColorScheme),
+    /// `(prefers-reduced-motion: …)`，true = reduce。
     PrefersReducedMotion(bool),
     /// 指针精度（第五批⑱）：主输入设备。
     Pointer(PointerKind),
@@ -86,9 +107,13 @@ pub enum MediaFeature {
 
 /// 指针精度（第五批⑱媒体查询扩展：pointer/any-pointer）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PointerKind {
+    /// 无指针设备（主输入无指向能力）。
     None,
+    /// 粗指针（触屏等）。
     Coarse,
+    /// 细指针（鼠标、触控笔等）。
     Fine,
 }
 
@@ -99,6 +124,7 @@ pub struct MediaQuery {
     pub negate: bool,
     /// 类型段求值结果（screen/all → true；print 等 → false）；None = 未写。
     pub media_type: Option<bool>,
+    /// AND 连接的媒体特性列表。
     pub features: Vec<MediaFeature>,
 }
 
@@ -135,9 +161,13 @@ impl MediaQuery {
 /// 媒体环境（宿主每帧推送）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MediaEnv {
+    /// 视口宽度 px。
     pub viewport_w: f32,
+    /// 视口高度 px。
     pub viewport_h: f32,
+    /// 是否深色配色方案（prefers-color-scheme）。
     pub dark: bool,
+    /// 是否偏好减少动态效果（prefers-reduced-motion）。
     pub reduced_motion: bool,
     /// 主输入设备指针精度（第五批⑱）。
     pub pointer: PointerKind,
@@ -360,28 +390,42 @@ fn parse_feature_body(p: &mut Parser<'_>) -> Result<MediaFeature, ParseError<Bas
 
 /// 容器查询尺寸轴。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContainerAxis {
+    /// 行内轴（inline-size）。
     Inline,
+    /// 块轴（block-size）。
     Block,
 }
 
 /// 容器查询比较算子（min-*/max-* 旧形与 > < >= <= 范围形统一物化；
 /// ':' 即相等比较）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContainerOp {
+    /// 相等（`:` 旧形）。
     Eq,
+    /// 小于（`<`）。
     Lt,
+    /// 小于等于（`<=`）。
     Le,
+    /// 大于（`>`）。
     Gt,
+    /// 大于等于（`>=`）。
     Ge,
 }
 
 /// 单个容器查询特性（v1：尺寸特性 + orientation）。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum ContainerFeature {
+    /// 尺寸特性（width/height 旧形与范围形统一物化）。
     Size {
+        /// 查询的尺寸轴。
         axis: ContainerAxis,
+        /// 比较算子。
         op: ContainerOp,
+        /// 比较基准 px。
         value: f32,
     },
     /// orientation: portrait（true）/ landscape（false）。
@@ -430,7 +474,9 @@ impl ContainerFeature {
 /// 单个 @container 条件段：可选容器名 + AND 特性列表；段间逗号 = OR。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContainerCondition {
+    /// 容器名（container-name）；None = 无名段（取最近容器）。
     pub name: Option<String>,
+    /// AND 连接的特性列表。
     pub features: Vec<ContainerFeature>,
 }
 

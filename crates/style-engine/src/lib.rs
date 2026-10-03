@@ -23,6 +23,11 @@
 //! 设计文档见仓库根目录 `CONTEXT.md` 与 `docs/adr/`。
 
 #![forbid(unsafe_code)]
+// 阶段3 API 冻结：公共项文档强制（C3 契约——新增 pub 项必须带文档）。
+#![deny(missing_docs)]
+// 阶段3 API 冻结：公共枚举全量 #[non_exhaustive]（变体集=演进面，宿主
+// match 必须带通配臂；结构体按宿主构造面决策——StyleNode 等宿主可构造
+// 类型保持穷举）。
 
 #[cfg(feature = "layout")]
 pub mod engine;

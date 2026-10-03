@@ -12,59 +12,106 @@ use smallvec::SmallVec;
 
 /// T0 属性（FEATURES.md 语法层清单）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum PropertyId {
     // 布局：显示与定位
+    /// display — 显示类型。
     Display,
+    /// position — 定位方式。
     Position,
+    /// top — 上偏移（length-percentage|auto）。
     Top,
+    /// right — 右偏移（length-percentage|auto）。
     Right,
+    /// bottom — 下偏移（length-percentage|auto）。
     Bottom,
+    /// left — 左偏移（length-percentage|auto）。
     Left,
+    /// z-index — 层叠序（auto|<number>）。
     ZIndex,
     // 动画（第五批⑰）：描述符属性——不可动画、不参与插值，仅驱动
     // @keyframes 采样
+    /// animation-name — 关键帧名（none → None）。
     AnimationName,
+    /// animation-duration — 单轮时长（秒）。
     AnimationDuration,
+    /// animation-delay — 起始延迟（秒，负值合法）。
     AnimationDelay,
+    /// animation-iteration-count — 迭代次数（infinite → ∞）。
     AnimationIterationCount,
+    /// animation-timing-function — 缓动函数。
     AnimationTimingFunction,
+    /// animation-direction — 播放方向。
     AnimationDirection,
+    /// animation-fill-mode — 动画外填充模式。
     AnimationFillMode,
     // 布局：盒子
+    /// width — 宽度（length-percentage|auto）。
     Width,
+    /// height — 高度（length-percentage|auto）。
     Height,
+    /// min-width — 最小宽度（length-percentage|auto）。
     MinWidth,
+    /// min-height — 最小高度（length-percentage|auto）。
     MinHeight,
+    /// max-width — 最大宽度（length-percentage|auto）。
     MaxWidth,
+    /// max-height — 最大高度（length-percentage|auto）。
     MaxHeight,
+    /// aspect-ratio — 宽高比（auto|<ratio>）。
     AspectRatio,
     // 布局：盒间距
+    /// margin-top — 上外边距（length-percentage）。
     MarginTop,
+    /// margin-right — 右外边距。
     MarginRight,
+    /// margin-bottom — 下外边距。
     MarginBottom,
+    /// margin-left — 左外边距。
     MarginLeft,
+    /// padding-top — 上内边距（length-percentage）。
     PaddingTop,
+    /// padding-right — 右内边距。
     PaddingRight,
+    /// padding-bottom — 下内边距。
     PaddingBottom,
+    /// padding-left — 左内边距。
     PaddingLeft,
+    /// gap — 行列间距（单一 length-percentage，简写）。
     Gap,
+    /// row-gap — 行间距。
     RowGap,
+    /// column-gap — 列间距。
     ColumnGap,
     // 布局：flex
+    /// flex-direction — 主轴方向。
     FlexDirection,
+    /// flex-wrap — 换行方式。
     FlexWrap,
+    /// flex-grow — 剩余空间放大因子（<number>）。
     FlexGrow,
+    /// flex-shrink — 溢出收缩因子（<number>）。
     FlexShrink,
+    /// flex-basis — 主轴基础尺寸（length-percentage|auto）。
     FlexBasis,
+    /// justify-content — 主轴对齐。
     JustifyContent,
+    /// align-items — 交叉轴对齐（子项默认）。
     AlignItems,
+    /// align-self — 交叉轴对齐（单子项覆盖）。
     AlignSelf,
+    /// align-content — 交叉轴多行/多轨对齐。
     AlignContent,
     // 布局：grid
+    /// grid-template-columns — 显式列轨道。
     GridTemplateColumns,
+    /// grid-template-rows — 显式行轨道。
     GridTemplateRows,
+    /// grid-auto-flow — 自动放置方向（row|column）。
     GridAutoFlow,
+    /// grid-auto-rows — 隐式行轨道。
     GridAutoRows,
+    /// grid-auto-columns — 隐式列轨道。
     GridAutoColumns,
     /// 二期③multi-column：显式列数（auto|<integer≥1>）；无 count 时
     /// column-width 声明即请求多列（列数布局期结算）。
@@ -83,31 +130,56 @@ pub enum PropertyId {
     /// width 关键字物化定值（缺席=medium）；color 复用 Color 值族
     /// （初始 currentcolor，v1 不继承）。
     ColumnRuleWidth,
+    /// column-rule-style — 列规线型（复用 border-style 关键字族）。
     ColumnRuleStyle,
+    /// column-rule-color — 列规颜色（初始 currentcolor，v1 不继承）。
     ColumnRuleColor,
     // 绘制
+    /// background-color — 背景颜色。
     BackgroundColor,
+    /// background-image — 背景图（none|url()|渐变）。
     BackgroundImage,
+    /// border-top-left-radius — 左上圆角（length-percentage{1,2}）。
     BorderTopLeftRadius,
+    /// border-top-right-radius — 右上圆角。
     BorderTopRightRadius,
+    /// border-bottom-right-radius — 右下圆角。
     BorderBottomRightRadius,
+    /// border-bottom-left-radius — 左下圆角。
     BorderBottomLeftRadius,
+    /// border-top-width — 上边框宽（none|thin|medium|thick|<length>）。
     BorderTopWidth,
+    /// border-right-width — 右边框宽。
     BorderRightWidth,
+    /// border-bottom-width — 下边框宽。
     BorderBottomWidth,
+    /// border-left-width — 左边框宽。
     BorderLeftWidth,
+    /// border-top-style — 上边框线型。
     BorderTopStyle,
+    /// border-right-style — 右边框线型。
     BorderRightStyle,
+    /// border-bottom-style — 下边框线型。
     BorderBottomStyle,
+    /// border-left-style — 左边框线型。
     BorderLeftStyle,
+    /// border-top-color — 上边框颜色。
     BorderTopColor,
+    /// border-right-color — 右边框颜色。
     BorderRightColor,
+    /// border-bottom-color — 下边框颜色。
     BorderBottomColor,
+    /// border-left-color — 左边框颜色。
     BorderLeftColor,
+    /// box-shadow — 阴影列表（逗号分隔，支持 inset）。
     BoxShadow,
+    /// opacity — 不透明度（<number>，1 为不透明）。
     Opacity,
+    /// overflow-x — 水平溢出处理。
     OverflowX,
+    /// overflow-y — 垂直溢出处理。
     OverflowY,
+    /// box-sizing — 盒尺寸基准（content-box|border-box）。
     BoxSizing,
     /// transform（ADR-0009 v1：2D 仿射函数列表；3D 函数解析拒绝）。
     Transform,
@@ -125,14 +197,23 @@ pub enum PropertyId {
     /// transform-origin（第五批⑬：paint 期 origin 环绕消费，2D 二维子集）。
     TransformOrigin,
     // 文本
+    /// color — 前景文字颜色。
     Color,
+    /// font-family — 字体族列表（逗号分隔）。
     FontFamily,
+    /// font-size — 字号（length-percentage 或绝对字号关键字）。
     FontSize,
+    /// font-weight — 字重（normal=400、bold=700 或 <number>）。
     FontWeight,
+    /// font-style — 字形（normal|italic）。
     FontStyle,
+    /// line-height — 行高（normal|<number>|<length-percentage>）。
     LineHeight,
+    /// text-align — 文本水平对齐。
     TextAlign,
+    /// white-space — 空白与换行处理。
     WhiteSpace,
+    /// letter-spacing — 字间距（length-percentage，normal → 0）。
     LetterSpacing,
     // 容器查询（阶段2③）
     /// container-type（normal|size|inline-size）——size/inline-size 使节点
@@ -346,6 +427,7 @@ impl PropertyId {
 
 /// 值族：按文法形状复用的声明值表示（不含简写；简写在解析期展开）。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum DeclValue {
     /// margin/padding/gap 等（letter-spacing 的 normal → None → 0）。
     Len(LengthPercentage),
@@ -355,10 +437,15 @@ pub enum DeclValue {
     Number(f32),
     /// color/background-color/border-*-color。
     Color(ColorValue),
+    /// display 值族。
     Display(Display),
+    /// position 值族。
     Position(Position),
+    /// overflow-x/y 值族。
     Overflow(Overflow),
+    /// box-sizing 值族。
     BoxSizing(BoxSizing),
+    /// transform — 2D 仿射函数列表（none → 空表）。
     Transform(Vec<TransformFn>),
     /// transform-origin（第五批⑬）：水平/垂直两组件（length-percentage，
     /// 关键字解析期归一为百分比），初始 50% 50%。
@@ -366,19 +453,31 @@ pub enum DeclValue {
     /// 圆角（第五批⑪椭圆圆角）：每角 (横, 纵) 两组件——border-radius
     /// 斜杠语法 `/` 前后各为横向/纵向半径，缺省纵=横（圆形角）。
     Radius(LengthPercentage, LengthPercentage),
+    /// justify-content/align-* 共用对齐值族。
     Align(Align),
+    /// flex-direction 值族。
     FlexDirection(FlexDirection),
+    /// flex-wrap 值族。
     FlexWrap(FlexWrap),
+    /// border-*-style 线型值族（column-rule-style 复用）。
     BorderStyle(BorderStyle),
+    /// text-align 值族。
     TextAlign(TextAlign),
+    /// white-space 值族。
     WhiteSpace(WhiteSpace),
+    /// font-style 值族。
     FontStyle(FontStyle),
+    /// line-height 值族。
     LineHeight(LineHeight),
+    /// font-family — 字体族有序列表。
     FontFamily(FontFamilyList),
+    /// grid-template-*/grid-auto-* — 轨道列表。
     GridTracks(GridTemplate),
     /// aspect-ratio：none → None，否则宽/高比。
     AspectRatio(Option<f32>),
+    /// background-image — none|url()|渐变。
     BackgroundImage(BackgroundImage),
+    /// box-shadow — 阴影列表（none → 空表）。
     BoxShadows(BoxShadowList),
     /// border-*-width：none → None（宽度归零）；thin/medium/thick → 定值。
     GridAutoFlow(GridAutoFlowKind),
@@ -412,8 +511,11 @@ pub enum DeclValue {
     AnimationTime(f32),
     /// animation-iteration-count：infinite → f32::INFINITY。
     AnimationIteration(f32),
+    /// animation-timing-function — 缓动函数。
     AnimationTiming(TimingFn),
+    /// animation-direction — 播放方向。
     AnimationDirection(AnimDirection),
+    /// animation-fill-mode — 动画外填充模式。
     AnimationFillMode(AnimFillMode),
     /// filter/clip-path 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
     /// 语义位（ADR-0008 全集），不携带也不实现滤镜/裁剪效果。
@@ -428,26 +530,39 @@ pub enum DeclValue {
 /// v1 不强制 size containment（FEATURES.md B 级偏差），inline-size 容器
 /// 只供行轴尺寸（块轴特性 = unknown 不匹配）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ContainerType {
     #[default]
+    /// normal — 非容器（默认）。
     Normal,
+    /// size — 双轴尺寸容器（块轴+行轴均可查询）。
     Size,
+    /// inline-size — 行轴尺寸容器。
     InlineSize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+/// grid-auto-flow 值族（自动放置方向）。
 pub enum GridAutoFlowKind {
+    /// row — 按行填充（默认）。
     Row,
+    /// column — 按列填充。
     Column,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// display 值族（inline* 已在解析期归一为块级等价）。
+#[non_exhaustive]
 pub enum Display {
     /// taffy 无 IFC；inline* 解析期归一并 tracing 告警（第五批⑧契约）：
     /// inline/inline-block→Block、inline-flex→Flex、inline-grid→Grid。
     Block,
+    /// flex / inline-flex — flex 容器。
     Flex,
+    /// grid / inline-grid — grid 容器。
     Grid,
+    /// none — 不生成盒。
     None,
     /// 二期②：display:table——映射为块容器（行=行级 Grid 纵向堆叠），
     /// 列模板由引擎布局期结算（settle_tables）。
@@ -465,17 +580,28 @@ pub enum Display {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// position 值族。
+#[non_exhaustive]
 pub enum Position {
+    /// static — 常规流内定位（默认）。
     Static,
+    /// relative — 相对定位，top/right/bottom/left 作偏移。
     Relative,
+    /// absolute — 绝对定位（相对最近定位祖先）。
     Absolute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// overflow-x/y 值族。
+#[non_exhaustive]
 pub enum Overflow {
+    /// visible — 溢出可见（默认）。
     Visible,
+    /// hidden — 溢出裁剪。
     Hidden,
+    /// clip — 溢出裁剪（禁滚动）。
     Clip,
+    /// scroll — 裁剪并按可滚动处理（auto 归一于此）。
     Scroll,
 }
 
@@ -483,8 +609,11 @@ pub enum Overflow {
 /// CSS 默认 content-box——width/height 只含内容盒；border-box 含
 /// padding+border。taffy 的 size 语义为 border-box，映射处换算。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BoxSizing {
+    /// content-box — 尺寸仅含内容盒（CSS 默认）。
     ContentBox,
+    /// border-box — 尺寸含 padding+border。
     BorderBox,
 }
 
@@ -492,6 +621,7 @@ pub enum BoxSizing {
 /// Percent 存小数（0.5 = 50%）。TranslateX/Y 折入 Translate、ScaleX/Y 折入
 /// Scale、SkewX/Y 折入 Skew（缺省分量 = 单位元）。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TransformFn {
     /// translate / translateX / translateY：x/y 位移（x 可百分比，基 = 自身 border-box 宽）。
     Translate(LengthPercentage, LengthPercentage),
@@ -506,103 +636,172 @@ pub enum TransformFn {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// justify-content/align-* 共用对齐值族。
+#[non_exhaustive]
 pub enum Align {
+    /// normal — 默认对齐行为。
     Normal,
+    /// start — 起始对齐。
     Start,
+    /// end — 末端对齐。
     End,
+    /// center — 居中。
     Center,
+    /// stretch — 拉伸填满。
     Stretch,
+    /// baseline — 首基线对齐。
     Baseline,
+    /// flex-start — 主轴起始对齐。
     FlexStart,
+    /// flex-end — 主轴末端对齐。
     FlexEnd,
+    /// space-between — 两端对齐、中间均分。
     SpaceBetween,
+    /// space-around — 每项两侧留等宽间距。
     SpaceAround,
+    /// space-evenly — 项间与两端等宽间距。
     SpaceEvenly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// flex-direction 值族。
+#[non_exhaustive]
 pub enum FlexDirection {
+    /// row — 主轴沿行、正序（默认）。
     Row,
+    /// row-reverse — 主轴沿行、反序。
     RowReverse,
+    /// column — 主轴沿列、正序。
     Column,
+    /// column-reverse — 主轴沿列、反序。
     ColumnReverse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// flex-wrap 值族。
+#[non_exhaustive]
 pub enum FlexWrap {
+    /// nowrap — 单行不换行（默认）。
     NoWrap,
+    /// wrap — 允许换行。
     Wrap,
+    /// wrap-reverse — 换行且交叉轴反向。
     WrapReverse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// border-*-style / column-rule-style 线型值族。
+#[non_exhaustive]
 pub enum BorderStyle {
+    /// none / hidden — 不画线。
     None,
+    /// solid — 实线。
     Solid,
+    /// dashed — 虚线（v1 近似实线，B 级偏差）。
     Dashed,
+    /// dotted — 点线（v1 近似实线，B 级偏差）。
     Dotted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// text-align 值族。
+#[non_exhaustive]
 pub enum TextAlign {
+    /// start — 按书写方向起始对齐（默认）。
     Start,
+    /// end — 按书写方向末端对齐。
     End,
+    /// center — 居中。
     Center,
+    /// left — 左对齐。
     Left,
+    /// right — 右对齐。
     Right,
     /// 按 parley align Justify 实际消费（第五批⑳，末行起始对齐）。
     Justify,
 }
 
+/// white-space 值族。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WhiteSpace {
+    /// normal — 空白折叠、自动换行（默认）。
     Normal,
+    /// nowrap — 空白折叠、不换行。
     NoWrap,
+    /// pre — 保留空白与换行、不自动换行。
     Pre,
 }
 
+/// font-style 值族。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FontStyle {
+    /// normal — 直立体（默认）。
     Normal,
+    /// italic — 斜体。
     Italic,
 }
 
 // LengthPercentage 含 Box（calc），非 Copy
+/// line-height 值族。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LineHeight {
+    /// normal — UA 默认行高（约 1.2 倍字号）。
     Normal,
     /// 无单位数字（倍数）。
     Number(f32),
+    /// <length-percentage> — 定值行高（百分比基准 font-size）。
     Len(LengthPercentage),
 }
 
+/// font-family — 字体族有序列表（依次回退匹配）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontFamilyList(pub SmallVec<[FamilyName; 2]>);
 
+/// font-family 单项：具名字体或通用族关键字。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FamilyName {
+    /// <family-name> — 具名字体族（大小写不敏感）。
     Named(String),
+    /// serif — 通用衬线族。
     Serif,
+    /// sans-serif — 通用无衬线族。
     SansSerif,
+    /// monospace — 通用等宽族。
     Monospace,
+    /// cursive — 通用手写族。
     Cursive,
+    /// fantasy — 通用装饰族。
     Fantasy,
+    /// system-ui — 系统界面字体。
     SystemUi,
 }
 
 /// grid-template-columns/rows 的轨道列表（子集：定值轨道 + 固定次数 repeat）。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GridTemplate {
+    /// 轨道尺寸序列（columns 或 rows，方向随属性）。
     pub tracks: Vec<TrackSize>,
 }
 
+/// grid 轨道尺寸单项。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TrackSize {
+    /// <length-percentage> — 定值轨道。
     Len(LengthPercentage),
+    /// <flex> — fr 弹性份数。
     Fr(f32),
+    /// auto — 随内容自动伸缩的轨道。
     Auto,
+    /// max-content — 内容最大固有尺寸。
     MaxContent,
+    /// min-content — 内容最小固有尺寸。
     MinContent,
+    /// minmax(min, max) — 闭区间轨道尺寸。
     MinMax(Box<TrackSize>, Box<TrackSize>),
     /// 固定次数 repeat。
     Repeat(u16, Vec<TrackSize>),
@@ -611,21 +810,30 @@ pub enum TrackSize {
     RepeatAuto(bool, Vec<TrackSize>),
 }
 
+/// background-image 值族。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum BackgroundImage {
+    /// none — 无背景图（默认）。
     None,
+    /// url(<string>) — 图片资源引用。
     Url(String),
+    /// 渐变函数（linear/radial）。
     Gradient(Gradient),
 }
 
 /// MVP 渐变：linear（角度/to 方向）与 radial（正圆、默认 farthest-corner）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gradient {
+    /// 渐变类型与几何参数。
     pub kind: GradientKind,
+    /// 颜色停靠点序列（至少 1 个）。
     pub stops: Vec<ColorStop>,
 }
 
+/// 渐变类型（linear/radial）。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum GradientKind {
     /// 角度归一为度；`to bottom`（默认）= 180deg。
     Linear(Angle),
@@ -636,49 +844,72 @@ pub enum GradientKind {
 /// 径向渐变语义（css-images-3 子集）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RadialSpec {
+    /// 形状（circle/ellipse）。
     pub shape: RadialShape,
+    /// 尺寸关键字或显式半径。
     pub size: RadialSize,
     /// 圆心 (x, y)；百分比分别基准盒子宽/高。
     pub position: (LengthPercentage, LengthPercentage),
 }
 
+/// 径向渐变形状。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum RadialShape {
+    /// circle — 正圆。
     Circle,
+    /// ellipse — 椭圆（默认）。
     Ellipse,
 }
 
+/// 径向渐变尺寸（决定渐变终点半径）。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RadialSize {
+    /// closest-side — 终点至最近边。
     ClosestSide,
+    /// closest-corner — 终点至最近角。
     ClosestCorner,
+    /// farthest-side — 终点至最远边。
     FarthestSide,
+    /// farthest-corner — 终点至最远角（默认）。
     FarthestCorner,
     /// 显式半径（circle 一个、ellipse 两个；百分比分别基准宽/高）
     Explicit {
+        /// 水平半径（第一个 <length-percentage>）。
         rx: LengthPercentage,
+        /// 垂直半径（第二个 <length-percentage>；缺省 None）。
         ry: Option<LengthPercentage>,
     },
 }
 
+/// 渐变颜色停靠点。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColorStop {
+    /// 停靠点颜色。
     pub color: ColorValue,
+    /// 停靠位置（None → 沿轴自动均布）。
     pub position: Option<LengthPercentage>,
 }
 
 /// 阴影（第五批⑩：inset 关键字支持——内/外阴影按 CSS 绘制序分别发射）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoxShadow {
+    /// 水平偏移（正=右）。
     pub offset_x: LengthPercentage,
+    /// 垂直偏移（正=下）。
     pub offset_y: LengthPercentage,
+    /// 模糊半径（非负）。
     pub blur: LengthPercentage,
+    /// 扩展半径（可为负）。
     pub spread: LengthPercentage,
+    /// 阴影颜色。
     pub color: ColorValue,
     /// inset 关键字：内阴影（绘制序=背景之上、边框之下）。
     pub inset: bool,
 }
 
+/// box-shadow 阴影列表。
 pub type BoxShadowList = SmallVec<[BoxShadow; 2]>;
 
 // ---------- 值族解析 ----------
@@ -716,14 +947,17 @@ fn len_auto_with(p: &mut Parser<'_>, autos: &[&str]) -> ValResult<Option<LengthP
     Ok(Some(parse_length_percentage(p)?))
 }
 
+/// 长度族 + `auto`（auto → LenAuto(None)），用于 width/height/margin 等自适应用途。
 pub fn parse_len_auto(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     len_auto_with(p, &["auto"]).map(DeclValue::LenAuto)
 }
 
+/// 长度族（<length-percentage>，含 calc）。
 pub fn parse_len(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_length_percentage(p).map(DeclValue::Len)
 }
 
+/// 裸 <number>（opacity、flex-grow/shrink、aspect-ratio 等数值用途）。
 pub fn parse_number_value(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_number(p).map(DeclValue::Number)
 }
@@ -865,10 +1099,12 @@ pub fn parse_z_index(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_number(p).map(|n| DeclValue::ZIndex(Some(n)))
 }
 
+/// 颜色值（<color>，含 currentcolor；颜色失配时由 lerp 侧处理）。
 pub fn parse_color(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_color_value(p).map(DeclValue::Color)
 }
 
+/// 边框宽：none→0、thin/medium/thick→1/3/5px 物化，或 <length>。
 pub fn parse_border_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     // none（配合 style:none 才真正不画）与关键字宽度
     let kw = p.try_parse(|p| -> ValResult<LengthPercentage> {
@@ -896,6 +1132,7 @@ pub fn parse_border_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
+/// display 关键字 → Display（inline* 按⑤⑧契约归一为块级等价并告警）。
 pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         // display:inline* 归一化告警（第五批⑧契约）：taffy 无 IFC——
@@ -929,6 +1166,7 @@ pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::Display)
 }
 
+/// position 关键字 → Position（sticky/fixed 容错拒绝）。
 pub fn parse_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -942,6 +1180,7 @@ pub fn parse_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::Position)
 }
 
+/// overflow 关键字 → Overflow（auto 归一为 Scroll）。
 pub fn parse_overflow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -955,6 +1194,7 @@ pub fn parse_overflow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::Overflow)
 }
 
+/// box-sizing 关键字 → BoxSizing。
 pub fn parse_box_sizing(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1284,6 +1524,7 @@ fn parse_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::Align)
 }
 
+/// flex-direction 关键字 → FlexDirection。
 pub fn parse_flex_direction(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1297,6 +1538,7 @@ pub fn parse_flex_direction(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::FlexDirection)
 }
 
+/// flex-wrap 关键字 → FlexWrap。
 pub fn parse_flex_wrap(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1309,6 +1551,7 @@ pub fn parse_flex_wrap(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::FlexWrap)
 }
 
+/// border-*-style 关键字 → BorderStyle（hidden 归一 None）。
 pub fn parse_border_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1322,6 +1565,7 @@ pub fn parse_border_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::BorderStyle)
 }
 
+/// text-align 关键字 → TextAlign（justify 由 parley Justify 消费）。
 pub fn parse_text_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1337,6 +1581,7 @@ pub fn parse_text_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::TextAlign)
 }
 
+/// white-space 关键字 → WhiteSpace（pre-wrap/break-spaces 归一 Pre）。
 pub fn parse_white_space(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1349,6 +1594,7 @@ pub fn parse_white_space(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::WhiteSpace)
 }
 
+/// font-style 关键字 → FontStyle（oblique 归一 Italic）。
 pub fn parse_font_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
@@ -1360,6 +1606,7 @@ pub fn parse_font_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::FontStyle)
 }
 
+/// line-height：normal | <number>（无单位倍数）| <length-percentage>。
 pub fn parse_line_height(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     // normal | <number> | <length-percentage>（try_parse 失败自动回滚）
     let kw = p.try_parse(|p| -> ValResult<LineHeight> {
@@ -1376,6 +1623,7 @@ pub fn parse_line_height(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
+/// font-size：<length-percentage> 或 CSS 绝对字号关键字（物化为 px 表）。
 pub fn parse_font_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let kw = p.try_parse(|p| -> ValResult<LengthPercentage> {
         let t = p.next()?.clone();
@@ -1402,6 +1650,7 @@ pub fn parse_font_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
+/// font-weight：normal→400、bold→700 或 1–1000 的 <number>。
 pub fn parse_font_weight(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
     match &t {
@@ -1512,6 +1761,8 @@ fn generic_or_named(name: &str) -> FamilyName {
 
 // ---------- grid track 列表 ----------
 
+/// grid-template-columns/rows 与 grid-auto-* 共用：轨道列表
+/// （repeat(整数, …) / repeat(auto-fill|auto-fit, …)）。
 pub fn parse_grid_tracks(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let mut tracks = Vec::new();
     loop {
@@ -1603,6 +1854,7 @@ fn parse_repeat_track_list(p: &mut Parser<'_>) -> ValResult<Vec<TrackSize>> {
 
 // ---------- background / box-shadow ----------
 
+/// background-image：none | url() | linear-gradient()/radial-gradient()。
 pub fn parse_background_image(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
     match &t {
@@ -1805,6 +2057,7 @@ fn parse_gradient_stops(p: &mut Parser<'_>) -> ValResult<Vec<ColorStop>> {
     Ok(stops)
 }
 
+/// box-shadow：none 或逗号分隔阴影列表（inset 前导、2/3/4 长度 + 颜色）。
 pub fn parse_box_shadow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let none = p.try_parse(|p| -> ValResult<()> {
         let t = p.next()?.clone();
@@ -1996,11 +2249,17 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
 
 /// timing function（第五批⑰）：linear/ease 系三次贝塞尔 + steps()。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum TimingFn {
+    /// linear — 恒速。
     Linear,
+    /// ease — cubic-bezier(0.25, 0.1, 0.25, 1)。
     Ease,
+    /// ease-in — cubic-bezier(0.42, 0, 1, 1)。
     EaseIn,
+    /// ease-out — cubic-bezier(0, 0, 0.58, 1)。
     EaseOut,
+    /// ease-in-out — cubic-bezier(0.42, 0, 0.58, 1)。
     EaseInOut,
     /// (n, jump_end)：jump_end=true → 阶跃发生在段尾（CSS steps 默认 end）。
     Steps(u32, bool),
@@ -2049,19 +2308,29 @@ impl TimingFn {
 
 /// animation-direction（第五批⑰）。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum AnimDirection {
+    /// normal — 每轮正向播放。
     Normal,
+    /// reverse — 每轮反向播放。
     Reverse,
+    /// alternate — 轮次交替正/反。
     Alternate,
+    /// alternate-reverse — 轮次交替反/正。
     AlternateReverse,
 }
 
 /// animation-fill-mode（第五批⑰）。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum AnimFillMode {
+    /// none — 动画区间外不施加关键帧样式（默认）。
     None,
+    /// forwards — 结束后保持最后一帧。
     Forwards,
+    /// backwards — 延迟期间施加第一帧。
     Backwards,
+    /// both — 前后均填充（backwards+forwards）。
     Both,
 }
 
