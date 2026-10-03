@@ -7,10 +7,23 @@
 //! !important 标记，解析层即丢弃）。
 
 use crate::css::decl::TokenBuf;
+use crate::css::property::ContainerType;
 use crate::css::property::PropertyId;
 use crate::css::stylesheet::{MediaEnv, Rule, Stylesheet};
 use crate::selector::match_specificity;
 use crate::tree::{NodeId, StyleTree};
+
+/// 可查询容器的一帧快照（阶段2③）：restyle DFS 自祖先向内压栈，
+/// @container 求值自栈顶向外查找。
+#[derive(Debug, Clone, Default)]
+pub struct ContainerCtx {
+    /// container-name 名单（空 = 无名容器）。
+    pub names: Vec<String>,
+    /// container-type（normal 不入栈）。
+    pub ctype: ContainerType,
+    /// 内容盒尺寸（布局上一 pass 记录；None = 尺寸未就绪 → 特性 unknown）。
+    pub size: Option<[f32; 2]>,
+}
 
 /// 级联来源层。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -105,12 +118,14 @@ pub struct MatchedRule<'a> {
     pub specificity: u32,
 }
 
-/// 收集单节点命中的规则（@media 先行求值过滤）。
+/// 收集单节点命中的规则（@media 先行求值过滤；@container 按祖先容器
+/// 快照求值过滤）。
 pub fn match_rules<'a>(
     tree: &StyleTree,
     id: NodeId,
     sheet: &'a Stylesheet,
     env: &MediaEnv,
+    container_ctx: &[ContainerCtx],
 ) -> Vec<MatchedRule<'a>> {
     sheet
         .rules
@@ -118,6 +133,11 @@ pub fn match_rules<'a>(
         .filter_map(|rule| {
             if let Some(q) = &rule.media {
                 if !q.eval(env) {
+                    return None;
+                }
+            }
+            if let Some(conds) = &rule.container {
+                if !conds.iter().all(|c| c.eval(container_ctx)) {
                     return None;
                 }
             }
@@ -133,11 +153,12 @@ pub fn cascade_declarations<'a>(
     id: NodeId,
     sheet: &'a Stylesheet,
     env: &MediaEnv,
+    container_ctx: &[ContainerCtx],
 ) -> CascadeOutput<'a> {
     let node = tree.node(id);
     let mut out = CascadeOutput::default();
 
-    for matched in match_rules(tree, id, sheet, env) {
+    for matched in match_rules(tree, id, sheet, env, container_ctx) {
         let (rule, specificity) = (matched.rule, matched.specificity);
         for d in &rule.declarations.decls {
             push_decl(
@@ -243,7 +264,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default());
+        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &[]);
         assert_eq!(color_of(&out).unwrap()[0], 1.0); // red 胜
     }
 
@@ -252,7 +273,7 @@ mod tests {
         // important 样式表胜过高特异性 normal
         let sheet = parse_stylesheet("div { color: blue !important } .a { color: red }");
         let (tree, n) = tree_one("color: green");
-        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default());
+        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &[]);
         assert_eq!(color_of(&out).unwrap()[2], 1.0); // blue 胜
     }
 
@@ -260,7 +281,7 @@ mod tests {
     fn inline_normal_beats_stylesheet_normal() {
         let sheet = parse_stylesheet("div { color: red }");
         let (tree, n) = tree_one("color: blue");
-        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default());
+        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &[]);
         assert_eq!(color_of(&out).unwrap()[2], 1.0); // blue 胜
     }
 
@@ -277,7 +298,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default());
+        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &[]);
         assert_eq!(color_of(&out).unwrap()[2], 1.0); // 后者 blue 胜
     }
 
@@ -303,13 +324,13 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            cascade_declarations(&tree, n, &sheet, &wide)
+            cascade_declarations(&tree, n, &sheet, &wide, &[])
                 .winners
                 .iter()
                 .any(|(p, _)| *p == PropertyId::Color)
         );
         assert!(
-            cascade_declarations(&tree, n, &sheet, &narrow)
+            cascade_declarations(&tree, n, &sheet, &narrow, &[])
                 .winners
                 .is_empty()
         );
@@ -319,11 +340,118 @@ mod tests {
     fn custom_inline_beats_stylesheet() {
         let sheet = parse_stylesheet("div { --x: 10px }");
         let (tree, n) = tree_one("--x: 20px");
-        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default());
+        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &[]);
         assert_eq!(out.custom_winners.len(), 1);
         assert_eq!(
             crate::css::decl::token_buf_to_string(out.custom_winners[0].1.tokens),
             "20px"
+        );
+    }
+
+    fn ctx(names: &[&str], ctype: ContainerType, w: f32) -> ContainerCtx {
+        ContainerCtx {
+            names: names.iter().map(|s| s.to_string()).collect(),
+            ctype,
+            size: Some([w, 100.0]),
+        }
+    }
+
+    #[test]
+    fn container_rule_matches_named_and_unnamed() {
+        // 有名段按名自最近祖先向外查（跳过无名/异名）；无名段取最近容器。
+        let sheet = parse_stylesheet(
+            "@container panel (min-width: 300px) { .a { color: red } } \
+             @container (min-width: 350px) { .a { color: blue } }",
+        );
+        assert!(sheet.report.is_clean());
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let n = tree.insert_child(
+            root,
+            StyleNode {
+                name: Some("div".into()),
+                classes: ["a"].iter().map(|c| c.to_string()).collect(),
+                ..Default::default()
+            },
+        );
+        // 最近容器无名 400px；外层有名 panel 320px。
+        let stack = [
+            ctx(&["panel"], ContainerType::InlineSize, 320.0),
+            ctx(&[], ContainerType::InlineSize, 400.0),
+        ];
+        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &stack);
+        // 有名段查到 panel=320 ≥ 300 命中；无名段取最近 400 ≥ 350 命中——
+        // 同特异性后者胜 → blue。
+        assert_eq!(color_of(&out).unwrap()[2], 1.0);
+        // 有名段：panel 只匹配名为 panel 的容器——400 的无名容器不参与。
+        let stack2 = [ctx(&[], ContainerType::InlineSize, 400.0)];
+        let out2 = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &stack2);
+        assert!(out2.winners.iter().any(|(p, _)| *p == PropertyId::Color));
+        let only_named =
+            parse_stylesheet("@container panel (min-width: 300px) { .a { color: red } }");
+        assert!(
+            cascade_declarations(&tree, n, &only_named, &MediaEnv::default(), &stack2)
+                .winners
+                .is_empty()
+        );
+        // 尺寸不达标 → 不命中。
+        let small = [ctx(&["panel"], ContainerType::InlineSize, 200.0)];
+        assert!(
+            cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &small)
+                .winners
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn container_inline_size_blocks_block_axis_features() {
+        // inline-size 容器上块轴/双轴特性 = unknown → 不匹配。
+        let sheet = parse_stylesheet(
+            "@container (min-height: 50px) { .a { color: red } } \
+             @container (orientation: portrait) { .a { color: green } } \
+             @container (min-width: 300px) { .a { color: blue } }",
+        );
+        assert!(sheet.report.is_clean());
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let n = tree.insert_child(
+            root,
+            StyleNode {
+                name: Some("div".into()),
+                classes: ["a"].iter().map(|c| c.to_string()).collect(),
+                ..Default::default()
+            },
+        );
+        let stack = [ctx(&[], ContainerType::InlineSize, 400.0)];
+        let out = cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &stack);
+        // 高度特性与 orientation 均被门控，仅 min-width 命中 → blue。
+        assert_eq!(color_of(&out).unwrap()[2], 1.0);
+        // size 容器：块轴与 orientation 正常参与（400×100 → 横向）。
+        let sheet2 = parse_stylesheet("@container (min-height: 50px) { .a { color: red } }");
+        let stack2 = [ctx(&[], ContainerType::Size, 400.0)];
+        let out2 = cascade_declarations(&tree, n, &sheet2, &MediaEnv::default(), &stack2);
+        assert_eq!(color_of(&out2).unwrap()[0], 1.0);
+    }
+
+    #[test]
+    fn container_no_available_container_no_match() {
+        // 无可用容器（未入栈）→ 不匹配。
+        let sheet = parse_stylesheet("@container (min-width: 100px) { .a { color: red } }");
+        assert!(sheet.report.is_clean());
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let n = tree.insert_child(
+            root,
+            StyleNode {
+                name: Some("div".into()),
+                classes: ["a"].iter().map(|c| c.to_string()).collect(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            cascade_declarations(&tree, n, &sheet, &MediaEnv::default(), &[])
+                .winners
+                .is_empty()
         );
     }
 }

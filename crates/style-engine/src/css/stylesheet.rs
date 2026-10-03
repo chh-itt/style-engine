@@ -1,12 +1,15 @@
-//! 样式表：规则解析（选择器预lude + 声明块）与 @media 子集。
+//! 样式表：规则解析（选择器预lude + 声明块）与 @media / @container 子集。
 //!
 //! 支持：顶层规则、`@media`（一层嵌套；screen/all 类型；min-/max-width/
-//! height、prefers-color-scheme、prefers-reduced-motion）。其余 at-rule
-//! 按容错跳过并告警。
+//! height、prefers-color-scheme、prefers-reduced-motion）、`@container`
+//!（阶段2③：有名/无名容器、尺寸特性旧形与范围形、orientation；条件内
+//! not/or 未做，解析即告警跳过）。其余 at-rule 按容错跳过并告警。
 
+use crate::cascade::ContainerCtx;
 use crate::css::decl::{
     DeclarationBlock, TokenBuf, capture_tokens, parse_declaration_block, token_buf_to_string,
 };
+use crate::css::property::ContainerType;
 use crate::css::value::{ResolveCtx, parse_length_percentage};
 use crate::error::ParseReport;
 use crate::selector::{StyleSelectorList, parse_selector_list};
@@ -21,6 +24,8 @@ pub struct Rule {
     pub declarations: crate::css::decl::DeclarationBlock,
     /// 所属 @media 条件；None = 无条件。
     pub media: Option<MediaQuery>,
+    /// 所属 @container 条件段列表（段间 OR）；None = 无条件。
+    pub container: Option<Vec<ContainerCondition>>,
 }
 
 /// 解析完成的样式表。
@@ -29,6 +34,8 @@ pub struct Stylesheet {
     pub rules: Vec<Rule>,
     pub keyframes: Vec<KeyframesRule>,
     pub report: ParseReport,
+    /// 表内存在 @container 规则（engine 帧内收敛快路径判据，解析后单源导出）。
+    pub has_container_rules: bool,
 }
 
 // ---------- @keyframes（第五批⑰） ----------
@@ -349,15 +356,311 @@ fn parse_feature_body(p: &mut Parser<'_>) -> Result<MediaFeature, ParseError<Bas
     })
 }
 
+// ---------- @container 子集（阶段2③） ----------
+
+/// 容器查询尺寸轴。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerAxis {
+    Inline,
+    Block,
+}
+
+/// 容器查询比较算子（min-*/max-* 旧形与 > < >= <= 范围形统一物化；
+/// ':' 即相等比较）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerOp {
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// 单个容器查询特性（v1：尺寸特性 + orientation）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ContainerFeature {
+    Size {
+        axis: ContainerAxis,
+        op: ContainerOp,
+        value: f32,
+    },
+    /// orientation: portrait（true）/ landscape（false）。
+    Orientation(bool),
+}
+
+impl ContainerFeature {
+    fn eval(&self, c: &ContainerCtx) -> bool {
+        // inline-size 容器只供 inline 轴——块轴尺寸与双轴特性（orientation）
+        // = unknown → 整条不匹配（CSS 规范 unknown 语义）；容器尺寸未就绪
+        //（首帧收敛前）同理。
+        match self {
+            Self::Size { axis, op, value } => {
+                let Some(size) = c.size else {
+                    return false;
+                };
+                if c.ctype == ContainerType::InlineSize && *axis == ContainerAxis::Block {
+                    return false;
+                }
+                let s = if *axis == ContainerAxis::Inline {
+                    size[0]
+                } else {
+                    size[1]
+                };
+                match op {
+                    ContainerOp::Eq => s == *value,
+                    ContainerOp::Lt => s < *value,
+                    ContainerOp::Le => s <= *value,
+                    ContainerOp::Gt => s > *value,
+                    ContainerOp::Ge => s >= *value,
+                }
+            }
+            Self::Orientation(portrait) => {
+                if c.ctype == ContainerType::InlineSize {
+                    return false;
+                }
+                let Some(size) = c.size else {
+                    return false;
+                };
+                (size[1] >= size[0]) == *portrait
+            }
+        }
+    }
+}
+
+/// 单个 @container 条件段：可选容器名 + AND 特性列表；段间逗号 = OR。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainerCondition {
+    pub name: Option<String>,
+    pub features: Vec<ContainerFeature>,
+}
+
+impl ContainerCondition {
+    /// 求值：有名段自最近祖先向外找名字匹配的容器（跳过无名/异名容器），
+    /// 无名段取最近容器；无可用容器 → 不匹配。
+    pub(crate) fn eval(&self, ctx: &[ContainerCtx]) -> bool {
+        let entry = match &self.name {
+            Some(n) => ctx.iter().rev().find(|e| e.names.iter().any(|m| m == n)),
+            None => ctx.last(),
+        };
+        let Some(e) = entry else {
+            return false;
+        };
+        self.features.iter().all(|f| f.eval(e))
+    }
+}
+
+// ---------- @container 条件解析（阶段2③） ----------
+
+/// 特性名 → 尺寸轴（width/inline-size = 行轴，height/block-size = 块轴）。
+fn container_axis(name: &str) -> Option<ContainerAxis> {
+    match name {
+        "width" | "inline-size" => Some(ContainerAxis::Inline),
+        "height" | "block-size" => Some(ContainerAxis::Block),
+        _ => None,
+    }
+}
+
+/// 解析 @container prelude：`<container-condition>#`。
+/// 段 = [容器名]? 特性(and 特性)*（特性并置同为 AND）；段间逗号 = OR；
+/// 容器名 = custom-ident（not/and/or 为查询保留字）。条件内 not/or 未做——
+/// 解析即报错（整规则跳过告警）。仅容器名（无名特性查询）合法。
+fn parse_container_conditions(
+    p: &mut Parser<'_>,
+) -> Result<Vec<ContainerCondition>, ParseError<BasicParseError>> {
+    let mut segments = Vec::new();
+    loop {
+        p.skip_whitespace();
+        let mut name: Option<String> = None;
+        let named = p.try_parse(|p| -> Result<String, ParseError<BasicParseError>> {
+            let t = p.next()?.clone();
+            match &t {
+                Token::Ident(id)
+                    if !id.eq_ignore_ascii_case("not")
+                        && !id.eq_ignore_ascii_case("and")
+                        && !id.eq_ignore_ascii_case("or") =>
+                {
+                    Ok(id.to_string())
+                }
+                _ => Err(p.new_error_for_next_token()),
+            }
+        });
+        if let Ok(n) = named {
+            name = Some(n);
+            p.skip_whitespace();
+        }
+        let mut features = Vec::new();
+        loop {
+            let got = p.try_parse(parse_container_feature).ok();
+            if let Some(f) = got {
+                features.push(f);
+            }
+            let has_and = p
+                .try_parse(|p| -> Result<(), ParseError<BasicParseError>> {
+                    let t = p.next()?.clone();
+                    match &t {
+                        Token::Ident(id) if id.eq_ignore_ascii_case("and") => Ok(()),
+                        _ => Err(p.new_error_for_next_token()),
+                    }
+                })
+                .is_ok();
+            if !has_and {
+                // 并置（juxtaposition）同为 AND：再试一个特性，失败即收束
+                match p.try_parse(parse_container_feature) {
+                    Ok(f) => features.push(f),
+                    Err(_) => break,
+                }
+            }
+        }
+        if name.is_none() && features.is_empty() {
+            return Err(p.new_error_for_next_token());
+        }
+        segments.push(ContainerCondition { name, features });
+        let has_comma = p
+            .try_parse(|p| -> Result<(), ParseError<BasicParseError>> {
+                let t = p.next()?.clone();
+                match t {
+                    Token::Comma => Ok(()),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            })
+            .is_ok();
+        if !has_comma {
+            break;
+        }
+    }
+    p.expect_exhausted()?;
+    Ok(segments)
+}
+
+/// 解析单个容器特性（消费 '('）：`(orientation: portrait|landscape)`；
+/// `(width|height|inline-size|block-size <op> <length>)` 及值在前的反序
+/// `(400px <= width)`；旧形 `(min-*/max-*: <length>)`。':' 即相等比较。
+fn parse_container_feature(
+    p: &mut Parser<'_>,
+) -> Result<ContainerFeature, ParseError<BasicParseError>> {
+    p.expect_parenthesis_block()?;
+    p.parse_nested_block(|p| {
+        p.skip_whitespace();
+        // 值在前的范围形：先试探（失败回滚到特性在前的形式）
+        if let Ok(f) = p.try_parse(|p| {
+            let value = parse_container_len(p)?;
+            let op = parse_container_op(p)?;
+            p.skip_whitespace();
+            let t = p.next()?.clone();
+            let Token::Ident(name) = &t else {
+                return Err(p.new_error_for_next_token());
+            };
+            let Some(axis) = container_axis(&name.to_ascii_lowercase()) else {
+                return Err(p.new_error_for_next_token());
+            };
+            // 反序形算子翻面：`300px <= width` ≡ `width >= 300px`。
+            let op = match op {
+                ContainerOp::Le => ContainerOp::Ge,
+                ContainerOp::Lt => ContainerOp::Gt,
+                ContainerOp::Ge => ContainerOp::Le,
+                ContainerOp::Gt => ContainerOp::Lt,
+                ContainerOp::Eq => ContainerOp::Eq,
+            };
+            Ok(ContainerFeature::Size { axis, op, value })
+        }) {
+            return Ok(f);
+        }
+        let t = p.next()?.clone();
+        let Token::Ident(name) = &t else {
+            return Err(p.new_error_for_next_token());
+        };
+        let lname = name.to_ascii_lowercase();
+        if lname == "orientation" {
+            p.expect_colon()?;
+            p.skip_whitespace();
+            let v = p.next()?.clone();
+            let Token::Ident(value) = &v else {
+                return Err(p.new_error_for_next_token());
+            };
+            return match value.to_ascii_lowercase().as_str() {
+                "portrait" => Ok(ContainerFeature::Orientation(true)),
+                "landscape" => Ok(ContainerFeature::Orientation(false)),
+                _ => Err(p.new_error_for_next_token()),
+            };
+        }
+        // 旧形（legacy）min-*/max-* 前缀：`: 400px` 等价 ≥/≤（CSS Values 4
+        // 兼容写法，显式 >= / <= 亦可）；裸轴名 = 等值比较。
+        let (axis, forced_op): (Option<ContainerAxis>, Option<ContainerOp>) =
+            if let Some(rest) = lname.strip_prefix("min-") {
+                (container_axis(rest), Some(ContainerOp::Ge))
+            } else if let Some(rest) = lname.strip_prefix("max-") {
+                (container_axis(rest), Some(ContainerOp::Le))
+            } else {
+                (container_axis(&lname), None)
+            };
+        let Some(axis) = axis else {
+            return Err(p.new_error_for_next_token());
+        };
+        let op = parse_container_op(p)?;
+        let value = parse_container_len(p)?;
+        Ok(ContainerFeature::Size {
+            axis,
+            // 旧形 + 冒号（等值语法）→ 语义改写为 ≥/≤；显式范围算子照用
+            op: forced_op.filter(|_| op == ContainerOp::Eq).unwrap_or(op),
+            value,
+        })
+    })
+}
+
+/// 比较算子：':'/'=' = 相等，'<' '>' 可跟 '='（<= >=）。
+fn parse_container_op(p: &mut Parser<'_>) -> Result<ContainerOp, ParseError<BasicParseError>> {
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    match t {
+        Token::Colon | Token::Delim('=') => Ok(ContainerOp::Eq),
+        Token::Delim(c @ ('<' | '>')) => {
+            let eq = p
+                .try_parse(|p| -> Result<(), ParseError<BasicParseError>> {
+                    let t = p.next()?.clone();
+                    match t {
+                        Token::Delim('=') => Ok(()),
+                        _ => Err(p.new_error_for_next_token()),
+                    }
+                })
+                .is_ok();
+            Ok(match (c, eq) {
+                ('<', true) => ContainerOp::Le,
+                ('<', false) => ContainerOp::Lt,
+                ('>', true) => ContainerOp::Ge,
+                _ => ContainerOp::Gt,
+            })
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// 特性长度（px 直接取值；em/rem 按 16px 基准，与 @media 长度一致；
+/// viewport 单位在此无上下文 → 0）。
+fn parse_container_len(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
+    let lp = parse_length_percentage(p)?;
+    lp.resolve(
+        &ResolveCtx {
+            em: 16.0,
+            rem: 16.0,
+            viewport_w: 0.0,
+            viewport_h: 0.0,
+        },
+        0.0,
+    )
+    .ok_or_else(|| p.new_error_for_next_token())
+}
+
 // ---------- 规则表解析 ----------
 
-/// 顶层/媒体块共用的规则解析器。
+/// 顶层/媒体块/容器块共用的规则解析器。
 #[derive(Default)]
 struct StylesheetParser {
     report: ParseReport,
     rules: Vec<Rule>,
     keyframes: Vec<KeyframesRule>,
     media: Option<MediaQuery>,
+    /// 处于 @container 块内时携带的条件段列表（嵌套扁平 AND：每段独立查容器）。
+    container: Vec<ContainerCondition>,
     order: u32,
 }
 
@@ -398,6 +701,7 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
             order: self.order,
             declarations: block,
             media: self.media.clone(),
+            container: (!self.container.is_empty()).then(|| self.container.clone()),
         });
         Ok(())
     }
@@ -422,6 +726,20 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                         loc.line + 1,
                         loc.column + 1,
                         format!("invalid @media condition '{name}'"),
+                    );
+                    Err(ParseError::unexpected_token())
+                }
+            }
+        } else if name.eq_ignore_ascii_case("container") {
+            // @container（阶段2③）：prelude = 条件段列表
+            let loc = input.current_source_location();
+            match parse_container_conditions(input) {
+                Ok(conds) => Ok(AtPrelude::Container(conds)),
+                Err(_) => {
+                    self.report.push(
+                        loc.line + 1,
+                        loc.column + 1,
+                        format!("invalid @container condition '{name}'"),
                     );
                     Err(ParseError::unexpected_token())
                 }
@@ -458,7 +776,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                 }
             }
         } else {
-            // @import/@supports/@container…：MVP 跳过整条规则并告警
+            // @import/@supports/…：MVP 跳过整条规则并告警
             let loc = input.current_source_location();
             self.report.push(
                 loc.line + 1,
@@ -483,12 +801,39 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                 Ok(())
             }
             AtPrelude::Media(query) => {
-                // 递归解析媒体块内规则（继承 media 上下文与源顺序）
+                // 递归解析媒体块内规则（继承 media/container 上下文与源顺序）
                 let mut sub = StylesheetParser {
                     report: ParseReport::new(),
                     rules: Vec::new(),
                     keyframes: Vec::new(),
                     media: Some(query),
+                    container: self.container.clone(),
+                    order: self.order,
+                };
+                {
+                    let iter = cssparser::RuleBodyParser::new(input, &mut sub);
+                    for item in iter {
+                        let _ = item; // 错误已在 sub 内报告
+                    }
+                }
+                self.order = sub.order;
+                self.rules.extend(sub.rules);
+                self.report.extend(sub.report);
+                Ok(())
+            }
+            AtPrelude::Container(conds) => {
+                // @container 块（阶段2③）：递归解析，条件段扁平并入
+                //（嵌套 @container/@media = 每段独立查容器，语义等价 AND）
+                let mut sub = StylesheetParser {
+                    report: ParseReport::new(),
+                    rules: Vec::new(),
+                    keyframes: Vec::new(),
+                    media: self.media.clone(),
+                    container: {
+                        let mut c = self.container.clone();
+                        c.extend(conds);
+                        c
+                    },
                     order: self.order,
                 };
                 {
@@ -523,10 +868,12 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
     }
 }
 
-/// at-rule prelude 分类（第五批⑰扩展：media / keyframes / 静默跳过）。
+/// at-rule prelude 分类（第五批⑰扩展：media / keyframes / 静默跳过；
+/// 阶段2③：container）。
 #[derive(Debug, Clone)]
 enum AtPrelude {
     Media(MediaQuery),
+    Container(Vec<ContainerCondition>),
     Keyframes(String),
     /// @font-face（第五批⑯）：整块静默消费。
     Skip,
@@ -663,6 +1010,7 @@ pub fn parse_stylesheet(source: &str) -> Stylesheet {
             .push(line, column, "invalid rule skipped".to_string());
     }
     Stylesheet {
+        has_container_rules: sp.rules.iter().any(|r| r.container.is_some()),
         rules: sp.rules,
         keyframes: sp.keyframes,
         report: sp.report,
@@ -837,5 +1185,89 @@ mod tests {
             &decls[4].value,
             DeclSource::Parsed(DeclValue::Display(_))
         ));
+    }
+
+    #[test]
+    fn container_rule_parse_shapes() {
+        // 阶段2③：名+特性 / 仅名（无特性查询）/ 逗号 OR / 反序形 / 旧形。
+        let sheet = parse_stylesheet(
+            "@container panel (min-width: 300px) { .a { color: red } } \
+             @container sidebar { .b { color: blue } } \
+             @container (min-width: 100px), (max-width: 50px) { .c { color: green } } \
+             @container (300px <= width) { .d { color: black } }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert!(sheet.has_container_rules);
+        assert_eq!(sheet.rules.len(), 4);
+        let c0 = sheet.rules[0].container.as_ref().unwrap();
+        assert_eq!(c0.len(), 1);
+        assert_eq!(c0[0].name.as_deref(), Some("panel"));
+        assert!(matches!(
+            &c0[0].features[..],
+            [ContainerFeature::Size { axis: ContainerAxis::Inline, op: ContainerOp::Ge, value }]
+                if *value == 300.0
+        ));
+        // 仅名：特性空段（有无名容器即命中，等价 style 查询）。
+        let c1 = sheet.rules[1].container.as_ref().unwrap();
+        assert_eq!(c1.len(), 1);
+        assert_eq!(c1[0].name.as_deref(), Some("sidebar"));
+        assert!(c1[0].features.is_empty());
+        // 逗号 = 两段 OR。
+        let c2 = sheet.rules[2].container.as_ref().unwrap();
+        assert_eq!(c2.len(), 2);
+        assert!(c2.iter().all(|s| s.name.is_none()));
+        assert!(matches!(
+            &c2[0].features[..],
+            [ContainerFeature::Size {
+                op: ContainerOp::Ge,
+                ..
+            }]
+        ));
+        // 旧形 max-width + 冒号 → Le。
+        assert!(matches!(
+            &c2[1].features[..],
+            [ContainerFeature::Size {
+                op: ContainerOp::Le,
+                ..
+            }]
+        ));
+        // 反序形算子翻面：`300px <= width` ≡ width ≥ 300。
+        let c3 = sheet.rules[3].container.as_ref().unwrap();
+        assert!(matches!(
+            &c3[0].features[..],
+            [ContainerFeature::Size { axis: ContainerAxis::Inline, op: ContainerOp::Ge, value }]
+                if *value == 300.0
+        ));
+    }
+
+    #[test]
+    fn container_orientation_and_nested_media() {
+        // orientation 段 + @media 内嵌 @container（媒体过滤照常 + 容器段扁平）。
+        let sheet = parse_stylesheet(
+            "@container (orientation: landscape) { .a { color: red } } \
+             @media (min-width: 200px) { @container card (min-width: 100px) { .b { color: blue } } }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert!(matches!(
+            &sheet.rules[0].container.as_ref().unwrap()[0].features[..],
+            [ContainerFeature::Orientation(false)] // landscape
+        ));
+        let r1 = &sheet.rules[1];
+        assert!(r1.media.is_some());
+        let c1 = r1.container.as_ref().unwrap();
+        assert_eq!(c1.len(), 1);
+        assert_eq!(c1[0].name.as_deref(), Some("card"));
+    }
+
+    #[test]
+    fn container_invalid_condition_skips_rule() {
+        // 特性缺值 / 未知特性名 → 整条 @container 跳过 + 告警（与 @media 同）。
+        let sheet = parse_stylesheet(
+            "@container (width) { .a { color: red } } \
+             @container (nope: 10px) { .b { color: blue } } .ok { color: black }",
+        );
+        assert!(!sheet.report.is_clean());
+        assert_eq!(sheet.rules.len(), 1);
+        assert!(sheet.rules[0].container.is_none());
     }
 }

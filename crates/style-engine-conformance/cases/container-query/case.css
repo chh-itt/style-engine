@@ -1,0 +1,10 @@
+/* 阶段2③：@container 尺寸查询。wrap 400px，box = inline-size 容器
+ * width:50% → 内容盒 200px（≥150 命中）。kid 基础 30×30 红；
+ * @container (min-width: 150px) 内 60×60 蓝。
+ * 期望几何：wrap(0,0,400,120) box(0,0,200,120)
+ * kid3(0,0,60,60) kid4(0,60,60,60)。 */
+body { margin: 0; }
+.wrap { width: 400px; background-color: #f0f0f0; }
+.box { container-type: inline-size; width: 50%; background-color: #ffcc00; }
+.kid { width: 30px; height: 30px; background-color: #cc3333; }
+@container (min-width: 150px) { .kid { width: 60px; height: 60px; background-color: #3366cc; } }

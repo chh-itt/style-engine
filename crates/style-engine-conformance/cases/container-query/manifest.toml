@@ -1,0 +1,12 @@
+# 阶段2③：@container 尺寸查询——inline-size 容器（50% 视口宽 → 200px 内容
+# 盒），min-width:150px 命中 → 子项 60×60 蓝；基础 30×30 红。Numeric+Pixel
+# 双通道（Pixel 关照查询命中后背景色切换）。
+viewport = [400.0, 400.0]
+scale = 1.0
+fonts = []
+features = ["container-type", "container-query", "min-width", "background-color", "percentage-width"]
+tolerance = 0.5
+
+[pixel]
+max_ratio = 0.001
+allowed = [1, 2]

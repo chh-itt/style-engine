@@ -134,6 +134,14 @@ pub enum PropertyId {
     TextAlign,
     WhiteSpace,
     LetterSpacing,
+    // 容器查询（阶段2③）
+    /// container-type（normal|size|inline-size）——size/inline-size 使节点
+    /// 成为可查询容器（引擎记录内容盒尺寸供 @container 求值；v1 不强制
+    /// size containment，FEATURES.md B 级偏差）。
+    ContainerType,
+    /// container-name（none|custom-ident#）——有名容器查询按名自最近祖先
+    /// 向外匹配。
+    ContainerName,
 }
 
 impl PropertyId {
@@ -224,6 +232,8 @@ impl PropertyId {
         Self::TextAlign,
         Self::WhiteSpace,
         Self::LetterSpacing,
+        Self::ContainerType,
+        Self::ContainerName,
     ];
 
     /// CSS 属性名（小写）。解析与诊断共用。
@@ -321,6 +331,8 @@ impl PropertyId {
             Self::TextAlign => "text-align",
             Self::WhiteSpace => "white-space",
             Self::LetterSpacing => "letter-spacing",
+            Self::ContainerType => "container-type",
+            Self::ContainerName => "container-name",
         }
     }
 
@@ -406,6 +418,21 @@ pub enum DeclValue {
     /// filter/clip-path 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
     /// 语义位（ADR-0008 全集），不携带也不实现滤镜/裁剪效果。
     Effect(bool),
+    /// container-type（阶段2③）：normal|size|inline-size。
+    ContainerType(ContainerType),
+    /// container-name（阶段2③）：none → 空 Vec；custom-ident# → 名单。
+    ContainerName(Vec<String>),
+}
+
+/// container-type（阶段2③）：size/inline-size 使节点成为可查询容器；
+/// v1 不强制 size containment（FEATURES.md B 级偏差），inline-size 容器
+/// 只供行轴尺寸（块轴特性 = unknown 不匹配）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContainerType {
+    #[default]
+    Normal,
+    Size,
+    InlineSize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -740,6 +767,40 @@ pub fn parse_column_span(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         }
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+/// container-name（阶段2③）：文法 `none | <custom-ident>+`——空格分隔
+/// 名单（非逗号列表）；none 必须单独出现；custom-ident 大小写敏感，
+/// 按规范原样保留；`--` 开头保留字非法。
+fn parse_container_name(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        let t = p.try_parse(|p| -> ValResult<(bool, String)> {
+            let t = p.next()?.clone();
+            let Token::Ident(id) = &t else {
+                return Err(p.new_error_for_next_token());
+            };
+            if id.starts_with("--") {
+                return Err(p.new_error_for_next_token());
+            }
+            Ok((id.eq_ignore_ascii_case("none"), id.to_string()))
+        });
+        let (is_none, id) = match t {
+            Ok(x) => x,
+            Err(_) => break,
+        };
+        if is_none {
+            if names.is_empty() {
+                return Ok(DeclValue::ContainerName(Vec::new()));
+            }
+            return Err(p.new_error_for_next_token());
+        }
+        names.push(id);
+    }
+    if names.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(DeclValue::ContainerName(names))
 }
 
 /// border-style 关键字族（none/hidden/solid/dashed/dotted）——三期⑤c
@@ -1865,6 +1926,16 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::ColumnSpan => parse_column_span(p),
         P::ColumnRuleWidth => parse_column_rule_width(p),
         P::ColumnRuleStyle => parse_column_rule_style(p),
+        P::ContainerType => keyword(p, |s| {
+            Some(match_ignore_ascii_case!(s,
+                "normal" => ContainerType::Normal,
+                "size" => ContainerType::Size,
+                "inline-size" => ContainerType::InlineSize,
+                _ => return None,
+            ))
+        })
+        .map(DeclValue::ContainerType),
+        P::ContainerName => parse_container_name(p),
         P::AnimationName => parse_animation_name(p),
         P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
         P::AnimationIterationCount => parse_iteration_count(p),

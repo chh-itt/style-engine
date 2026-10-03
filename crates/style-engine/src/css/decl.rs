@@ -9,9 +9,10 @@
 //!   后展开，逐槽级联竞争。
 
 use crate::css::property::{
-    BorderStyle, DeclValue, PropertyId, parse_border_style, parse_border_width, parse_color,
-    parse_column_count, parse_column_rule_style, parse_column_rule_width, parse_declaration,
-    parse_flex_direction, parse_flex_wrap, parse_len, parse_len_auto, parse_overflow,
+    BorderStyle, ContainerType, DeclValue, PropertyId, parse_border_style, parse_border_width,
+    parse_color, parse_column_count, parse_column_rule_style, parse_column_rule_width,
+    parse_declaration, parse_flex_direction, parse_flex_wrap, parse_len, parse_len_auto,
+    parse_overflow,
 };
 use crate::css::value::{ColorValue, LengthPercentage, ValResult, parse_number};
 use crate::error::ParseReport;
@@ -379,6 +380,7 @@ fn shorthand_exists(name: &str) -> bool {
             | "border"
             | "flex"
             | "flex-flow"
+            | "container"
     )
 }
 
@@ -450,6 +452,7 @@ fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
         ],
         "flex" => vec![P::FlexGrow, P::FlexShrink, P::FlexBasis],
         "flex-flow" => vec![P::FlexDirection, P::FlexWrap],
+        "container" => vec![P::ContainerName, P::ContainerType],
         _ => return None,
     })
 }
@@ -984,6 +987,80 @@ pub(crate) fn expand_shorthand(
             }
             out
         }
+        "container" => {
+            // container 简写（阶段2③）：`<'container-name'> [ / <'container-type'> ]?`。
+            // 单关键字特判：none → 名单空；size/inline-size/normal → 类型
+            //（CSSWG 裁定无名单值时的类型关键字歧义归 container-type，
+            // 名叫 "size" 的容器在简写中不可拼写）；其余 → 容器名。
+            let mut names: Vec<String> = Vec::new();
+            let mut ctype: Option<ContainerType> = None;
+            let mut empty = false;
+            loop {
+                let t = p.try_parse(|p| -> ValResult<String> {
+                    p.skip_whitespace();
+                    let t = p.next()?.clone();
+                    let Token::Ident(id) = &t else {
+                        return Err(p.new_error_for_next_token());
+                    };
+                    if id.starts_with("--") {
+                        return Err(p.new_error_for_next_token());
+                    }
+                    Ok(id.to_string())
+                });
+                let id = match t {
+                    Ok(id) => id,
+                    Err(_) => break,
+                };
+                if id.eq_ignore_ascii_case("none") && names.is_empty() {
+                    empty = true;
+                    break;
+                }
+                match id.to_ascii_lowercase().as_str() {
+                    "size" | "inline-size" | "normal" if names.is_empty() => {
+                        ctype = Some(match id.to_ascii_lowercase().as_str() {
+                            "size" => ContainerType::Size,
+                            "inline-size" => ContainerType::InlineSize,
+                            _ => ContainerType::Normal,
+                        });
+                        break;
+                    }
+                    _ => names.push(id),
+                }
+            }
+            // 可选 `/` + 容器类型
+            let slash = p.try_parse(|p| -> ValResult<()> {
+                p.skip_whitespace();
+                p.expect_delim('/')?;
+                Ok(())
+            });
+            if slash.is_ok() {
+                p.skip_whitespace();
+                let t = p.next()?.clone();
+                let Token::Ident(id) = &t else {
+                    return Err(p.new_error_for_next_token());
+                };
+                ctype = Some(match id.to_ascii_lowercase().as_str() {
+                    "normal" => ContainerType::Normal,
+                    "size" => ContainerType::Size,
+                    "inline-size" => ContainerType::InlineSize,
+                    _ => return Err(p.new_error_for_next_token()),
+                });
+            }
+            p.expect_exhausted()?;
+            if !empty && names.is_empty() && ctype.is_none() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![
+                (
+                    P::ContainerName,
+                    DeclValue::ContainerName(if empty { Vec::new() } else { names }),
+                ),
+                (
+                    P::ContainerType,
+                    DeclValue::ContainerType(ctype.unwrap_or(ContainerType::Normal)),
+                ),
+            ]
+        }
         _ => return Ok(None),
     }))
 }
@@ -1200,6 +1277,94 @@ mod tests {
     }
 
     #[test]
+    fn container_longhands_parse() {
+        // 阶段2③ 长手：container-type 三关键字；container-name = none |
+        // 空格分隔 custom-ident+（非逗号）；none 必须单独出现。
+        let (b, r) = block("container-type: inline-size");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ContainerType(ContainerType::InlineSize)
+        ));
+        let (b, r) = block("container-name: none");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ContainerName(names) if names.is_empty()
+        ));
+        let (b, r) = block("container-name: a b");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ContainerName(names)
+                if names.len() == 2 && names[0] == "a" && names[1] == "b"
+        ));
+        // none 与名字混排非法；未知 type 关键字拒绝。
+        let (b, r) = block("container-name: none a");
+        assert!(!r.is_clean() || b.decls.is_empty());
+        let (b, r) = block("container-type: contain");
+        assert!(!r.is_clean() || b.decls.is_empty());
+    }
+
+    #[test]
+    fn container_shorthand_name_and_type() {
+        // 阶段2③ container 简写 = <'container-name'> [ / <'container-type'> ]?
+        // （真简写：两长手同时写/重置）。
+        let (b, r) = block("container: sidebar / inline-size");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 2);
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ContainerName(names) if names.len() == 1 && names[0] == "sidebar"
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ContainerType(ContainerType::InlineSize)
+        ));
+        // 仅名 → type 重置 normal。
+        let (b, r) = block("container: card");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ContainerName(names) if names.len() == 1
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ContainerType(ContainerType::Normal)
+        ));
+        // 裸类型关键字（CSSWG 裁定 size 歧义归 type）→ 名重置空。
+        let (b, r) = block("container: size");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ContainerName(names) if names.is_empty()
+        ));
+        assert!(matches!(
+            parsed(&b.decls[1]),
+            DeclValue::ContainerType(ContainerType::Size)
+        ));
+        // 多名（空格分隔）。
+        let (b, r) = block("container: a b");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ContainerName(names) if names.len() == 2
+        ));
+        // var() 简写 → 每长手 PendingShorthand（与 margin 同管线）。
+        let (b, r) = block("container: var(--c)");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 2);
+        assert!(matches!(
+            &b.decls[0].value,
+            DeclSource::PendingShorthand { shorthand, .. } if shorthand == "container"
+        ));
+        // -- 前缀自定义 ident 拒绝（container-name 文法）。
+        let (b, r) = block("container: --x");
+        assert!(!r.is_clean());
+        assert!(b.decls.is_empty());
+    }
+
+    #[test]
     fn column_rule_shorthand_and_longhands() {
         // 三期⑤c 列规简写：<'column-rule-width'> || <'column-rule-style'>
         // || <'column-rule-color'>；未指定长手重置初始（width medium、
@@ -1345,6 +1510,7 @@ mod tests {
             ("border", "1px solid red"),
             ("flex", "1 2 30px"),
             ("flex-flow", "row wrap"),
+            ("container", "panel / size"),
         ];
         for (name, val) in cases {
             let mut p = cssparser::Parser::new(val);

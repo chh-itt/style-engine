@@ -8,12 +8,12 @@
 //! 3. 全集物化：64 个属性逐一填充（父继承或初始值），供 T3/T4 直接读取；
 //! 4. 字号解析：em 相对父字号，物化为绝对 px。
 
-use crate::cascade::cascade_declarations;
+use crate::cascade::{ContainerCtx, cascade_declarations};
 use crate::css::decl::{DeclSource, token_buf_to_string};
 use crate::css::property::{
-    Align, AnimDirection, AnimFillMode, BackgroundImage, DeclValue, Display, FamilyName,
-    FlexDirection, FlexWrap, FontFamilyList, FontStyle, GridAutoFlowKind, GridTemplate, LineHeight,
-    Overflow, Position, PropertyId, TextAlign, TimingFn, WhiteSpace,
+    Align, AnimDirection, AnimFillMode, BackgroundImage, ContainerType, DeclValue, Display,
+    FamilyName, FlexDirection, FlexWrap, FontFamilyList, FontStyle, GridAutoFlowKind, GridTemplate,
+    LineHeight, Overflow, Position, PropertyId, TextAlign, TimingFn, WhiteSpace,
 };
 use crate::css::stylesheet::{MediaEnv, Stylesheet};
 use crate::css::value::{ColorValue, LengthPercentage, ResolveCtx};
@@ -160,6 +160,9 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::TextAlign => DeclValue::TextAlign(TextAlign::Start),
         P::WhiteSpace => DeclValue::WhiteSpace(WhiteSpace::Normal),
         P::LetterSpacing => DeclValue::LenAuto(None), // normal：与解析产物同型（盘点修复）
+        // 容器查询（阶段2③）初始：normal / 名单空
+        P::ContainerType => DeclValue::ContainerType(ContainerType::Normal),
+        P::ContainerName => DeclValue::ContainerName(Vec::new()),
     }
 }
 
@@ -517,6 +520,22 @@ impl ComputedStyle {
             _ => 0.0,
         }
     }
+
+    /// container-type（阶段2③；默认 Normal）。
+    pub fn container_type(&self) -> ContainerType {
+        match self.values.get(&PropertyId::ContainerType) {
+            Some(DeclValue::ContainerType(t)) => *t,
+            _ => ContainerType::Normal,
+        }
+    }
+
+    /// container-name 名单（阶段2③）。
+    pub fn container_names(&self) -> &[String] {
+        match self.values.get(&PropertyId::ContainerName) {
+            Some(DeclValue::ContainerName(list)) => list,
+            _ => &[],
+        }
+    }
 }
 
 /// 计算单节点样式（自根向下逐层调用；`parent` 为父节点计算样式）。
@@ -527,7 +546,20 @@ pub fn compute_node<'a>(
     env: &MediaEnv,
     parent: Option<&ComputedStyle>,
 ) -> ComputedStyle {
-    let cascaded = cascade_declarations(tree, id, sheet, env);
+    compute_node_in(tree, id, sheet, env, parent, &[])
+}
+
+/// 带容器快照的计算（阶段2③）：`container_ctx` 为祖先容器栈（restyle
+/// DFS 维护，自最外向最内；无 @container 时零长度零成本）。
+pub fn compute_node_in<'a>(
+    tree: &'a StyleTree,
+    id: NodeId,
+    sheet: &'a Stylesheet,
+    env: &MediaEnv,
+    parent: Option<&ComputedStyle>,
+    container_ctx: &[ContainerCtx],
+) -> ComputedStyle {
+    let cascaded = cascade_declarations(tree, id, sheet, env, container_ctx);
     let mut style = ComputedStyle::default();
 
     // 1) custom properties
