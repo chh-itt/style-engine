@@ -1,9 +1,10 @@
 # 本地门禁（第五批②）：与 .github/workflows/ci.yml 的 gate job 同步。
-# 用法：pwsh -File run.ps1 [-Quick]
+# 用法：pwsh -File run.ps1 [-Quick] [-NoPerf]
 #   -Quick 跳过 cargo-hack 特性幂集检查（hack 未装或赶时间时）。
+#   -NoPerf 跳过性能预算门禁（阶段5；CI perf-gate job 必跑）。
 # 步骤失败即中止（依赖 $LASTEXITCODE，不做字符串匹配——PowerShell
 # -match 大小写不敏感，「0 failed」会误中 FAILED，故弃用）。
-param([switch]$Quick)
+param([switch]$Quick, [switch]$NoPerf)
 $ErrorActionPreference = "Stop"
 
 # cargo 定位：优先 PATH，缺失时补常见安装位置
@@ -47,6 +48,15 @@ if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
     Write-Host "== cargo-deny（deny.toml：licenses/advisories/bans）=="
     cargo deny check
     if ($LASTEXITCODE -ne 0) { throw "cargo-deny 未通过" }
+}
+
+# 性能预算门禁（阶段5/C5）：release 下四场景阈值断言（debug 自动跳过断言）。
+if ($NoPerf) {
+    Write-Host "== perf-gate：-NoPerf 跳过（CI perf-gate job 必跑）=="
+} else {
+    Write-Host "== perf-gate（examples/perf_gate.rs，阈值推导 docs/PERFORMANCE.md）=="
+    cargo run --release -p style-engine --example perf_gate
+    if ($LASTEXITCODE -ne 0) { throw "perf-gate 未通过" }
 }
 
 Write-Host "GATE OK"

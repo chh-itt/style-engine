@@ -8,6 +8,31 @@
 
 ## [Unreleased]
 
+### 阶段5 — 性能预算与 CI 门控（C5）
+
+- **增量重样式（㉙ 升级落地）**：`set_declarations` 不再整树置脏，改为登记脏根
+  （`style_dirty_roots`），`frame()` 无容器规则时仅重算「自身+后代」子树
+  （`restyle_subtrees`：脏根过滤→表格/多列子树保守退全量→祖先链重建容器栈→
+  子树 restyle）；`RestyleGuard`（pass 计数）对互为祖先/后代的脏根去重。
+  正确性域：节点样式求值只依赖自身/祖先树数据、继承父样式、祖先容器快照；
+  有 @container 规则在场退全量。实测 1000 盒树逐 tick 增量：27.684ms →
+  0.489ms（**56×**）；布局与 DisplayList 重建保持每帧全量（余量充足）。
+- **样式存储槽位化**：`ComputedStyle.values` 从 `BTreeMap<PropertyId,DeclValue>`
+  改为 `Vec<Option<DeclValue>>`（`PropertyId::slot()` 下标；`SLOT_COUNT=94` =
+  ALL 87 变体 + 7 动画描述符；锁定测试 `slot_alignment` 保证 slot() ↔ ALL
+  对齐，新增变体须同步）。物化路径 log-n 走查+逐项分配 → 下标写入+整块克隆：
+  compute pass 16µs/节点 → 9.9µs/节点（−38%）。
+- **父样式借用化**：`restyle_node` 父样式由深拷贝（`.cloned()`）改为借用——
+  全量重样式 −15~20%。
+- **性能预算门禁（C5）**：`examples/perf_gate.rs` 四场景 release 阈值断言——
+  box_1k ≤5.0ms（实测 0.460）/ incr ≤2.0ms（0.489）/ text_50 ≤8.0ms（0.867）/
+  scroll ≤3.0ms（0.086），120fps 帧预算 8.33ms 内、阈值与实测余量 ≥2.7×；
+  debug 下断言自动跳过。CI 新增 `perf-gate` job（ubuntu release 运行），
+  本地 `run.ps1` 新增 perf 段（`-NoPerf` 可跳过）。阈值推导、优化归因史与
+  增量重样式设计记录于 **docs/PERFORMANCE.md**（新建）。
+- **基准数字刷新（FEATURES.md ㉘㉚）**：滚动 200 行 0.079ms/帧（余量 105.4×，
+  可承 ≈2.1 万行盒）；文本 50 叶稳态 0.734ms（单叶摊销 14.3µs，可承 ≈581 叶）。
+
 ### 阶段4 — 依赖治理（C4）
 
 - **公有词汇表 re-export**：lib.rs 根新增 `pub use peniko::color::{AlphaColor, Srgb};`

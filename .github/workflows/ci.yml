@@ -64,3 +64,17 @@ jobs:
           key: msrv
       - run: cargo check --workspace --all-features --locked
       - run: cargo test --workspace --all-features --locked
+
+  perf-gate:
+    # 性能预算门禁（阶段5/C5）：四场景阈值断言（box_1k 5.0 / incr 2.0 /
+    # text_50 8.0 / scroll 3.0 ms，推导与实测见 docs/PERFORMANCE.md）。
+    # 阈值与实测 p95 间余量 ≥2.7×，吸收 runner 机型波动；debug 下断言自动跳过，
+    # 必须以 release 运行。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf
+      - run: cargo run --release --locked -p style-engine --example perf_gate

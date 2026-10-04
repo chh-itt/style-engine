@@ -23,18 +23,30 @@ use smallvec::{SmallVec, smallvec};
 use std::collections::BTreeMap;
 
 /// 单节点计算样式（全集物化）。
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[must_use = "计算样式被丢弃则该次级联求解无意义"]
 pub struct ComputedStyle {
-    values: BTreeMap<PropertyId, DeclValue>,
+    /// 全集槽位存储：下标 = [`PropertyId::slot()`]（0..94），None = 未物化。
+    /// 槽位 O(1) 下标写替代 BTreeMap 的 log n 走查 + 节点分配——全集物化
+    /// 每节点 ~94 次插入曾是 restyle 成本主体（阶段5 归因，PERFORMANCE.md）。
+    values: Vec<Option<DeclValue>>,
     /// 已解析 custom properties（终值文本）。
     custom: BTreeMap<String, String>,
+}
+
+impl Default for ComputedStyle {
+    fn default() -> Self {
+        Self {
+            values: vec![None; PropertyId::SLOT_COUNT],
+            custom: BTreeMap::new(),
+        }
+    }
 }
 
 impl ComputedStyle {
     /// 动画覆盖（第五批⑰）：级联后按关键帧采样覆写单个属性。
     pub fn set_value(&mut self, id: PropertyId, v: DeclValue) {
-        self.values.insert(id, v);
+        self.values[id.slot()] = Some(v);
     }
 }
 
@@ -266,7 +278,7 @@ fn is_custom_name(name: &str) -> bool {
 impl ComputedStyle {
     /// 读取属性计算值（无则 None）。
     pub fn get(&self, id: PropertyId) -> Option<&DeclValue> {
-        self.values.get(&id)
+        self.values[id.slot()].as_ref()
     }
 
     /// 读取已解析 custom property 终值文本（guaranteed-invalid → None）。
@@ -276,7 +288,7 @@ impl ComputedStyle {
 
     /// display（默认 block）。
     pub fn display(&self) -> Display {
-        match self.values.get(&PropertyId::Display) {
+        match self.values[PropertyId::Display.slot()].as_ref() {
             Some(DeclValue::Display(d)) => *d,
             _ => Display::Block,
         }
@@ -284,7 +296,7 @@ impl ComputedStyle {
 
     /// position（默认 static）。
     pub fn position(&self) -> Position {
-        match self.values.get(&PropertyId::Position) {
+        match self.values[PropertyId::Position.slot()].as_ref() {
             Some(DeclValue::Position(p)) => *p,
             _ => Position::Static,
         }
@@ -292,7 +304,7 @@ impl ComputedStyle {
 
     /// box-sizing（默认 content-box；映射到 taffy 时换算 size 语义）。
     pub fn box_sizing(&self) -> crate::css::property::BoxSizing {
-        match self.values.get(&PropertyId::BoxSizing) {
+        match self.values[PropertyId::BoxSizing.slot()].as_ref() {
             Some(DeclValue::BoxSizing(b)) => *b,
             _ => crate::css::property::BoxSizing::ContentBox,
         }
@@ -300,7 +312,7 @@ impl ComputedStyle {
 
     /// transform 函数列表（空 = none）。
     pub fn transform(&self) -> &[crate::css::property::TransformFn] {
-        match self.values.get(&PropertyId::Transform) {
+        match self.values[PropertyId::Transform.slot()].as_ref() {
             Some(DeclValue::Transform(list)) => list,
             _ => &[],
         }
@@ -350,7 +362,7 @@ impl ComputedStyle {
 
     /// overflow-x（默认 visible）。
     pub fn overflow_x(&self) -> Overflow {
-        match self.values.get(&PropertyId::OverflowX) {
+        match self.values[PropertyId::OverflowX.slot()].as_ref() {
             Some(DeclValue::Overflow(o)) => *o,
             _ => Overflow::Visible,
         }
@@ -358,7 +370,7 @@ impl ComputedStyle {
 
     /// overflow-y（默认 visible）。
     pub fn overflow_y(&self) -> Overflow {
-        match self.values.get(&PropertyId::OverflowY) {
+        match self.values[PropertyId::OverflowY.slot()].as_ref() {
             Some(DeclValue::Overflow(o)) => *o,
             _ => Overflow::Visible,
         }
@@ -366,7 +378,7 @@ impl ComputedStyle {
 
     /// flex-direction（默认 row）。
     pub fn flex_direction(&self) -> FlexDirection {
-        match self.values.get(&PropertyId::FlexDirection) {
+        match self.values[PropertyId::FlexDirection.slot()].as_ref() {
             Some(DeclValue::FlexDirection(d)) => *d,
             _ => FlexDirection::Row,
         }
@@ -374,7 +386,7 @@ impl ComputedStyle {
 
     /// flex-wrap（默认 nowrap）。
     pub fn flex_wrap(&self) -> FlexWrap {
-        match self.values.get(&PropertyId::FlexWrap) {
+        match self.values[PropertyId::FlexWrap.slot()].as_ref() {
             Some(DeclValue::FlexWrap(w)) => *w,
             _ => FlexWrap::NoWrap,
         }
@@ -382,7 +394,7 @@ impl ComputedStyle {
 
     /// LenAuto 族读取：auto → None。
     pub fn len_auto(&self, id: PropertyId) -> Option<&LengthPercentage> {
-        match self.values.get(&id) {
+        match self.values[id.slot()].as_ref() {
             Some(DeclValue::LenAuto(Some(lp))) => Some(lp),
             _ => None,
         }
@@ -390,7 +402,7 @@ impl ComputedStyle {
 
     /// Len 族读取。
     pub fn len(&self, id: PropertyId) -> Option<&LengthPercentage> {
-        match self.values.get(&id) {
+        match self.values[id.slot()].as_ref() {
             Some(DeclValue::Len(lp)) => Some(lp),
             _ => None,
         }
@@ -418,7 +430,7 @@ impl ComputedStyle {
 
     /// color（默认不透黑）。
     pub fn color(&self) -> ColorValue {
-        match self.values.get(&PropertyId::Color) {
+        match self.values[PropertyId::Color.slot()].as_ref() {
             Some(DeclValue::Color(c)) => *c,
             _ => ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 1.0])),
         }
@@ -426,7 +438,7 @@ impl ComputedStyle {
 
     /// background-color（默认透明）。
     pub fn background_color(&self) -> ColorValue {
-        match self.values.get(&PropertyId::BackgroundColor) {
+        match self.values[PropertyId::BackgroundColor.slot()].as_ref() {
             Some(DeclValue::Color(c)) => *c,
             _ => ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 0.0])),
         }
@@ -434,7 +446,7 @@ impl ComputedStyle {
 
     /// 已解析的绝对字号（px）。
     pub fn font_size_px(&self) -> f32 {
-        match self.values.get(&PropertyId::FontSize) {
+        match self.values[PropertyId::FontSize.slot()].as_ref() {
             Some(DeclValue::Len(LengthPercentage::Px(v))) => *v,
             _ => 16.0,
         }
@@ -442,7 +454,7 @@ impl ComputedStyle {
 
     /// font-weight（默认 400）。
     pub fn font_weight(&self) -> f32 {
-        match self.values.get(&PropertyId::FontWeight) {
+        match self.values[PropertyId::FontWeight.slot()].as_ref() {
             Some(DeclValue::Number(n)) => *n,
             _ => 400.0,
         }
@@ -450,7 +462,7 @@ impl ComputedStyle {
 
     /// font-style（默认 normal）。
     pub fn font_style(&self) -> FontStyle {
-        match self.values.get(&PropertyId::FontStyle) {
+        match self.values[PropertyId::FontStyle.slot()].as_ref() {
             Some(DeclValue::FontStyle(s)) => *s,
             _ => FontStyle::Normal,
         }
@@ -458,7 +470,7 @@ impl ComputedStyle {
 
     /// font-family 列表（全集物化保证存在）。
     pub fn font_family(&self) -> &FontFamilyList {
-        match self.values.get(&PropertyId::FontFamily) {
+        match self.values[PropertyId::FontFamily.slot()].as_ref() {
             Some(DeclValue::FontFamily(list)) => list,
             _ => unreachable!("font family is materialized"),
         }
@@ -466,7 +478,7 @@ impl ComputedStyle {
 
     /// line-height（全集物化保证存在）。
     pub fn line_height(&self) -> &LineHeight {
-        match self.values.get(&PropertyId::LineHeight) {
+        match self.values[PropertyId::LineHeight.slot()].as_ref() {
             Some(DeclValue::LineHeight(lh)) => lh,
             _ => unreachable!("line-height is materialized"),
         }
@@ -474,7 +486,7 @@ impl ComputedStyle {
 
     /// text-align（默认 start）。
     pub fn text_align(&self) -> TextAlign {
-        match self.values.get(&PropertyId::TextAlign) {
+        match self.values[PropertyId::TextAlign.slot()].as_ref() {
             Some(DeclValue::TextAlign(a)) => *a,
             _ => TextAlign::Start,
         }
@@ -518,7 +530,7 @@ impl ComputedStyle {
 
     /// white-space（默认 normal）。
     pub fn white_space(&self) -> WhiteSpace {
-        match self.values.get(&PropertyId::WhiteSpace) {
+        match self.values[PropertyId::WhiteSpace.slot()].as_ref() {
             Some(DeclValue::WhiteSpace(w)) => *w,
             _ => WhiteSpace::Normal,
         }
@@ -526,7 +538,7 @@ impl ComputedStyle {
 
     /// opacity（默认 1.0）。
     pub fn opacity(&self) -> f32 {
-        match self.values.get(&PropertyId::Opacity) {
+        match self.values[PropertyId::Opacity.slot()].as_ref() {
             Some(DeclValue::Number(n)) => *n,
             _ => 1.0,
         }
@@ -534,7 +546,7 @@ impl ComputedStyle {
 
     /// z-index 数值（auto 或缺席取 0.0）。
     pub fn z_index(&self) -> f32 {
-        match self.values.get(&PropertyId::ZIndex) {
+        match self.values[PropertyId::ZIndex.slot()].as_ref() {
             Some(DeclValue::Number(n)) => *n,
             _ => 0.0,
         }
@@ -542,7 +554,7 @@ impl ComputedStyle {
 
     /// container-type（阶段2③；默认 Normal）。
     pub fn container_type(&self) -> ContainerType {
-        match self.values.get(&PropertyId::ContainerType) {
+        match self.values[PropertyId::ContainerType.slot()].as_ref() {
             Some(DeclValue::ContainerType(t)) => *t,
             _ => ContainerType::Normal,
         }
@@ -550,7 +562,7 @@ impl ComputedStyle {
 
     /// container-name 名单（阶段2③）。
     pub fn container_names(&self) -> &[String] {
-        match self.values.get(&PropertyId::ContainerName) {
+        match self.values[PropertyId::ContainerName.slot()].as_ref() {
             Some(DeclValue::ContainerName(list)) => list,
             _ => &[],
         }
@@ -660,37 +672,37 @@ pub fn compute_node_in<'a>(
         };
         match value {
             Some(v) => {
-                style.values.insert(*pid, v);
+                style.values[pid.slot()] = Some(v);
             }
             None => {
                 // IACVT：继承属性取父值，否则初始值
                 if inherits(*pid) {
-                    if let Some(pv) = parent.and_then(|p| p.values.get(pid)) {
-                        style.values.insert(*pid, pv.clone());
+                    if let Some(pv) = parent.and_then(|p| p.values[pid.slot()].as_ref()) {
+                        style.values[pid.slot()] = Some(pv.clone());
                         continue;
                     }
                 }
-                style.values.insert(*pid, initial_value(*pid));
+                style.values[pid.slot()] = Some(initial_value(*pid));
             }
         }
     }
 
-    // 3) 全集物化：继承或初始值
-    for pid in PropertyId::ALL {
-        if style.values.contains_key(pid) {
+    // 3) 全集物化：继承或初始值（槽位顺序遍历；胜出声明已占槽的跳过）
+    for (slot, pid) in PropertyId::ALL.iter().enumerate() {
+        if style.values[slot].is_some() {
             continue;
         }
         if inherits(*pid) {
-            if let Some(pv) = parent.and_then(|p| p.values.get(pid)) {
-                style.values.insert(*pid, pv.clone());
+            if let Some(pv) = parent.and_then(|p| p.values[slot].as_ref()) {
+                style.values[slot] = Some(pv.clone());
                 continue;
             }
         }
-        style.values.insert(*pid, initial_value(*pid));
+        style.values[slot] = Some(initial_value(*pid));
     }
 
     // 4) 字号解析（em 基于父字号；rem 基于根 16px）
-    if let Some(DeclValue::Len(lp)) = style.values.get(&PropertyId::FontSize).cloned() {
+    if let Some(DeclValue::Len(lp)) = style.values[PropertyId::FontSize.slot()].clone() {
         let parent_font = parent.map_or(16.0, |p| p.font_size_px());
         let ctx = ResolveCtx {
             em: parent_font,
@@ -699,10 +711,8 @@ pub fn compute_node_in<'a>(
             viewport_h: env.viewport_h,
         };
         if let Some(px) = lp.resolve(&ctx, parent_font) {
-            style.values.insert(
-                PropertyId::FontSize,
-                DeclValue::Len(LengthPercentage::Px(px)),
-            );
+            style.values[PropertyId::FontSize.slot()] =
+                Some(DeclValue::Len(LengthPercentage::Px(px)));
         }
     }
 

@@ -119,6 +119,24 @@ impl MarginTopBackup {
 /// 转移安全。上游已知限制：taffy 未为 CompactLength 提供 Send/Sync impl。
 struct SendSyncTaffy(taffy::TaffyTree);
 
+/// 增量重样式去重守卫（阶段5）：同一 restyle 调用内按 pass 计数标记
+/// 已完成节点——脏根互为祖先/后代时，先走的子树覆盖后走的根，避免
+/// 重复求值。全量路径用空表（全节点未标记）语义等价于无守卫。
+#[derive(Default)]
+struct RestyleGuard {
+    done: slotmap::SecondaryMap<NodeId, u32>,
+    pass: u32,
+}
+
+impl RestyleGuard {
+    fn skip(&self, id: NodeId) -> bool {
+        self.done.get(id) == Some(&self.pass)
+    }
+    fn mark(&mut self, id: NodeId) {
+        self.done.insert(id, self.pass);
+    }
+}
+
 impl std::ops::Deref for SendSyncTaffy {
     type Target = taffy::TaffyTree;
     fn deref(&self) -> &Self::Target {
@@ -156,6 +174,9 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     generation: u64,
     dirty_struct: bool,
     dirty_style: bool,
+    /// 增量重样式（阶段5）：set_declarations 脏根（子树局部重算）。
+    /// 全量失效标（dirty_style）优先；容器规则在场时增量退全量。
+    style_dirty_roots: Vec<NodeId>,
     viewport: (f32, f32),
     scale: f32,
     now: f64,
@@ -234,6 +255,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             generation: 0,
             dirty_struct: true,
             dirty_style: true,
+            style_dirty_roots: Vec::new(),
             viewport: (0.0, 0.0),
             scale: 1.0,
             now: 0.0,
@@ -474,7 +496,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         };
         let (block, report) = parse_inline_declarations(style_text);
         self.tree.node_mut(id).declarations = block;
-        self.dirty_style = true;
+        // 增量重样式（阶段5）：内联声明只影响自身与后代的样式求值
+        //（选择器命中只依赖自身/祖先的树数据与继承链，兄弟声明互不影响），
+        // 记脏根子树局部重算；frame 依容器规则在场与否择路。
+        self.style_dirty_roots.push(id);
         Ok(report)
     }
 
@@ -753,6 +778,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             frame_span.record("pass", pass);
             if self.dirty_style {
                 self.restyle();
+            } else if !self.style_dirty_roots.is_empty() {
+                // 增量重样式（阶段5）：无容器规则 → 脏根子树局部重算；
+                // 有容器规则 → 保守全量（容器快照收敛环自会处理）。
+                if self.sheet.has_container_rules {
+                    self.restyle();
+                } else {
+                    let roots = std::mem::take(&mut self.style_dirty_roots);
+                    self.restyle_subtrees(roots);
+                }
             }
             // 第五批⑰：@keyframes 动画采样——每帧级联后、布局前覆写（布局与
             // 绘制消费动画值；布局每帧全量重算，动画值变更无需独立失效标）
@@ -2504,8 +2538,80 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // 阶段2③：容器栈自根向叶构建（祖先 → 后代），@container 求值
         // 自栈顶向外查找；无名段命中最近容器。
         let mut cctx: Vec<crate::cascade::ContainerCtx> = Vec::new();
-        self.restyle_node(root, None, &mut cctx);
+        // 增量脏根一并吸收（全量重算覆盖一切局部失效）。
+        self.style_dirty_roots.clear();
+        let mut guard = RestyleGuard::default();
+        self.restyle_node(root, None, &mut cctx, &mut guard);
         self.dirty_style = false;
+    }
+
+    /// 增量重样式（阶段5）：对脏根子树（根 + 全部后代）局部重算样式，
+    /// 全树其余节点的 styles/taffy 镜像保持现值。正确性域：节点样式求值
+    /// 只依赖①自身/祖先的树数据（类、状态、声明块——兄弟声明互不影响，
+    /// :nth-child 按树位不按样式）②继承的父样式（子树重算即重取）
+    /// ③祖先容器快照（有容器规则时不走本路径，退全量收敛环）。
+    /// 表格/多列子树退全量：幻影列与列模板为跨节点累积状态，v1 增量
+    /// 路径不触碰（残余偏差记 FEATURES.md ㉙）。
+    fn restyle_subtrees(&mut self, roots: Vec<NodeId>) {
+        // 失效根过滤：树中已不存在的根（remove 后残留）跳过。
+        let roots: Vec<NodeId> = roots
+            .into_iter()
+            .filter(|&r| r == self.tree.root() || self.tree.parent(r).is_some())
+            .collect();
+        if roots.is_empty() {
+            return;
+        }
+        // 枚举各脏根子树节点。
+        let mut subtree: Vec<NodeId> = Vec::new();
+        for &r in &roots {
+            let mut stack = vec![r];
+            while let Some(id) = stack.pop() {
+                subtree.push(id);
+                stack.extend(self.tree.children(id).iter().copied());
+            }
+        }
+        // 表格/多列兜底：子树触及登记表 → 保守全量（此时还未改动任何
+        // 登记，全量重算自我清空，无双登记风险）。
+        for &id in &subtree {
+            if self.tables.contains(&id) || self.multicols.contains(&id) {
+                self.restyle();
+                return;
+            }
+        }
+        // 派生缓存同步：全量路径清 min_measures，增量路径按子树清除，
+        // 使重样式节点文本按新样式（如继承字号）重测最小内容宽。
+        #[cfg(feature = "text")]
+        for &id in &subtree {
+            self.min_measures.remove(&id);
+        }
+        // 容器栈重建：自根向各脏根爬祖先链，按 styles 现值压容器上下文
+        //（祖先样式未失效，即全量路径同一栈形状）。
+        let mut cctx: Vec<crate::cascade::ContainerCtx> = Vec::new();
+        // 去重守卫：脏根互为祖先/后代时先走覆盖后走。
+        let mut guard = RestyleGuard::default();
+        for r in roots {
+            // 祖先容器链（根侧在先）：restyle_node 自根向叶压栈的同形状。
+            let mut chain: Vec<NodeId> = Vec::new();
+            let mut cur = r;
+            while let Some(&p) = self.parents.get(&cur) {
+                chain.push(p);
+                cur = p;
+            }
+            chain.reverse();
+            cctx.clear();
+            for a in chain {
+                if let Some(cs) = self.styles.get(&a) {
+                    if cs.container_type() != crate::css::property::ContainerType::Normal {
+                        cctx.push(crate::cascade::ContainerCtx {
+                            names: cs.container_names().to_vec(),
+                            ctype: cs.container_type(),
+                            size: self.container_sizes.get(&a).copied(),
+                        });
+                    }
+                }
+            }
+            self.restyle_node(r, self.parents.get(&r).copied(), &mut cctx, &mut guard);
+        }
     }
 
     /// 宿主推入字体数据（feature = "text"）；字体变化影响文本测量，
@@ -2544,19 +2650,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         id: NodeId,
         parent_id: Option<NodeId>,
         cctx: &mut Vec<crate::cascade::ContainerCtx>,
+        guard: &mut RestyleGuard,
     ) {
+        // 增量去重：本轮已重样式（被更早脏根的子树覆盖）直接跳过。
+        if guard.skip(id) {
+            return;
+        }
         if let Some(p) = parent_id {
             self.parents.insert(id, p);
         }
-        let parent_style = parent_id.and_then(|p| self.styles.get(&p).cloned());
-        let cs = compute_node_in(
-            &self.tree,
-            id,
-            &self.sheet,
-            &self.media,
-            parent_style.as_ref(),
-            cctx,
-        );
+        // 性能（阶段5）：父样式借引用传入（compute_node_in 仅需共享借用），
+        // 不再整份克隆 ComputedStyle（全集物化 BTreeMap ~110 项/节点）。
+        let parent_style = parent_id.and_then(|p| self.styles.get(&p));
+        let cs = compute_node_in(&self.tree, id, &self.sheet, &self.media, parent_style, cctx);
         // 阶段2③：自身是容器 → 入栈（后代 @container 求值用；自身样式已
         // 按祖先快照求值完毕——查询容器不含自身）。快照缺席 = 尺寸 unknown
         //（首帧/收敛中：特性不命中，B 级偏差——未强制 size containment）。
@@ -2684,9 +2790,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let _ = self.taffy.set_style(tid, ts);
         }
         self.styles.insert(id, cs);
+        guard.mark(id);
         let children: Vec<NodeId> = self.tree.children(id).to_vec();
         for c in children {
-            self.restyle_node(c, Some(id), cctx);
+            self.restyle_node(c, Some(id), cctx, guard);
         }
         if is_container {
             cctx.pop();

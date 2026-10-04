@@ -317,6 +317,114 @@ impl PropertyId {
         Self::ContainerName,
     ];
 
+    /// 槽位存储总槽位数：ALL 全部 87 位 + 7 个动画描述符位
+    ///（ComputedStyle 槽位存储的 Vec 长度）。
+    pub const SLOT_COUNT: usize = 94;
+
+    /// 槽位存储下标（ComputedStyle 的 `Vec<Option<DeclValue>>` 用）。
+    /// 0..87 = [`Self::ALL`] 顺序；87..94 = 动画描述符（不在 ALL：
+    /// 全集物化不含，仅声明时落槽）。`slot_alignment` 测试锁定本表
+    /// 与 ALL 的一致性——新增变体时必须同步扩展本 match 与 SLOT_COUNT。
+    pub fn slot(self) -> usize {
+        match self {
+            Self::Display => 0,
+            Self::Position => 1,
+            Self::Top => 2,
+            Self::Right => 3,
+            Self::Bottom => 4,
+            Self::Left => 5,
+            Self::ZIndex => 6,
+            Self::Width => 7,
+            Self::Height => 8,
+            Self::MinWidth => 9,
+            Self::MinHeight => 10,
+            Self::MaxWidth => 11,
+            Self::MaxHeight => 12,
+            Self::AspectRatio => 13,
+            Self::MarginTop => 14,
+            Self::MarginRight => 15,
+            Self::MarginBottom => 16,
+            Self::MarginLeft => 17,
+            Self::PaddingTop => 18,
+            Self::PaddingRight => 19,
+            Self::PaddingBottom => 20,
+            Self::PaddingLeft => 21,
+            Self::Gap => 22,
+            Self::RowGap => 23,
+            Self::ColumnGap => 24,
+            Self::FlexDirection => 25,
+            Self::FlexWrap => 26,
+            Self::FlexGrow => 27,
+            Self::FlexShrink => 28,
+            Self::FlexBasis => 29,
+            Self::JustifyContent => 30,
+            Self::AlignItems => 31,
+            Self::AlignSelf => 32,
+            Self::AlignContent => 33,
+            Self::GridTemplateColumns => 34,
+            Self::GridTemplateRows => 35,
+            Self::GridAutoFlow => 36,
+            Self::GridAutoRows => 37,
+            Self::GridAutoColumns => 38,
+            Self::ColumnCount => 39,
+            Self::ColumnWidth => 40,
+            Self::BreakInside => 41,
+            Self::ColumnSpan => 42,
+            Self::ColumnRuleWidth => 43,
+            Self::ColumnRuleStyle => 44,
+            Self::ColumnRuleColor => 45,
+            Self::BackgroundColor => 46,
+            Self::BackgroundImage => 47,
+            Self::BorderTopLeftRadius => 48,
+            Self::BorderTopRightRadius => 49,
+            Self::BorderBottomRightRadius => 50,
+            Self::BorderBottomLeftRadius => 51,
+            Self::BorderTopWidth => 52,
+            Self::BorderRightWidth => 53,
+            Self::BorderBottomWidth => 54,
+            Self::BorderLeftWidth => 55,
+            Self::BorderTopStyle => 56,
+            Self::BorderRightStyle => 57,
+            Self::BorderBottomStyle => 58,
+            Self::BorderLeftStyle => 59,
+            Self::BorderTopColor => 60,
+            Self::BorderRightColor => 61,
+            Self::BorderBottomColor => 62,
+            Self::BorderLeftColor => 63,
+            Self::BoxShadow => 64,
+            Self::Opacity => 65,
+            Self::OverflowX => 66,
+            Self::OverflowY => 67,
+            Self::BoxSizing => 68,
+            Self::Transform => 69,
+            Self::Filter => 70,
+            Self::ClipPath => 71,
+            Self::WillChange => 72,
+            Self::Isolation => 73,
+            Self::MixBlendMode => 74,
+            Self::TransformOrigin => 75,
+            Self::Color => 76,
+            Self::FontFamily => 77,
+            Self::FontSize => 78,
+            Self::FontWeight => 79,
+            Self::FontStyle => 80,
+            Self::LineHeight => 81,
+            Self::TextAlign => 82,
+            Self::WhiteSpace => 83,
+            Self::LetterSpacing => 84,
+            Self::ContainerType => 85,
+            Self::ContainerName => 86,
+            // 动画描述符（非 ALL 成员；声明/采样时落槽）
+            Self::AnimationName => 87,
+            Self::AnimationDuration => 88,
+            Self::AnimationDelay => 89,
+            Self::AnimationIterationCount => 90,
+            Self::AnimationTimingFunction => 91,
+            Self::AnimationDirection => 92,
+            Self::AnimationFillMode => 93,
+        }
+    }
+
     /// CSS 属性名（小写）。解析与诊断共用。
     pub fn css_name(self) -> &'static str {
         match self {
@@ -2537,4 +2645,37 @@ fn lerp_lenp(x: &LengthPercentage, y: &LengthPercentage, t: f32) -> Option<Lengt
         (LengthPercentage::Vh(u), LengthPercentage::Vh(v)) => LengthPercentage::Vh(u + (v - u) * t),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 槽位表与 ALL 的一致性锁：前段必须与 ALL 顺序逐位一致，动画
+    /// 描述符 7 位落在 ALL 之后；SLOT_COUNT 必须覆盖全部变体。
+    /// 新增 PropertyId 变体时本测试失败 = 提醒同步 slot() 与 SLOT_COUNT。
+    #[test]
+    fn slot_alignment() {
+        for (i, pid) in PropertyId::ALL.iter().enumerate() {
+            assert_eq!(pid.slot(), i, "{} 槽位与 ALL 顺序不一致", pid.css_name());
+        }
+        let anim = [
+            PropertyId::AnimationName,
+            PropertyId::AnimationDuration,
+            PropertyId::AnimationDelay,
+            PropertyId::AnimationIterationCount,
+            PropertyId::AnimationTimingFunction,
+            PropertyId::AnimationDirection,
+            PropertyId::AnimationFillMode,
+        ];
+        for (k, pid) in anim.iter().enumerate() {
+            assert_eq!(
+                pid.slot(),
+                PropertyId::ALL.len() + k,
+                "{} 动画描述符槽位漂移",
+                pid.css_name()
+            );
+        }
+        assert_eq!(PropertyId::ALL.len() + anim.len(), PropertyId::SLOT_COUNT);
+    }
 }
