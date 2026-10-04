@@ -53,7 +53,10 @@ jobs:
       # --locked：CI 一律按入库 Cargo.lock 解析（三期 Stage 4 锁定版本策略）。
       - run: cargo test --workspace --all-features --locked
       # 特性幂集守卫：default/no-default/layout/text 组合全编译。
-      - run: cargo hack check --workspace --feature-powerset --no-dev-deps --locked
+      # --no-dev-deps 会在运行期剥离 dev-dependencies 改变依赖图，与 --locked
+      # 冲突（cargo 要求重写 Cargo.lock 被拒）——此处不加 --locked；lock 完整性
+      # 由 fmt/clippy/test 三步的 --locked 与 msrv/perf-gate 保证。
+      - run: cargo hack check --workspace --feature-powerset --no-dev-deps
         if: matrix.os == 'ubuntu-latest'
       # 依赖供应链门禁（阶段4）：licenses 硬门 + RustSec advisories +
       # 重复版本 bans（deny.toml；审计记录 docs/DEPENDENCIES.md）。
