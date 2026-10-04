@@ -32,6 +32,18 @@
   增量重样式设计记录于 **docs/PERFORMANCE.md**（新建）。
 - **基准数字刷新（FEATURES.md ㉘㉚）**：滚动 200 行 0.079ms/帧（余量 105.4×，
   可承 ≈2.1 万行盒）；文本 50 叶稳态 0.734ms（单叶摊销 14.3µs，可承 ≈581 叶）。
+- **MSRV 上调 1.85 → 1.90**：依赖地板漂移（ordered-float 5.5.0 需 1.90、
+  smol_str 0.3.6 需 1.89、vello/parley/fontique 链需 1.88、wgpu-types 29.0.4
+  需 1.87），按「MSRV 以依赖最高者为准」政策随行；msrv job 钉定
+  `1.90.0` 验证（docs/DEPENDENCIES.md 记录完整地板链）。连带：MSRV 解锁
+  clippy let-chains 建议（1.88 稳定），34 处嵌套 `if` 折叠。
+- **CI 全绿修复**：本仓库 CI 自首次提交起从未绿过（无人核查）——三病根修复：
+  ubuntu 补 `pkg-config/libfontconfig1-dev`（fontique 系统字体发现 build
+  script 依赖）；windows 腿设 `STYLE_ENGINE_NO_GPU_PROBE=1` 短路 vello GPU
+  探针（CI 虚拟适配器 wgpu 设备创建段错误 0xc0000005，进程内不可捕获；本地与
+  macOS 真适配器必跑，FEATURES.md ㉕ 补 CI 短路语义）；`cargo hack
+  --feature-powerset` 去 `--locked`（`--no-dev-deps` 运行期剥离 dev-deps 改变
+  依赖图与 `--locked` 冲突）。
 
 ### 阶段4 — 依赖治理（C4）
 
