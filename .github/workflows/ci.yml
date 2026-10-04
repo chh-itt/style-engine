@@ -27,6 +27,11 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
+      - name: Install cargo-deny
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
         if: matrix.os == 'ubuntu-latest'
@@ -39,6 +44,10 @@ jobs:
       - run: cargo test --workspace --all-features --locked
       # 特性幂集守卫：default/no-default/layout/text 组合全编译。
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps --locked
+        if: matrix.os == 'ubuntu-latest'
+      # 依赖供应链门禁（阶段4）：licenses 硬门 + RustSec advisories +
+      # 重复版本 bans（deny.toml；审计记录 docs/DEPENDENCIES.md）。
+      - run: cargo deny check
         if: matrix.os == 'ubuntu-latest'
       # LFS（路线图㉗：建仓启用 git-lfs 收 *.ttf/*.otf/*.woff2 后取消注释）
       # - run: git lfs install && git lfs pull

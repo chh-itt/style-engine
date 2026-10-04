@@ -40,4 +40,13 @@ if ($Quick) {
     if ($LASTEXITCODE -ne 0) { throw "feature powerset 未通过" }
 }
 
+# 依赖供应链门禁（阶段4）：licenses 硬门 + RustSec advisories + bans。
+if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
+    Write-Warning "== cargo-deny：未安装，跳过（CI 必跑；本地安装 cargo install cargo-deny）=="
+} else {
+    Write-Host "== cargo-deny（deny.toml：licenses/advisories/bans）=="
+    cargo deny check
+    if ($LASTEXITCODE -ne 0) { throw "cargo-deny 未通过" }
+}
+
 Write-Host "GATE OK"

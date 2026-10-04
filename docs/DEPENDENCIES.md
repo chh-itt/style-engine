@@ -16,7 +16,7 @@
 | bitflags | 2.13.2 | 核心 | StateFlags | |
 | smallvec | 1.x | L1 | 声明/子选择器内联存储 | 由 cargo update 定 patch |
 | peniko | 0.6.1 | 核心(词汇表) | 画笔/颜色/图片类型 | 无 GPU 依赖，vello 同款，见 ADR-0001 |
-| kurbo | (peniko 传递) | 核心(词汇表) | DisplayList 几何类型 | |
+| kurbo | (peniko 传递) | 核心(词汇表) | 几何词汇表（仅经 peniko 传递） | 阶段4 审计：本方 DisplayList 几何全部为 `f32` 字段，kurbo 类型不出现在公有面 |
 | parley | 0.11.1 | L2 核心 | 文本 shaping/测量/行布局（测量内置，见 ADR-0006） | 传递引入 fontique |
 | vello | 0.10.0 | sink | GPU 绘制执行器 | 2026-08-14 发布 |
 | wgpu | **29.x** | sink | GPU 底座 | ⚠️ 见下"版本配对" |
@@ -29,7 +29,7 @@
 
 vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29 与 30 是 semver 不兼容的大版本：若我们直接声明 wgpu 30.0.1，应用会同时编译两份 wgpu（或无法与 vello 统一）。因此：
 
-- sink 与宿主统一使用 vello 传递的 wgpu 29.x，sink crate 显式声明同版本并 `pub use wgpu;`。
+- sink 与宿主统一使用 vello 传递的 wgpu 29.x，sink crate 显式声明同版本（其测试代码直接使用 wgpu API；**公有 API 不暴露任何 wgpu 类型，无需 re-export**——阶段4 审计修正，此前的 `pub use wgpu` 计划未落地也不再需要）。
 - 这符合"选**兼容的**最新版本"原则：29.x 就是当前兼容的最新。等 vello 升级支持 wgpu 30（linebender 节奏通常数周内跟上）后整体升级。
 - winit 0.31-beta 与 wgpu 的对接走 raw-window-handle，不受此影响。
 
@@ -75,3 +75,11 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - **方案 B（备选）**：fonttools 对 demo 展示字体做子集化（可压至 ~1–2MB），完整字体置于 conformance 资产外置通道——缺点是子集与全量双制品会漂移，且子集化后的度量须与全量一致（shaping 依赖 cmap/gpos 完整性），不建议在 conformance 路径使用。
 - **现阶段（建仓前）**：保持仓库内直存，不引入工具链成本；CI 化时再切换方案 A。
 - 硬规则不变：字体从不 fork——一律上游原文件 + 许可证随目录归档（LICENSE-DejaVu.txt / LICENSE-NotoSansSC.txt）。
+
+## 阶段4 依赖治理审计（2026-10）
+
+- **公有词汇表 re-export**：核心 crate 公有面唯一第三方类型 = peniko 色彩 `AlphaColor<Srgb>`（PaintOp 变体字段 / ColorValue）。lib.rs 根 `pub use peniko::color::{AlphaColor, Srgb};` 使宿主**零直依 peniko**（版本由本 crate 锚定，杜绝双份 peniko）；`pub use smallvec;` 此前已有（同语义）。几何不经 kurbo（见上表）。
+- **feature 门禁审计**：`--no-default-features` / `+layout` / `+text` / `--all-features` 四组合编译全过且零警告；发现并修复 layout-only 死代码盲区（`engine.rs abs_avail_width` 仅 text 测量路径消费 → 补 `#[cfg(feature = "text")]`）。核心 crate 重依赖（taffy/parley）确认经 feature 可选。
+- **重复版本审计**（Cargo.lock 318 包）：16 组重复。cssparser 0.37/0.38 = selectors 0.40 配对重命名依赖的预期形态（已文档化）；其余（syn 2/3、thiserror 1/2、winnow 0.7/1.0、phf 0.13/0.14、hashbrown ×3、toml_datetime、rustc-hash、foldhash、miniz_oxide、jni-sys、redox_syscall）均为传递链正常形态，升级收敛时机跟随决定性依赖。
+- **供应链门禁**：deny.toml（cargo-deny v2 schema）+ CI `cargo deny check`（ubuntu）；本地 run.ps1 工具未装则跳过（语义同 cargo-hack）。licenses 硬门（MIT/Apache-2.0/BSD/ISC/Unicode-3.0/MPL-2.0/Zlib/CC0——CC0 为 hexf-parse v0.2.1，color 链 hex 解析，公有领域指定）；advisories：漏洞/unsound 硬失败，yanked=warn；`RUSTSEC-2026-0192`（ttf-parser unmaintained）ignore——传入路径仅 Linux demo 链（winit 0.31-beta → winit-wayland → sctk-adwaita → ab_glyph → owned_ttf_parser），核心不含此链，重估条件=winit 0.31 stable 或 sctk-adwaita 换字体栈。
+- **yank 处置**：yoke-derive 0.8.3 被 yank → `cargo update -p yoke-derive` 升 0.8.4（zerofrom/ICU4X 链，semver 兼容）。

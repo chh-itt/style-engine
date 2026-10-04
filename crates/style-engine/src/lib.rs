@@ -56,6 +56,18 @@
 //!   合成或录制回放需求。
 //!
 //! 设计文档见仓库根目录 `CONTEXT.md` 与 `docs/adr/`。
+//!
+//! # 依赖策略（C4）
+//!
+//! - **词汇表公有**：公有面唯一的第三方类型是 peniko 的色彩类型（下方
+//!   re-export）。宿主消费 [`DisplayList`]/[`ComputedStyle`] 色值**无需**
+//!   自行依赖 peniko——版本由本 crate 锚定，杜绝双份 peniko。DisplayList
+//!   几何全部是 `f32` 字段，kurbo 类型不出现在公有面（仅 peniko 传递）。
+//! - **重依赖隔离**：GPU/wgpu/winit 只存在于 sink crate（`style-engine-vello`）
+//!   与 demo；核心 crate 的 taffy/parley 经 `layout`/`text` feature 可选，
+//!   `--no-default-features` 下核心仅剩 CSS 解析/级联/绘制编译。
+//! - **基础设施不进核心**：serde 等宿主侧设施不引入（见 API 冻结策略的
+//!   serde 决策）；诊断统一走 `tracing`（唯一观测依赖）。
 
 // unsafe 策略：全 crate 禁止（deny），唯一豁免点 = engine.rs 的
 // SendSyncTaffy（taffy 0.14 CompactLength nan-boxing 非 Send/Sync 的
@@ -97,3 +109,8 @@ pub use tree::StyleNode;
 // 公共再导出：下游（如 style-engine-soft 零依赖测试）构造 FontFamilyList
 // 等属性值需要 SmallVec 容器——复用本 crate 锁定版本，避免版本漂移。
 pub use smallvec;
+
+// 公共词汇表（C4 依赖策略）：公有面唯一的第三方类型——peniko 色彩。
+// PaintOp/ComputedStyle 的色值签名即 `AlphaColor<Srgb>`；re-export 使宿主
+// 零直依 peniko，版本由本 crate 锚定（见 crate 文档「依赖策略（C4）」）。
+pub use peniko::color::{AlphaColor, Srgb};

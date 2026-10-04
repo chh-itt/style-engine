@@ -546,6 +546,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
 
     /// absolute 叶的可用宽（T5d）：最近 positioned 或 transformed 祖先的内容宽
     /// （border-box − padding − 已生效 border，`used_h_inset`）；均无 → 视口宽。
+    // 仅 text 测量路径消费（shrink-to-fit pass）；layout-only 编译下保持
+    // 零死代码（依赖治理 feature 门禁审计，阶段4）。
+    #[cfg(feature = "text")]
     fn abs_avail_width(&self, id: NodeId) -> Option<f32> {
         let mut cb = self.parents.get(&id).copied();
         let mut cb_id: Option<NodeId> = None;

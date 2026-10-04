@@ -1,0 +1,46 @@
+# 依赖供应链门禁（阶段4，C4 契约）：licenses 硬门 + RustSec advisories +
+# 重复版本 bans。CI（ubuntu）必跑 `cargo deny check`；本地 run.ps1 在工具
+# 未安装时跳过（语义同 cargo-hack）。审计依据：docs/DEPENDENCIES.md
+# 「重复版本审计」节（cssparser 0.37/0.38 双版本 = selectors 0.40 配对重
+# 命名依赖的预期形态，已文档化）。
+
+[advisories]
+version = 2
+# 漏洞（vulnerability）/unsound 默认硬失败——无需豁免项，出现即处理依赖。
+# 上游 yank 不阻塞 CI（--locked 构建不受影响），出告警人工跟进。
+yanked = "warn"
+ignore = [
+    # ttf-parser 声明不再维护（harfbuzz/ttf-parser#217，unmaintained 非漏洞）。
+    # 传入路径仅 Linux demo：winit 0.31-beta → winit-wayland → sctk-adwaita
+    # → ab_glyph → owned_ttf_parser；核心 crate 不含此链。重估条件=winit
+    # 0.31 stable 或 sctk-adwaita 更换字体栈（届时随 winit 精确锁一并升级）。
+    "RUSTSEC-2026-0192",
+]
+
+[licenses]
+version = 2
+# 本仓库 MIT OR Apache-2.0；传递依赖只允许被广泛认可的宽松许可。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    # hexf-parse v0.2.1（color crate 的 hex 颜色解析链）：CC0 = 公有领域
+    # 指定，FSF free/libre；无署名要求，风险等同 unlicense。
+    "CC0-1.0",
+]
+
+[bans]
+# 多版本共存出告警不阻塞——已审计双版本见 DEPENDENCIES.md；新出现的
+# 告警在升级依赖时收敛。
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

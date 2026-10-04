@@ -8,6 +8,26 @@
 
 ## [Unreleased]
 
+### 阶段4 — 依赖治理（C4）
+
+- **公有词汇表 re-export**：lib.rs 根新增 `pub use peniko::color::{AlphaColor, Srgb};`
+  ——公有面唯一第三方类型（PaintOp/ColorValue 色值签名）现在由本 crate 直出，
+  宿主消费 DisplayList/ComputedStyle **无需自行依赖 peniko**（版本锚定，杜绝
+  双份 peniko）；`pub use smallvec;` 同语义此前已有。
+- **依赖策略文档化（C4）**：lib.rs 新增「依赖策略（C4）」段（词汇表公有 / 重依赖
+  隔离 / 基础设施不进核心）；`docs/DEPENDENCIES.md` 新增「阶段4 依赖治理审计」
+  节并修正两处滞后声明（kurbo 不出现在公有面；vello sink 公有 API 不暴露
+  wgpu 类型，无需 `pub use wgpu`）。
+- **feature 门禁审计**：`--no-default-features` / `+layout` / `+text` /
+  `--all-features` 四组合编译零警告；修复 layout-only 死代码盲区
+  （`abs_avail_width` 补 `#[cfg(feature = "text")]`）。
+- **供应链门禁 cargo-deny**：新增 `deny.toml`（licenses 硬门 + RustSec
+  advisories 漏洞硬失败 + yanked=warn + 多版本 bans=warn）与 CI `cargo deny
+  check` 步骤（ubuntu；本地 run.ps1 未装则跳过）。处置两项：`RUSTSEC-2026-0192`
+  （ttf-parser unmaintained，仅 Linux demo 传递链，ignore + 重估条件）、
+  yoke-derive 0.8.3 yank（cargo update 升 0.8.4）；licenses allow 含 CC0-1.0
+  （hexf-parse，color 链 hex 解析）。重复版本审计（16 组）记录于 DEPENDENCIES.md。
+
 ### 阶段3 — API 冻结（C3）
 
 - **#[non_exhaustive] 全量公共枚举**（style-engine 40 项：PropertyId/DeclValue/PaintOp/
@@ -97,5 +117,5 @@
   ParseReport 容错，宿主违约=ContractError）；conformance Numeric 16 + Pixel 6 用例
   零 xfail（Chromium 153 golden）。
 
-[Unreleased]: https://github.com/chh-itt/style-engine/compare/8a7118c...HEAD
+[Unreleased]: https://github.com/chh-itt/style-engine/compare/d955894...HEAD
 [0.1.0]: https://github.com/chh-itt/style-engine
