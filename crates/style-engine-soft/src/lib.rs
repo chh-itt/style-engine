@@ -189,7 +189,7 @@ pub fn render_with_fonts(
         height,
         pixels: vec![0u8; width as usize * height as usize * 4],
     };
-    for px in canvas.pixels.chunks_exact_mut(4) {
+    for px in canvas.pixels.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&base);
     }
     let mut clips: Vec<ClipRect> = Vec::new();

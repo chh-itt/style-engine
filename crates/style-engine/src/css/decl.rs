@@ -37,10 +37,10 @@ pub fn token_buf_to_string(buf: &[OwnedToken]) -> String {
     let mut out = String::new();
     let mut prev: Option<TokenSerializationType> = None;
     for t in buf {
-        if let Some(prev) = prev {
-            if prev.needs_separator_when_before(t.ser) {
-                out.push(' ');
-            }
+        if let Some(prev) = prev
+            && prev.needs_separator_when_before(t.ser)
+        {
+            out.push(' ');
         }
         out.push_str(&t.text);
         prev = Some(t.ser);
@@ -600,20 +600,21 @@ pub(crate) fn expand_shorthand(
             let mut count: Option<Option<u16>> = None;
             while !p.is_exhausted() {
                 let mut progressed = false;
-                if width.is_none() {
-                    if let Ok(v) = p.try_parse(parse_len_auto) {
-                        width = Some(as_len_auto(v).unwrap_or(None));
-                        progressed = true;
-                    }
+                if width.is_none()
+                    && let Ok(v) = p.try_parse(parse_len_auto)
+                {
+                    width = Some(as_len_auto(v).unwrap_or(None));
+                    progressed = true;
                 }
-                if !progressed && count.is_none() {
-                    if let Ok(v) = p.try_parse(parse_column_count) {
-                        count = Some(match v {
-                            DeclValue::ColumnCount(c) => c,
-                            _ => None,
-                        });
-                        progressed = true;
-                    }
+                if !progressed
+                    && count.is_none()
+                    && let Ok(v) = p.try_parse(parse_column_count)
+                {
+                    count = Some(match v {
+                        DeclValue::ColumnCount(c) => c,
+                        _ => None,
+                    });
+                    progressed = true;
                 }
                 if !progressed {
                     return Err(p.new_error_for_next_token());
@@ -639,23 +640,25 @@ pub(crate) fn expand_shorthand(
             let mut color: Option<DeclValue> = None;
             while !p.is_exhausted() {
                 let mut progressed = false;
-                if width.is_none() {
-                    if let Ok(v) = p.try_parse(parse_column_rule_width) {
-                        width = Some(v);
-                        progressed = true;
-                    }
+                if width.is_none()
+                    && let Ok(v) = p.try_parse(parse_column_rule_width)
+                {
+                    width = Some(v);
+                    progressed = true;
                 }
-                if !progressed && style.is_none() {
-                    if let Ok(v) = p.try_parse(parse_column_rule_style) {
-                        style = Some(v);
-                        progressed = true;
-                    }
+                if !progressed
+                    && style.is_none()
+                    && let Ok(v) = p.try_parse(parse_column_rule_style)
+                {
+                    style = Some(v);
+                    progressed = true;
                 }
-                if !progressed && color.is_none() {
-                    if let Ok(v) = p.try_parse(parse_color) {
-                        color = Some(v);
-                        progressed = true;
-                    }
+                if !progressed
+                    && color.is_none()
+                    && let Ok(v) = p.try_parse(parse_color)
+                {
+                    color = Some(v);
+                    progressed = true;
                 }
                 if !progressed {
                     return Err(p.new_error_for_next_token());
@@ -886,23 +889,23 @@ pub(crate) fn expand_shorthand(
             let mut style: Option<DeclValue> = None;
             let mut color: Option<DeclValue> = None;
             loop {
-                if width.is_none() {
-                    if let Ok(v) = p.try_parse(parse_border_width) {
-                        width = Some(v);
-                        continue;
-                    }
+                if width.is_none()
+                    && let Ok(v) = p.try_parse(parse_border_width)
+                {
+                    width = Some(v);
+                    continue;
                 }
-                if style.is_none() {
-                    if let Ok(v) = p.try_parse(parse_border_style) {
-                        style = Some(v);
-                        continue;
-                    }
+                if style.is_none()
+                    && let Ok(v) = p.try_parse(parse_border_style)
+                {
+                    style = Some(v);
+                    continue;
                 }
-                if color.is_none() {
-                    if let Ok(v) = p.try_parse(parse_color) {
-                        color = Some(v);
-                        continue;
-                    }
+                if color.is_none()
+                    && let Ok(v) = p.try_parse(parse_color)
+                {
+                    color = Some(v);
+                    continue;
                 }
                 break;
             }
@@ -951,17 +954,17 @@ pub(crate) fn expand_shorthand(
                     let mut shrink: Option<f32> = None;
                     let mut basis: Option<DeclValue> = None;
                     for _ in 0..2 {
-                        if shrink.is_none() {
-                            if let Ok(s) = p.try_parse(parse_number) {
-                                shrink = Some(s);
-                                continue;
-                            }
+                        if shrink.is_none()
+                            && let Ok(s) = p.try_parse(parse_number)
+                        {
+                            shrink = Some(s);
+                            continue;
                         }
-                        if basis.is_none() {
-                            if let Ok(b) = p.try_parse(parse_len_auto) {
-                                basis = Some(b);
-                                continue;
-                            }
+                        if basis.is_none()
+                            && let Ok(b) = p.try_parse(parse_len_auto)
+                        {
+                            basis = Some(b);
+                            continue;
                         }
                         break;
                     }
@@ -982,17 +985,17 @@ pub(crate) fn expand_shorthand(
             let mut dir: Option<DeclValue> = None;
             let mut wrap: Option<DeclValue> = None;
             loop {
-                if dir.is_none() {
-                    if let Ok(v) = p.try_parse(parse_flex_direction) {
-                        dir = Some(v);
-                        continue;
-                    }
+                if dir.is_none()
+                    && let Ok(v) = p.try_parse(parse_flex_direction)
+                {
+                    dir = Some(v);
+                    continue;
                 }
-                if wrap.is_none() {
-                    if let Ok(v) = p.try_parse(parse_flex_wrap) {
-                        wrap = Some(v);
-                        continue;
-                    }
+                if wrap.is_none()
+                    && let Ok(v) = p.try_parse(parse_flex_wrap)
+                {
+                    wrap = Some(v);
+                    continue;
                 }
                 break;
             }

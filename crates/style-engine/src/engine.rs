@@ -702,10 +702,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     Some(None) => Some(viewport),
                     None => Some(tid),
                 };
-                if let Some(e) = expected {
-                    if self.taffy_parent.get(&ctid) != Some(&e) {
-                        self.taffy_parent.insert(ctid, e);
-                    }
+                if let Some(e) = expected
+                    && self.taffy_parent.get(&ctid) != Some(&e)
+                {
+                    self.taffy_parent.insert(ctid, e);
                 }
             }
         }
@@ -1043,39 +1043,37 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         }
                         self.measures.insert(id, (width, h));
                     }
-                    if let Some(&tid) = self.taffy_node.get(&id) {
-                        if let Some(cs) = self.styles.get(&id) {
-                            let mut ts = map_style(cs, &self.media);
-                            // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点。
-                            for raw in crate::layout::take_calc_deferred() {
-                                self.calc_deferred
-                                    .push(crate::layout::DeferredCalc { node: tid, raw });
-                            }
-                            // 第五批⑥：absolute shrink-to-fit（CSS 10.3.7）仅适
-                            // 用 width:auto——声明宽优先保留（含 min/max 夹紧由
-                            // taffy 消费）；测量高兜底 height:auto。
-                            ts.size = taffy::prelude::Size {
-                                width: if has_declared_len(
-                                    cs,
-                                    crate::css::property::PropertyId::Width,
-                                ) {
-                                    ts.size.width
-                                } else {
-                                    taffy::prelude::Dimension::length(width)
-                                },
-                                height: if has_declared_len(
-                                    cs,
-                                    crate::css::property::PropertyId::Height,
-                                ) {
-                                    ts.size.height
-                                } else {
-                                    taffy::prelude::Dimension::length(
-                                        self.measures.get(&id).map(|m| m.1).unwrap_or(0.0),
-                                    )
-                                },
-                            };
-                            let _ = self.taffy.set_style(tid, ts);
+                    if let Some(&tid) = self.taffy_node.get(&id)
+                        && let Some(cs) = self.styles.get(&id)
+                    {
+                        let mut ts = map_style(cs, &self.media);
+                        // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点。
+                        for raw in crate::layout::take_calc_deferred() {
+                            self.calc_deferred
+                                .push(crate::layout::DeferredCalc { node: tid, raw });
                         }
+                        // 第五批⑥：absolute shrink-to-fit（CSS 10.3.7）仅适
+                        // 用 width:auto——声明宽优先保留（含 min/max 夹紧由
+                        // taffy 消费）；测量高兜底 height:auto。
+                        ts.size = taffy::prelude::Size {
+                            width: if has_declared_len(cs, crate::css::property::PropertyId::Width)
+                            {
+                                ts.size.width
+                            } else {
+                                taffy::prelude::Dimension::length(width)
+                            },
+                            height: if has_declared_len(
+                                cs,
+                                crate::css::property::PropertyId::Height,
+                            ) {
+                                ts.size.height
+                            } else {
+                                taffy::prelude::Dimension::length(
+                                    self.measures.get(&id).map(|m| m.1).unwrap_or(0.0),
+                                )
+                            },
+                        };
+                        let _ = self.taffy.set_style(tid, ts);
                     }
                 }
                 if reflow {
@@ -1192,23 +1190,22 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     // 各仿射均以未变换视口系为基（ADR-0009 布局盒不变），先
                     // 后代 own、再祖先 acc —— 与绘制流 cur∘M 嵌套完全一致。
                     let mut eff = acc;
-                    if let Some(ccs) = self.styles.get(&c) {
-                        if ccs.has_transform() {
-                            if let Some(&(lx, ly, lw, lh)) = layout_by_node.get(&c) {
-                                let own = crate::paint::resolve_transform_affine(
-                                    ccs,
-                                    lx,
-                                    ly,
-                                    lw,
-                                    lh,
-                                    &self.media,
-                                );
-                                eff = Some(match acc {
-                                    Some(a) => crate::paint::mul_affine(&a, &own),
-                                    None => own,
-                                });
-                            }
-                        }
+                    if let Some(ccs) = self.styles.get(&c)
+                        && ccs.has_transform()
+                        && let Some(&(lx, ly, lw, lh)) = layout_by_node.get(&c)
+                    {
+                        let own = crate::paint::resolve_transform_affine(
+                            ccs,
+                            lx,
+                            ly,
+                            lw,
+                            lh,
+                            &self.media,
+                        );
+                        eff = Some(match acc {
+                            Some(a) => crate::paint::mul_affine(&a, &own),
+                            None => own,
+                        });
                     }
                     if let Some(&(cx, cy, cw, ch)) = layout_by_node.get(&c) {
                         if let Some(a) = eff {
@@ -1934,11 +1931,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     // 三期⑤a：回退块流前恢复全部断口 margin-top 截断
                     // （幻影拆除，子节点回到容器块流）；⑤b 拆净段行。
                     for (&id, &orig) in &prev.truncated {
-                        if let Some(&tid) = self.taffy_node.get(&id) {
-                            if let Ok(mut ts) = self.taffy.style(tid).cloned() {
-                                ts.margin.top = orig.restore();
-                                let _ = self.taffy.set_style(tid, ts);
-                            }
+                        if let Some(&tid) = self.taffy_node.get(&id)
+                            && let Ok(mut ts) = self.taffy.style(tid).cloned()
+                        {
+                            ts.margin.top = orig.restore();
+                            let _ = self.taffy.set_style(tid, ts);
                         }
                     }
                     for r in &prev.rows {
@@ -1960,24 +1957,22 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     }
                     changed = true;
                 }
-                if let Ok(ts) = self.taffy.style(ctid).cloned() {
-                    if ts.display == taffy::prelude::Display::Flex {
-                        let mut ms = crate::layout::map_style(&cs, &self.media);
-                        ms.display = taffy::prelude::Display::Block;
-                        let _ = self.taffy.set_style(ctid, ms);
-                        changed = true;
-                    }
+                if let Ok(ts) = self.taffy.style(ctid).cloned()
+                    && ts.display == taffy::prelude::Display::Flex
+                {
+                    let mut ms = crate::layout::map_style(&cs, &self.media);
+                    ms.display = taffy::prelude::Display::Block;
+                    let _ = self.taffy.set_style(ctid, ms);
+                    changed = true;
                 }
-                if changed {
-                    if let Some(root) = self.taffy_root {
-                        let _ = self.taffy.compute_layout(
-                            root,
-                            taffy::prelude::Size {
-                                width: taffy::prelude::AvailableSpace::Definite(viewport.0),
-                                height: taffy::prelude::AvailableSpace::Definite(viewport.1),
-                            },
-                        );
-                    }
+                if changed && let Some(root) = self.taffy_root {
+                    let _ = self.taffy.compute_layout(
+                        root,
+                        taffy::prelude::Size {
+                            width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                            height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                        },
+                    );
                 }
                 continue;
             }
@@ -2133,11 +2128,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                                 if let Some(&t) = self.taffy_node.get(&c) {
                                     v.push(t);
                                 }
-                            } else if let Some(i) = plans.iter().position(|p| p.contains(&c)) {
-                                if !seen[i] {
-                                    seen[i] = true;
-                                    v.push(st.rows[i]);
-                                }
+                            } else if let Some(i) = plans.iter().position(|p| p.contains(&c))
+                                && !seen[i]
+                            {
+                                seen[i] = true;
+                                v.push(st.rows[i]);
                             }
                         }
                         v
@@ -2203,11 +2198,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                                 if let Some(&t) = self.taffy_node.get(&c) {
                                     v.push(t);
                                 }
-                            } else if let Some(i) = plans.iter().position(|p| p.contains(&c)) {
-                                if !seen[i] {
-                                    seen[i] = true;
-                                    v.push(st.rows[i]);
-                                }
+                            } else if let Some(i) = plans.iter().position(|p| p.contains(&c))
+                                && !seen[i]
+                            {
+                                seen[i] = true;
+                                v.push(st.rows[i]);
                             }
                         }
                         v
@@ -2220,16 +2215,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 st.seq_sig = seq_sig;
                 structure_changed = true;
             }
-            if structure_changed {
-                if let Some(root) = self.taffy_root {
-                    let _ = self.taffy.compute_layout(
-                        root,
-                        taffy::prelude::Size {
-                            width: taffy::prelude::AvailableSpace::Definite(viewport.0),
-                            height: taffy::prelude::AvailableSpace::Definite(viewport.1),
-                        },
-                    );
-                }
+            if structure_changed && let Some(root) = self.taffy_root {
+                let _ = self.taffy.compute_layout(
+                    root,
+                    taffy::prelude::Size {
+                        width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                        height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                    },
+                );
             }
             // 平衡分配（三期⑤a 二分 + ⑤b 分段）：每段独立试高 h 的顺序装
             // 箱 fit——列首块 margin-top 截断（断口语义，css-multicol §7）、
@@ -2336,11 +2329,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     continue;
                 }
                 let orig = st.truncated.remove(&id);
-                if let (Some(&tid), Some(orig)) = (self.taffy_node.get(&id), orig) {
-                    if let Ok(mut ts) = self.taffy.style(tid).cloned() {
-                        ts.margin.top = orig.restore();
-                        let _ = self.taffy.set_style(tid, ts);
-                    }
+                if let (Some(&tid), Some(orig)) = (self.taffy_node.get(&id), orig)
+                    && let Ok(mut ts) = self.taffy.style(tid).cloned()
+                {
+                    ts.margin.top = orig.restore();
+                    let _ = self.taffy.set_style(tid, ts);
                 }
                 trunc_changed = true;
             }
@@ -2600,14 +2593,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             chain.reverse();
             cctx.clear();
             for a in chain {
-                if let Some(cs) = self.styles.get(&a) {
-                    if cs.container_type() != crate::css::property::ContainerType::Normal {
-                        cctx.push(crate::cascade::ContainerCtx {
-                            names: cs.container_names().to_vec(),
-                            ctype: cs.container_type(),
-                            size: self.container_sizes.get(&a).copied(),
-                        });
-                    }
+                if let Some(cs) = self.styles.get(&a)
+                    && cs.container_type() != crate::css::property::ContainerType::Normal
+                {
+                    cctx.push(crate::cascade::ContainerCtx {
+                        names: cs.container_names().to_vec(),
+                        ctype: cs.container_type(),
+                        size: self.container_sizes.get(&a).copied(),
+                    });
                 }
             }
             self.restyle_node(r, self.parents.get(&r).copied(), &mut cctx, &mut guard);
@@ -2812,37 +2805,37 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     ) {
         let mut x = ox;
         let mut y = oy;
-        if let Some(&tid) = self.taffy_node.get(&id) {
-            if let Ok(l) = self.taffy.layout(tid) {
-                // 三期②：重挂 absolute 的坐标 = cb border box 原点 + 自身
-                // location（taffy 绝对锚定 = cb padding box，location 已含
-                // cb border 偏移）；ICB → 视口原点。cb 为样式树祖先，本 DFS
-                // 先序保证 layout_by_node[cb] 已就绪（嵌套 absolute 同序）。
-                if let Some(cb) = self.abs_cb.get(&id) {
-                    let (bx, by) = match cb {
-                        Some(cb_id) => layout_by_node
-                            .get(cb_id)
-                            .map(|&(bx, by, _, _)| (bx, by))
-                            .unwrap_or((ox, oy)),
-                        None => (0.0, 0.0),
-                    };
-                    x = bx + l.location.x;
-                    y = by + l.location.y;
-                } else {
-                    x = l.location.x + ox;
-                    y = l.location.y + oy;
-                }
-                let box_rect = (x, y, l.size.width, l.size.height);
-                layout_by_node.insert(id, box_rect);
-                if let Some(&key) = self.node_to_key.get(&id) {
-                    out.push(LayoutEntry {
-                        key,
-                        x: box_rect.0,
-                        y: box_rect.1,
-                        width: box_rect.2,
-                        height: box_rect.3,
-                    });
-                }
+        if let Some(&tid) = self.taffy_node.get(&id)
+            && let Ok(l) = self.taffy.layout(tid)
+        {
+            // 三期②：重挂 absolute 的坐标 = cb border box 原点 + 自身
+            // location（taffy 绝对锚定 = cb padding box，location 已含
+            // cb border 偏移）；ICB → 视口原点。cb 为样式树祖先，本 DFS
+            // 先序保证 layout_by_node[cb] 已就绪（嵌套 absolute 同序）。
+            if let Some(cb) = self.abs_cb.get(&id) {
+                let (bx, by) = match cb {
+                    Some(cb_id) => layout_by_node
+                        .get(cb_id)
+                        .map(|&(bx, by, _, _)| (bx, by))
+                        .unwrap_or((ox, oy)),
+                    None => (0.0, 0.0),
+                };
+                x = bx + l.location.x;
+                y = by + l.location.y;
+            } else {
+                x = l.location.x + ox;
+                y = l.location.y + oy;
+            }
+            let box_rect = (x, y, l.size.width, l.size.height);
+            layout_by_node.insert(id, box_rect);
+            if let Some(&key) = self.node_to_key.get(&id) {
+                out.push(LayoutEntry {
+                    key,
+                    x: box_rect.0,
+                    y: box_rect.1,
+                    width: box_rect.2,
+                    height: box_rect.3,
+                });
             }
         }
         for c in self.tree.children(id) {
@@ -2856,20 +2849,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             // 段行 → 容器）——沿 taffy_parent 链上溯到样式节点本身，累加
             // 全部合成层偏移（列相对行、行相对容器的 location 之和）。
             let (mut cx, mut cy) = (x, y);
-            if let Some(&tid_c) = self.taffy_node.get(c) {
-                if let Some(mut effp) = self.taffy_parent.get(&tid_c).copied() {
-                    let mut depth = 0usize;
-                    while self.taffy_node.get(&id) != Some(&effp) && depth < 16 {
-                        if let Ok(pl) = self.taffy.layout(effp) {
-                            cx += pl.location.x;
-                            cy += pl.location.y;
-                        }
-                        match self.taffy_parent.get(&effp) {
-                            Some(&pp) => effp = pp,
-                            None => break,
-                        }
-                        depth += 1;
+            if let Some(&tid_c) = self.taffy_node.get(c)
+                && let Some(mut effp) = self.taffy_parent.get(&tid_c).copied()
+            {
+                let mut depth = 0usize;
+                while self.taffy_node.get(&id) != Some(&effp) && depth < 16 {
+                    if let Ok(pl) = self.taffy.layout(effp) {
+                        cx += pl.location.x;
+                        cy += pl.location.y;
                     }
+                    match self.taffy_parent.get(&effp) {
+                        Some(&pp) => effp = pp,
+                        None => break,
+                    }
+                    depth += 1;
                 }
             }
             self.collect(*c, cx, cy, out, layout_by_node);

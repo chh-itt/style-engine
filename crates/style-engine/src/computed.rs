@@ -676,11 +676,11 @@ pub fn compute_node_in<'a>(
             }
             None => {
                 // IACVT：继承属性取父值，否则初始值
-                if inherits(*pid) {
-                    if let Some(pv) = parent.and_then(|p| p.values[pid.slot()].as_ref()) {
-                        style.values[pid.slot()] = Some(pv.clone());
-                        continue;
-                    }
+                if inherits(*pid)
+                    && let Some(pv) = parent.and_then(|p| p.values[pid.slot()].as_ref())
+                {
+                    style.values[pid.slot()] = Some(pv.clone());
+                    continue;
                 }
                 style.values[pid.slot()] = Some(initial_value(*pid));
             }
@@ -692,11 +692,11 @@ pub fn compute_node_in<'a>(
         if style.values[slot].is_some() {
             continue;
         }
-        if inherits(*pid) {
-            if let Some(pv) = parent.and_then(|p| p.values[slot].as_ref()) {
-                style.values[slot] = Some(pv.clone());
-                continue;
-            }
+        if inherits(*pid)
+            && let Some(pv) = parent.and_then(|p| p.values[slot].as_ref())
+        {
+            style.values[slot] = Some(pv.clone());
+            continue;
         }
         style.values[slot] = Some(initial_value(*pid));
     }

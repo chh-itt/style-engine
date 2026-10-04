@@ -159,10 +159,10 @@ impl StyleTree {
                 stack.extend(kids.iter().copied());
             }
         }
-        if let Some(Some(p)) = self.parent.get(id) {
-            if let Some(list) = self.children.get_mut(*p) {
-                list.retain(|c| *c != id);
-            }
+        if let Some(Some(p)) = self.parent.get(id)
+            && let Some(list) = self.children.get_mut(*p)
+        {
+            list.retain(|c| *c != id);
         }
         for d in doomed {
             self.children.remove(d);

@@ -653,51 +653,51 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     }
 
     // 4) 文本（叶内容；原点 = 内容盒左上）
-    if let Some(text) = tree.node(id).text.as_ref() {
-        if !text.is_empty() {
-            let pad_l = style
-                .len(PropertyId::PaddingLeft)
-                .map(|lp| px(lp, style, env))
-                .unwrap_or(0.0);
-            let pad_t = style
-                .len(PropertyId::PaddingTop)
-                .map(|lp| px(lp, style, env))
-                .unwrap_or(0.0);
-            let color = resolve_color(&style.color(), style, env);
-            // T5c：span 绘制期样式终结（与基样式同一条解析路径）
-            let spans = ctx
-                .spans
-                .get(&id)
-                .map(|list| {
-                    list.iter()
-                        .map(|(start, end, scs)| TextSpanPaint {
-                            start: *start,
-                            end: *end,
-                            color: resolve_color(&scs.color(), scs, env),
-                            font_size: scs.font_size_px(),
-                            font_weight: scs.font_weight(),
-                            italic: scs.font_style() == FontStyle::Italic,
-                            font_family: scs.font_family().clone(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            out.ops.push(PaintOp::Text {
-                x: x + pad_l,
-                y: y + pad_t,
-                text: text.clone(),
-                color,
-                spans,
-                font_size: style.font_size_px(),
-                font_family: style.font_family().clone(),
-                font_weight: style.font_weight(),
-                italic: style.font_style() == FontStyle::Italic,
-                max_advance: ctx.wrap_widths.get(&id).copied().flatten(),
-                line_height: style.resolved_line_height_px(env),
-                letter_spacing: style.resolved_letter_spacing_px(env),
-                text_align: style.text_align(),
-            });
-        }
+    if let Some(text) = tree.node(id).text.as_ref()
+        && !text.is_empty()
+    {
+        let pad_l = style
+            .len(PropertyId::PaddingLeft)
+            .map(|lp| px(lp, style, env))
+            .unwrap_or(0.0);
+        let pad_t = style
+            .len(PropertyId::PaddingTop)
+            .map(|lp| px(lp, style, env))
+            .unwrap_or(0.0);
+        let color = resolve_color(&style.color(), style, env);
+        // T5c：span 绘制期样式终结（与基样式同一条解析路径）
+        let spans = ctx
+            .spans
+            .get(&id)
+            .map(|list| {
+                list.iter()
+                    .map(|(start, end, scs)| TextSpanPaint {
+                        start: *start,
+                        end: *end,
+                        color: resolve_color(&scs.color(), scs, env),
+                        font_size: scs.font_size_px(),
+                        font_weight: scs.font_weight(),
+                        italic: scs.font_style() == FontStyle::Italic,
+                        font_family: scs.font_family().clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.ops.push(PaintOp::Text {
+            x: x + pad_l,
+            y: y + pad_t,
+            text: text.clone(),
+            color,
+            spans,
+            font_size: style.font_size_px(),
+            font_family: style.font_family().clone(),
+            font_weight: style.font_weight(),
+            italic: style.font_style() == FontStyle::Italic,
+            max_advance: ctx.wrap_widths.get(&id).copied().flatten(),
+            line_height: style.resolved_line_height_px(env),
+            letter_spacing: style.resolved_letter_spacing_px(env),
+            text_align: style.text_align(),
+        });
     }
 
     // 5) 裁剪 + 滚动 + 子节点
@@ -718,11 +718,11 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         });
     }
     let mut scrolled = false;
-    if let Some(&(dx, dy)) = scroll.get(&id) {
-        if dx != 0.0 || dy != 0.0 {
-            out.ops.push(PaintOp::PushScroll { dx, dy });
-            scrolled = true;
-        }
+    if let Some(&(dx, dy)) = scroll.get(&id)
+        && (dx != 0.0 || dy != 0.0)
+    {
+        out.ops.push(PaintOp::PushScroll { dx, dy });
+        scrolled = true;
     }
     // 7) 子树（ADR-0008，CSS 2.1 Appendix E 简化三带）：
     //    Neg：positioned 且负数字 z（z 升序、等值树序）——先于 in-flow；

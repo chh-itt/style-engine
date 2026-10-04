@@ -141,15 +141,15 @@ pub fn match_rules<'a>(
         .rules
         .iter()
         .filter_map(|rule| {
-            if let Some(q) = &rule.media {
-                if !q.eval(env) {
-                    return None;
-                }
+            if let Some(q) = &rule.media
+                && !q.eval(env)
+            {
+                return None;
             }
-            if let Some(conds) = &rule.container {
-                if !conds.iter().all(|c| c.eval(container_ctx)) {
-                    return None;
-                }
+            if let Some(conds) = &rule.container
+                && !conds.iter().all(|c| c.eval(container_ctx))
+            {
+                return None;
             }
             let specificity = match_specificity(tree, id, &rule.selectors)?;
             Some(MatchedRule { rule, specificity })

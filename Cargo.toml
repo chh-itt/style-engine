@@ -11,7 +11,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# 1.85（edition 2024 起点）→ 1.90：依赖地板上调——ordered-float 5.5.0 需
+# 1.90、smol_str 0.3.6 需 1.89、vello/parley/fontique 链需 1.88（CI msrv
+# 实测 2026-10；MSRV 以依赖最高者为准，见 docs/DEPENDENCIES.md）。
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 
 [workspace.lints.rust]

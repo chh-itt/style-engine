@@ -32,6 +32,14 @@ mod tests {
 
     #[test]
     fn blend_space_srgb_matches_css_default() {
+        // CI 虚拟适配器不稳：windows runner 枚举得到 WARP 类适配器后
+        // wgpu 设备创建段错误（0xc0000005，无法进程内捕获）——ci.yml 的
+        // windows 腿设 STYLE_ENGINE_NO_GPU_PROBE=1 短路跳过；本地与
+        // macOS（真适配器）必跑。无适配器环境的运行时跳过语义见下。
+        if std::env::var_os("STYLE_ENGINE_NO_GPU_PROBE").is_some() {
+            eprintln!("blend_space_srgb_matches_css_default: STYLE_ENGINE_NO_GPU_PROBE=1，CI 跳过");
+            return;
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::default(),
