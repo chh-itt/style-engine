@@ -41,6 +41,16 @@ impl Default for NodeState {
     }
 }
 
+/// 伪元素变体（C1/ADR-0015）：宿主不可构造——引擎 materialize_pseudos
+/// 专用。tree.rs 自定义（selector.rs 引用映射，避免反向依赖）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoWhich {
+    /// ::before（首子伪节点）。
+    Before,
+    /// ::after（末子伪节点）。
+    After,
+}
+
 /// 单个节点的样式输入（宿主拥有语义，引擎镜像存储）。
 #[derive(Debug, Clone, Default)]
 pub struct StyleNode {
@@ -56,11 +66,18 @@ pub struct StyleNode {
     pub declarations: DeclarationBlock,
     /// 文本内容（叶节点；:empty 判定与 T5 文本布局用）。
     pub text: Option<String>,
+    /// 替换内容图像引用（C3，css-images-3；ADR-0017）：宿主经 `add_image`
+    /// 预注册的引用名；None = 非替换元素。绘制期按 object-fit/object-position
+    /// 适配内容盒；固有尺寸自动注入（未手动 set_leaf_intrinsic 时）。
+    pub image: Option<String>,
     /// 属性表（第五批⑮属性选择器数据源）：宿主供 [attr]/[attr=value] 匹配；
     /// BTreeMap 保证遍历序确定。GUI 树无命名空间、值大小写敏感。
     pub attrs: std::collections::BTreeMap<String, String>,
     /// 富文本 span（T5c）：声明覆盖文本的字节区间 [range.0, range.1)。
     pub spans: SmallVec<[TextSpan; 2]>,
+    /// 伪元素标记（C1）：Some = 引擎实体化的伪节点（无宿主语义、不参与
+    /// 结构伪类计数/宿主镜像；文本由 content 计算值供给）。
+    pub pseudo: Option<PseudoWhich>,
 }
 
 /// span 级富文本：区间内声明以级联覆盖基样式（引擎复用 compute_node 求解，
@@ -181,6 +198,11 @@ impl StyleTree {
         self.children.get(id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// 是否为引擎实体化的伪元素节点（C1）。
+    pub fn is_pseudo(&self, id: NodeId) -> bool {
+        self.nodes.get(id).is_some_and(|n| n.pseudo.is_some())
+    }
+
     /// 节点总数（含根）。
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -191,8 +213,16 @@ impl StyleTree {
         self.nodes.len() == 0
     }
 
-    /// 是否为根节点。
+    /// 是否为根节点（用户根：父=合成超根）。
+    ///
+    /// ADR-0010：arena 根槽为合成超根（永不绑定 key、样式恒空），
+    /// 用户根是其子节点——`:root` 伪类匹配全部用户根。
     pub fn is_root(&self, id: NodeId) -> bool {
+        id != self.root && self.parent(id) == Some(self.root)
+    }
+
+    /// 是否为合成超根（arena 根槽；不参与级联/绘制语义，仅作挂载点）。
+    pub fn is_super_root(&self, id: NodeId) -> bool {
         id == self.root
     }
 }

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d44334d90c114c1fd664d3998c95764074a706466ec662db419560a9107f6b2e # shrinks to ops = [Insert { parent: None, key: 1, class: 0, text: 0, decl: 0 }]
+cc 94771785db792b06f456eaaf2af4f03c5297c8c2c68456f2310c4412ba3b9dad # shrinks to ops = [Insert { parent: None, key: 1, class: 0, text: 0, decl: 0 }]

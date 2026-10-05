@@ -113,6 +113,31 @@ pub enum PropertyId {
     GridAutoRows,
     /// grid-auto-columns — 隐式列轨道。
     GridAutoColumns,
+    /// grid-template-areas（E5，ADR-0020）：区域模板（引号串行 ×
+    /// 空白分词格，`.` 空格；矩形性+逐名矩形校验，违反=声明无效）。
+    GridTemplateAreas,
+    /// grid-row-start（E5，ADR-0020）：行放置起线。
+    GridRowStart,
+    /// grid-row-end（E5，ADR-0020）：行放置止线。
+    GridRowEnd,
+    /// grid-column-start（E5，ADR-0020）：列放置起线。
+    GridColumnStart,
+    /// grid-column-end（E5，ADR-0020）：列放置止线。
+    GridColumnEnd,
+    /// text-overflow（F2，ADR-0022 D2）。
+    TextOverflow,
+    /// -webkit-line-clamp（F2，ADR-0022 D3）。
+    WebkitLineClamp,
+    /// text-decoration-line（F2，ADR-0022 D4）。
+    TextDecorationLine,
+    /// text-decoration-style（F2，ADR-0022 D4）。
+    TextDecorationStyle,
+    /// text-decoration-color（F2，ADR-0022 D4）。
+    TextDecorationColor,
+    /// text-decoration-thickness（F2，ADR-0022 D4）。
+    TextDecorationThickness,
+    /// text-shadow（F2，ADR-0022 D5）。
+    TextShadow,
     /// 二期③multi-column：显式列数（auto|<integer≥1>）；无 count 时
     /// column-width 声明即请求多列（列数布局期结算）。
     ColumnCount,
@@ -139,6 +164,18 @@ pub enum PropertyId {
     BackgroundColor,
     /// background-image — 背景图（none|url()|渐变）。
     BackgroundImage,
+    /// background-repeat — 平铺样式（F3b，ADR-0024）。
+    BackgroundRepeat,
+    /// background-attachment — 背景附着（F3b，ADR-0024）。
+    BackgroundAttachment,
+    /// background-position — 背景定位（F3b，ADR-0024）。
+    BackgroundPosition,
+    /// background-size — 背景尺寸（F3b，ADR-0024）。
+    BackgroundSize,
+    /// background-origin — 定位区盒（F3b，ADR-0024）。
+    BackgroundOrigin,
+    /// background-clip — 绘制区盒（F3b，ADR-0024）。
+    BackgroundClip,
     /// border-top-left-radius — 左上圆角（length-percentage{1,2}）。
     BorderTopLeftRadius,
     /// border-top-right-radius — 右上圆角。
@@ -183,9 +220,10 @@ pub enum PropertyId {
     BoxSizing,
     /// transform（ADR-0009 v1：2D 仿射函数列表；3D 函数解析拒绝）。
     Transform,
-    /// filter/clip-path（第四批④：仅解析存在性语义位触发 SC，不做滤镜/裁剪效果）。
+    /// filter（第四批④：仅解析存在性语义位触发 SC，不做滤镜效果）。
     Filter,
-    /// clip-path（同上）。
+    /// clip-path — 裁剪形状（第四批④ SC 位；F3c 升级为形状解析与
+    /// 绘制裁剪，ADR-0025）。
     ClipPath,
     /// will-change（第五批㉒ SC 触发全集：列表含「非初始即生成 SC」的属性
     /// 时触发；纯语义位，无提示优化实现）。
@@ -223,6 +261,136 @@ pub enum PropertyId {
     /// container-name（none|custom-ident#）——有名容器查询按名自最近祖先
     /// 向外匹配。
     ContainerName,
+    // 行为提示属性（A1，docs/BEHAVIOR-HINT-PROPS.md）：宿主可读、零绘制
+    // 语义——引擎解析入库+级联继承，消费端是宿主（光标/选择/命中/输入
+    // 插示器/控件着色），不产生任何 PaintOp、不参与布局。
+    /// cursor（CSS UI 4 关键字子集）——宿主鼠标指针形状。
+    Cursor,
+    /// user-select（CSS UI 4）——文本可选择语义（**不继承**）。
+    UserSelect,
+    /// pointer-events——命中测试穿透语义。
+    PointerEvents,
+    /// caret-color——文本插入插示器颜色（auto|color）。
+    CaretColor,
+    /// accent-color——控件着色基调（auto|color）。
+    AccentColor,
+    // outline（A2）：不占布局的装饰描边（ink overflow，css-ui-4）——
+    // 绘制复用 Border 基元（外扩矩形承载），布局零映射。
+    /// outline-width（thin|medium|thick|<length>）。
+    OutlineWidth,
+    /// outline-style（none|solid|dashed|dotted|double|groove|ridge|inset|outset|auto）。
+    OutlineStyle,
+    /// outline-color（<color>；初始 currentcolor）。
+    OutlineColor,
+    /// outline-offset（<length>，可负；描边带外扩量）。
+    OutlineOffset,
+    // 逻辑属性（A8，css-logical-1）：独立槽位 + computed 期按元素
+    // direction 与映射物理槽按级联序键定夺（规范正确：物理/逻辑同池
+    // 比先后）。纵向书写模式不支持（在案 FEATURES.md）。
+    /// direction（ltr|rtl，继承）——逻辑→物理映射基准。
+    Direction,
+    /// unicode-bidi（继承）——文本栈提示（computed 可读）。
+    UnicodeBidi,
+    /// margin-inline-start
+    MarginInlineStart,
+    /// margin-inline-end
+    MarginInlineEnd,
+    /// margin-block-start
+    MarginBlockStart,
+    /// margin-block-end
+    MarginBlockEnd,
+    /// padding-inline-start
+    PaddingInlineStart,
+    /// padding-inline-end
+    PaddingInlineEnd,
+    /// padding-block-start
+    PaddingBlockStart,
+    /// padding-block-end
+    PaddingBlockEnd,
+    /// inset-inline-start
+    InsetInlineStart,
+    /// inset-inline-end
+    InsetInlineEnd,
+    /// inset-block-start
+    InsetBlockStart,
+    /// inset-block-end
+    InsetBlockEnd,
+    /// border-inline-start-width
+    BorderInlineStartWidth,
+    /// border-inline-end-width
+    BorderInlineEndWidth,
+    /// border-block-start-width
+    BorderBlockStartWidth,
+    /// border-block-end-width
+    BorderBlockEndWidth,
+    /// border-inline-start-style
+    BorderInlineStartStyle,
+    /// border-inline-end-style
+    BorderInlineEndStyle,
+    /// border-block-start-style
+    BorderBlockStartStyle,
+    /// border-block-end-style
+    BorderBlockEndStyle,
+    /// border-inline-start-color
+    BorderInlineStartColor,
+    /// border-inline-end-color
+    BorderInlineEndColor,
+    /// border-block-start-color
+    BorderBlockStartColor,
+    /// border-block-end-color
+    BorderBlockEndColor,
+    /// border-start-start-radius
+    BorderStartStartRadius,
+    /// border-start-end-radius
+    BorderStartEndRadius,
+    /// border-end-start-radius
+    BorderEndStartRadius,
+    /// border-end-end-radius
+    BorderEndEndRadius,
+    /// content（C1，css-content-3）：伪元素生成内容。
+    Content,
+    /// text-transform（C2，css-text-3）：文本大小写/全角变换。
+    TextTransform,
+    /// overflow-wrap（C2，css-text-3）：长词溢出断行。
+    OverflowWrap,
+    /// word-break（C2，css-text-3）：词内断行强度。
+    WordBreak,
+    /// object-fit（C3，css-images-3）：替换内容适配模式。
+    ObjectFit,
+    /// object-position（C3，css-images-3）：替换内容盒内对齐。
+    ObjectPosition,
+    /// float（E4，css-position-3 / ADR-0019）：浮动出流。
+    Float,
+    /// clear（E4，css-position-3 / ADR-0019）：浮动钳位。
+    Clear,
+    // F3d（ADR-0026）：border-image 全集五长手
+    /// border-image-source — 边框图源（none|url()|渐变；复用背景图单层值族）。
+    BorderImageSource,
+    /// border-image-slice — 源切片四线（number/percentage）+ fill。
+    BorderImageSlice,
+    /// border-image-width — 绘制域带宽四边（length|number|auto）。
+    BorderImageWidth,
+    /// border-image-outset — 绘制域外扩四边（length|number）。
+    BorderImageOutset,
+    /// border-image-repeat — 区域平铺样式（x/y 双轴）。
+    BorderImageRepeat,
+    // F3d（ADR-0026）：字体深化五属性
+    /// font-stretch — 字宽轴（百分比归一 50..=200，normal=100）。
+    FontStretch,
+    /// word-spacing — 词间距（length-percentage，normal → 0）。
+    WordSpacing,
+    /// font-feature-settings — OpenType 特性列表。
+    FontFeatures,
+    /// font-variation-settings — 可变字体轴列表。
+    FontVariations,
+    /// font-variant-caps — 大写形变体（small-caps 族合成，ADR-0026 D3）。
+    FontVariantCaps,
+    /// hyphens — 连字符断字模式（F4，ADR-0028：属性层；断词效果受上游
+    /// 分段器边界，三值 v1 行为一致、B 级在案）。
+    Hyphens,
+    /// backdrop-filter — 背景滤镜存在性（F4，ADR-0028：非 none 触发 SC，
+    /// 效果本体 T2，同 filter 第四批④ 先例）。
+    BackdropFilter,
 }
 
 impl PropertyId {
@@ -315,15 +483,100 @@ impl PropertyId {
         Self::LetterSpacing,
         Self::ContainerType,
         Self::ContainerName,
+        Self::Cursor,
+        Self::UserSelect,
+        Self::PointerEvents,
+        Self::CaretColor,
+        Self::AccentColor,
+        Self::OutlineWidth,
+        Self::OutlineStyle,
+        Self::OutlineColor,
+        Self::OutlineOffset,
+        Self::Direction,
+        Self::UnicodeBidi,
+        Self::MarginInlineStart,
+        Self::MarginInlineEnd,
+        Self::MarginBlockStart,
+        Self::MarginBlockEnd,
+        Self::PaddingInlineStart,
+        Self::PaddingInlineEnd,
+        Self::PaddingBlockStart,
+        Self::PaddingBlockEnd,
+        Self::InsetInlineStart,
+        Self::InsetInlineEnd,
+        Self::InsetBlockStart,
+        Self::InsetBlockEnd,
+        Self::BorderInlineStartWidth,
+        Self::BorderInlineEndWidth,
+        Self::BorderBlockStartWidth,
+        Self::BorderBlockEndWidth,
+        Self::BorderInlineStartStyle,
+        Self::BorderInlineEndStyle,
+        Self::BorderBlockStartStyle,
+        Self::BorderBlockEndStyle,
+        Self::BorderInlineStartColor,
+        Self::BorderInlineEndColor,
+        Self::BorderBlockStartColor,
+        Self::BorderBlockEndColor,
+        Self::BorderStartStartRadius,
+        Self::BorderStartEndRadius,
+        Self::BorderEndStartRadius,
+        Self::BorderEndEndRadius,
+        Self::Content,
+        Self::TextTransform,
+        Self::OverflowWrap,
+        Self::WordBreak,
+        Self::ObjectFit,
+        Self::ObjectPosition,
+        Self::Float,
+        Self::Clear,
+        Self::GridTemplateAreas,
+        Self::GridRowStart,
+        Self::GridRowEnd,
+        Self::GridColumnStart,
+        Self::GridColumnEnd,
+        Self::TextOverflow,
+        Self::WebkitLineClamp,
+        Self::TextDecorationLine,
+        Self::TextDecorationStyle,
+        Self::TextDecorationColor,
+        Self::TextDecorationThickness,
+        Self::TextShadow,
+        Self::BackgroundRepeat,
+        Self::BackgroundAttachment,
+        Self::BackgroundPosition,
+        Self::BackgroundSize,
+        Self::BackgroundOrigin,
+        Self::BackgroundClip,
+        // F3d（ADR-0026）：border-image 五长手 + 字体深化五属性（ALL 尾
+        // 追加，动画描述符槽整体后移 ×10）
+        Self::BorderImageSource,
+        Self::BorderImageSlice,
+        Self::BorderImageWidth,
+        Self::BorderImageOutset,
+        Self::BorderImageRepeat,
+        Self::FontStretch,
+        Self::WordSpacing,
+        Self::FontFeatures,
+        Self::FontVariations,
+        Self::FontVariantCaps,
+        // F4（ADR-0028）：hyphens + backdrop-filter（ALL 尾追加；动画描述
+        // 符槽整体后移 ×2 至 164..171，slot_alignment 不变量=ALL 序连续）
+        Self::Hyphens,
+        Self::BackdropFilter,
     ];
 
-    /// 槽位存储总槽位数：ALL 全部 87 位 + 7 个动画描述符位
-    ///（ComputedStyle 槽位存储的 Vec 长度）。
-    pub const SLOT_COUNT: usize = 94;
+    /// 槽位存储总槽位数：ALL 全部 164 位（0..139 原序、F2 文本 7 位、
+    /// F3b 背景 6 位、F3d 边框图 5 位、F3d 字体 5 位、F4 两属性，slot()
+    /// 显式编号）加 7 个动画描述符位（非 ALL）。
+    pub const SLOT_COUNT: usize = 171;
 
     /// 槽位存储下标（ComputedStyle 的 `Vec<Option<DeclValue>>` 用）。
-    /// 0..87 = [`Self::ALL`] 顺序；87..94 = 动画描述符（不在 ALL：
-    /// 全集物化不含，仅声明时落槽）。`slot_alignment` 测试锁定本表
+    /// 0..139 = ALL 原序；139..146 = F2 文本追加（ALL 尾部成员）；
+    /// 146..152 = F3b 背景追加；152..164 = F3d 边框图+字体追加+F4 两
+    /// 属性；164..171 = 动画描述符（不在 ALL）。
+    /// clip-path 沿用原 ALL 位 71（第四批④ 占位，F3c 原位升级，ADR-0025）。
+    /// `slot_alignment` 测试锁定本表
     /// 与 ALL 的一致性——新增变体时必须同步扩展本 match 与 SLOT_COUNT。
     pub fn slot(self) -> usize {
         match self {
@@ -414,14 +667,105 @@ impl PropertyId {
             Self::LetterSpacing => 84,
             Self::ContainerType => 85,
             Self::ContainerName => 86,
-            // 动画描述符（非 ALL 成员；声明/采样时落槽）
-            Self::AnimationName => 87,
-            Self::AnimationDuration => 88,
-            Self::AnimationDelay => 89,
-            Self::AnimationIterationCount => 90,
-            Self::AnimationTimingFunction => 91,
-            Self::AnimationDirection => 92,
-            Self::AnimationFillMode => 93,
+            // 行为提示属性（A1）：宿主可读非绘制通道
+            Self::Cursor => 87,
+            Self::UserSelect => 88,
+            Self::PointerEvents => 89,
+            Self::CaretColor => 90,
+            Self::AccentColor => 91,
+            // outline（A2）：不占布局的装饰描边（ink overflow）
+            Self::OutlineWidth => 92,
+            Self::OutlineStyle => 93,
+            Self::OutlineColor => 94,
+            Self::OutlineOffset => 95, // 逻辑属性（A8）：96..125 = css-logical-1 与 direction/unicode-bidi
+            Self::Direction => 96,
+            Self::UnicodeBidi => 97,
+            Self::MarginInlineStart => 98,
+            Self::MarginInlineEnd => 99,
+            Self::MarginBlockStart => 100,
+            Self::MarginBlockEnd => 101,
+            Self::PaddingInlineStart => 102,
+            Self::PaddingInlineEnd => 103,
+            Self::PaddingBlockStart => 104,
+            Self::PaddingBlockEnd => 105,
+            Self::InsetInlineStart => 106,
+            Self::InsetInlineEnd => 107,
+            Self::InsetBlockStart => 108,
+            Self::InsetBlockEnd => 109,
+            Self::BorderInlineStartWidth => 110,
+            Self::BorderInlineEndWidth => 111,
+            Self::BorderBlockStartWidth => 112,
+            Self::BorderBlockEndWidth => 113,
+            Self::BorderInlineStartStyle => 114,
+            Self::BorderInlineEndStyle => 115,
+            Self::BorderBlockStartStyle => 116,
+            Self::BorderBlockEndStyle => 117,
+            Self::BorderInlineStartColor => 118,
+            Self::BorderInlineEndColor => 119,
+            Self::BorderBlockStartColor => 120,
+            Self::BorderBlockEndColor => 121,
+            Self::BorderStartStartRadius => 122,
+            Self::BorderStartEndRadius => 123,
+            Self::BorderEndStartRadius => 124,
+            Self::BorderEndEndRadius => 125,
+            // content（C1）：ALL 末位
+            Self::Content => 126,
+            // C2 文本三属性
+            Self::TextTransform => 127,
+            Self::OverflowWrap => 128,
+            Self::WordBreak => 129,
+            // C3 替换内容两属性
+            Self::ObjectFit => 130,
+            Self::ObjectPosition => 131,
+            // E4 浮动两属性（ADR-0019）
+            Self::Float => 132,
+            Self::Clear => 133,
+            // E5 grid-template-areas 与放置四长手（ADR-0020）
+            Self::GridTemplateAreas => 134,
+            Self::GridRowStart => 135,
+            Self::GridRowEnd => 136,
+            Self::GridColumnStart => 137,
+            Self::GridColumnEnd => 138,
+            // F2（ADR-0022 D2/D3/D4）：text-overflow/line-clamp/decoration
+            // 槽（ALL 尾后）。
+            Self::TextOverflow => 139,
+            Self::WebkitLineClamp => 140,
+            Self::TextDecorationLine => 141,
+            Self::TextDecorationStyle => 142,
+            Self::TextDecorationColor => 143,
+            Self::TextDecorationThickness => 144,
+            Self::TextShadow => 145,
+            // F3b（ADR-0024）：background 全集六长手（=ALL 尾位，
+            // slot==ALL 位序；描述符让位其后）。clip-path 原位 71 不动。
+            Self::BackgroundRepeat => 146,
+            Self::BackgroundAttachment => 147,
+            Self::BackgroundPosition => 148,
+            Self::BackgroundSize => 149,
+            Self::BackgroundOrigin => 150,
+            Self::BackgroundClip => 151,
+            // F3d（ADR-0026）：border-image 五长手 + 字体深化五属性
+            //（=ALL 尾位，slot==ALL 位序；动画描述符让位其后 ×10）。
+            Self::BorderImageSource => 152,
+            Self::BorderImageSlice => 153,
+            Self::BorderImageWidth => 154,
+            Self::BorderImageOutset => 155,
+            Self::BorderImageRepeat => 156,
+            Self::FontStretch => 157,
+            Self::WordSpacing => 158,
+            Self::FontFeatures => 159,
+            Self::FontVariations => 160,
+            Self::FontVariantCaps => 161,
+            // 动画描述符（非 ALL 成员；声明/采样时落槽；F4 追加后整体
+            // 后移 ×2）
+            Self::AnimationName => 164,
+            Self::AnimationDuration => 165,
+            Self::AnimationDelay => 166,
+            Self::AnimationIterationCount => 167,
+            Self::AnimationTimingFunction => 168,
+            Self::AnimationDirection => 169,
+            Self::AnimationFillMode => 170,
+            Self::Hyphens => 162,
+            Self::BackdropFilter => 163,
         }
     }
 
@@ -441,7 +785,16 @@ impl PropertyId {
             Self::AnimationIterationCount => "animation-iteration-count",
             Self::AnimationTimingFunction => "animation-timing-function",
             Self::AnimationDirection => "animation-direction",
+            Self::TextOverflow => "text-overflow",
+            Self::WebkitLineClamp => "-webkit-line-clamp",
+            Self::TextDecorationLine => "text-decoration-line",
+            Self::TextDecorationStyle => "text-decoration-style",
+            Self::TextDecorationColor => "text-decoration-color",
+            Self::TextDecorationThickness => "text-decoration-thickness",
+            Self::TextShadow => "text-shadow",
             Self::AnimationFillMode => "animation-fill-mode",
+            Self::Hyphens => "hyphens",
+            Self::BackdropFilter => "backdrop-filter",
             Self::Width => "width",
             Self::Height => "height",
             Self::MinWidth => "min-width",
@@ -483,6 +836,22 @@ impl PropertyId {
             Self::GridAutoColumns => "grid-auto-columns",
             Self::BackgroundColor => "background-color",
             Self::BackgroundImage => "background-image",
+            Self::BackgroundRepeat => "background-repeat",
+            Self::BackgroundAttachment => "background-attachment",
+            Self::BackgroundPosition => "background-position",
+            Self::BackgroundSize => "background-size",
+            Self::BackgroundOrigin => "background-origin",
+            Self::BackgroundClip => "background-clip",
+            Self::BorderImageSource => "border-image-source",
+            Self::BorderImageSlice => "border-image-slice",
+            Self::BorderImageWidth => "border-image-width",
+            Self::BorderImageOutset => "border-image-outset",
+            Self::BorderImageRepeat => "border-image-repeat",
+            Self::FontStretch => "font-stretch",
+            Self::WordSpacing => "word-spacing",
+            Self::FontFeatures => "font-feature-settings",
+            Self::FontVariations => "font-variation-settings",
+            Self::FontVariantCaps => "font-variant-caps",
             Self::BorderTopLeftRadius => "border-top-left-radius",
             Self::BorderTopRightRadius => "border-top-right-radius",
             Self::BorderBottomRightRadius => "border-bottom-right-radius",
@@ -522,21 +891,385 @@ impl PropertyId {
             Self::LetterSpacing => "letter-spacing",
             Self::ContainerType => "container-type",
             Self::ContainerName => "container-name",
+            Self::Cursor => "cursor",
+            Self::UserSelect => "user-select",
+            Self::PointerEvents => "pointer-events",
+            Self::CaretColor => "caret-color",
+            Self::AccentColor => "accent-color",
+            Self::OutlineWidth => "outline-width",
+            Self::OutlineStyle => "outline-style",
+            Self::OutlineColor => "outline-color",
+            Self::OutlineOffset => "outline-offset",
+            Self::Direction => "direction",
+            Self::UnicodeBidi => "unicode-bidi",
+            Self::MarginInlineStart => "margin-inline-start",
+            Self::MarginInlineEnd => "margin-inline-end",
+            Self::MarginBlockStart => "margin-block-start",
+            Self::MarginBlockEnd => "margin-block-end",
+            Self::PaddingInlineStart => "padding-inline-start",
+            Self::PaddingInlineEnd => "padding-inline-end",
+            Self::PaddingBlockStart => "padding-block-start",
+            Self::PaddingBlockEnd => "padding-block-end",
+            Self::InsetInlineStart => "inset-inline-start",
+            Self::InsetInlineEnd => "inset-inline-end",
+            Self::InsetBlockStart => "inset-block-start",
+            Self::InsetBlockEnd => "inset-block-end",
+            Self::BorderInlineStartWidth => "border-inline-start-width",
+            Self::BorderInlineEndWidth => "border-inline-end-width",
+            Self::BorderBlockStartWidth => "border-block-start-width",
+            Self::BorderBlockEndWidth => "border-block-end-width",
+            Self::BorderInlineStartStyle => "border-inline-start-style",
+            Self::BorderInlineEndStyle => "border-inline-end-style",
+            Self::BorderBlockStartStyle => "border-block-start-style",
+            Self::BorderBlockEndStyle => "border-block-end-style",
+            Self::BorderInlineStartColor => "border-inline-start-color",
+            Self::BorderInlineEndColor => "border-inline-end-color",
+            Self::BorderBlockStartColor => "border-block-start-color",
+            Self::BorderBlockEndColor => "border-block-end-color",
+            Self::BorderStartStartRadius => "border-start-start-radius",
+            Self::BorderStartEndRadius => "border-start-end-radius",
+            Self::BorderEndStartRadius => "border-end-start-radius",
+            Self::BorderEndEndRadius => "border-end-end-radius",
+            Self::Content => "content",
+            Self::TextTransform => "text-transform",
+            Self::OverflowWrap => "overflow-wrap",
+            Self::WordBreak => "word-break",
+            Self::ObjectFit => "object-fit",
+            Self::ObjectPosition => "object-position",
+            Self::Float => "float",
+            Self::Clear => "clear",
+            Self::GridTemplateAreas => "grid-template-areas",
+            Self::GridRowStart => "grid-row-start",
+            Self::GridRowEnd => "grid-row-end",
+            Self::GridColumnStart => "grid-column-start",
+            Self::GridColumnEnd => "grid-column-end",
         }
     }
 
     /// CSS 属性名 → PropertyId（大小写不敏感）。简写名返回 None（由简写
-    /// 展开器处理）。
+    /// 展开器处理）。动画描述符长手（96..103 槽位）不在 ALL（全集物化
+    /// 排除——仅声明时落槽），但长手声明必须可路由（css-animations-1：
+    /// animation-* 长手是一等属性），故 ALL 查找未中后走补表。
     pub fn from_css_name(name: &str) -> Option<Self> {
         let lower = name.to_ascii_lowercase();
-        Self::ALL.iter().copied().find(|id| id.css_name() == lower)
+        if let Some(id) = Self::ALL.iter().copied().find(|id| id.css_name() == lower) {
+            return Some(id);
+        }
+        match lower.as_str() {
+            "animation-name" => Some(Self::AnimationName),
+            "animation-duration" => Some(Self::AnimationDuration),
+            "animation-delay" => Some(Self::AnimationDelay),
+            "animation-iteration-count" => Some(Self::AnimationIterationCount),
+            "animation-timing-function" => Some(Self::AnimationTimingFunction),
+            "animation-direction" => Some(Self::AnimationDirection),
+            "animation-fill-mode" => Some(Self::AnimationFillMode),
+            // C2：overflow-wrap 的 legacy 别名（css-text-3）
+            "word-wrap" => Some(Self::OverflowWrap),
+            _ => None,
+        }
     }
+}
+
+/// direction 值族（A8，css-writing-modes-4）：逻辑→物理映射基准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DirectionKind {
+    /// ltr — 行内方向左→右（默认）。
+    Ltr,
+    /// rtl — 行内方向右→左。
+    Rtl,
+}
+
+/// unicode-bidi 值族（A8）：文本栈提示（引擎文本叶消费=B 级提示，
+/// ComputedStyle 可读供宿主/富文本管线使用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnicodeBidiKind {
+    /// normal（默认）。
+    Normal,
+    /// embed。
+    Embed,
+    /// isolate。
+    Isolate,
+    /// bidi-override。
+    BidiOverride,
+    /// isolate-override。
+    IsolateOverride,
+    /// plaintext。
+    Plaintext,
+}
+
+/// content 值族（C1，css-content-3；ADR-0015 MVP）：伪元素生成内容。
+/// attr()/url()/counter()/quotes 为 T2（解析期告警拒绝）。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ContentValue {
+    /// none — 不生成盒子。
+    None,
+    /// normal — 初始；元素上无效、伪元素不生成。
+    Normal,
+    /// 字符串字面量（MVP 单串；多串拼接段 T2）。
+    Str(String),
+}
+
+/// text-transform 值族（C2，css-text-3；ADR-0016）：文本大小写/全角变换。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum TextTransformKind {
+    /// none — 不变换。
+    #[default]
+    None,
+    /// uppercase — 全词大写。
+    Uppercase,
+    /// lowercase — 全词小写。
+    Lowercase,
+    /// capitalize — 每词首字母大写（词界≈非字母数字分隔，FEATURES 偏差
+    /// 条：spec 为 UAX#29 词界）。
+    Capitalize,
+    /// full-width — latin/标点转全角（U+FF01-FF5E）、空格转 U+3000。
+    FullWidth,
+    /// full-size-kana — 小假名转普通假名（T2：接受但不变换，FEATURES
+    /// 偏差条在案）。
+    FullSizeKana,
+}
+
+/// overflow-wrap 值族（C2，css-text-3；ADR-0016）：长词溢出断行
+///（parley 原生消费，parlance OverflowWrap 一一映射）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OverflowWrapKind {
+    /// normal — 只在常规断点断。
+    #[default]
+    Normal,
+    /// break-word — 需要时词内任意点断（min-content 不受影响）。
+    BreakWord,
+    /// anywhere — 同 break-word 且参与 min-content 计算。
+    Anywhere,
+}
+
+/// hyphens 值族（F4，ADR-0028 D2，css-text-3 §5.4）：连字符断字模式。
+/// initial=manual。断词效果边界（上游分段器）：显式断点（U+00AD 软连字
+/// 符 / U+2010）由 parley 的 UAX 14 分段决定（≈manual 默认语义），
+/// `auto` 无连字词典、`none` 无法抑制上游断点——三值 v1 行为一致，
+/// B 级在案（FEATURES hyphens 条）；重估条件=parley 连字/断点覆盖 API。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum HyphensKind {
+    /// manual — 仅显式断点（软连字符 U+00AD / 连字符 U+2010）可断。
+    #[default]
+    Manual,
+    /// none — 连字符断字关闭（含显式断点；v1 与 manual 行为一致）。
+    None,
+    /// auto — 词典连字（上游无词典支持，v1 与 manual 行为一致）。
+    Auto,
+}
+
+/// word-break 值族（C2，css-text-3；ADR-0016）：词内断行强度
+///（parley 原生消费，parlance WordBreak 一一映射）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum WordBreakKind {
+    /// normal — 常规规则。
+    #[default]
+    Normal,
+    /// break-all — 词内允许断。
+    BreakAll,
+    /// keep-all — 词内禁止断（含 CJK 间隙与连字符接缝）。
+    KeepAll,
+}
+
+/// object-fit 值族（C3，css-images-3；ADR-0017）：替换内容适配模式。
+/// 语义按源图 (sw, sh) 装入内容盒 (bw, bh) 的比例 s 定义——
+/// fill=拉伸全盒；contain=s=min 比例（信箱）；cover=s=max 比例（溢出裁）；
+/// none=s=1（自然尺寸）；scale-down=s=min(1, min 比例)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ObjectFitKind {
+    /// fill — 拉伸至内容盒（默认；宽高比不保持）。
+    #[default]
+    Fill,
+    /// contain — 完整装入（信箱留白）。
+    Contain,
+    /// cover — 覆盖内容盒（溢出部分裁剪）。
+    Cover,
+    /// none — 自然尺寸（可溢出）。
+    None,
+    /// scale-down — none 与 contain 中较小者。
+    ScaleDown,
+}
+
+/// float 值族（E4，css-position-3 / ADR-0019）：浮动出流方向。
+/// none=正常流（默认）；left/right=向左/右浮动出流。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum FloatKind {
+    /// none — 正常流内布局（默认）。
+    #[default]
+    None,
+    /// left — 向左浮动（盒出流，右缘被后续内容环绕）。
+    Left,
+    /// right — 向右浮动（盒出流，左缘被后续内容环绕）。
+    Right,
+}
+
+/// clear 值族（E4，css-position-3 / ADR-0019）：浮动钳位方向。
+/// none=不钳位（默认）；left/right/both=盒 y ≥ 左/右/任向最后浮盒底缘。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ClearKind {
+    /// none — 不钳位（默认）。
+    #[default]
+    None,
+    /// left — 钳位于最后左浮盒底缘之下。
+    Left,
+    /// right — 钳位于最后右浮盒底缘之下。
+    Right,
+    /// both — 钳位于最后任向浮盒底缘之下。
+    Both,
+}
+
+// ---------- F3d（ADR-0026）：border-image 值族 + 字体深化值族 ----------
+
+/// border-image-slice 分量（css-backgrounds-3）：number（光栅源=源像素、
+/// 渐变源=border image area 像素）或 percentage（源尺寸百分比）。
+/// 存储原值、绘制期解析（计算期无源依赖）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum BorderImageSliceComp {
+    /// <number [0,∞]> — 光栅源像素 / 渐变源 area 像素。
+    Number(f32),
+    /// <percentage [0,∞]> — 源尺寸百分比。
+    Percentage(f32),
+}
+
+/// border-image-slice：1-4 值 TRBL 展开 + fill（中心区随边绘制）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct BorderImageSlice {
+    /// 四线切片 [top, right, bottom, left]（TRBL 展开后）。
+    pub slices: [BorderImageSliceComp; 4],
+    /// fill — 中心区域作为普通背景绘制（置于边区之下）。
+    pub fill: bool,
+}
+
+/// border-image-width 分量：length-percentage（可负，钳 0 绘制期）、
+/// number（× 对应边 border-width）、auto（=切片尺寸）。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum BorderImageWidthComp {
+    /// <length-percentage> — 绝对/相对绘制域带宽。
+    Length(LengthPercentage),
+    /// <number [0,∞]> — 对应边 border-width 的倍数。
+    Number(f32),
+    /// auto — 使用切片自身尺寸。
+    Auto,
+}
+
+/// border-image-width：1-4 值 TRBL 展开 [top, right, bottom, left]。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct BorderImageWidth {
+    /// 四边带宽 [top, right, bottom, left]。
+    pub comps: [BorderImageWidthComp; 4],
+}
+
+/// border-image-outset 分量：length-percentage（可负，钳 0）、
+/// number（× 对应边 border-width）。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum BorderImageOutsetComp {
+    /// <length [0,∞]> — 绝对外扩量。
+    Length(LengthPercentage),
+    /// <number [0,∞]> — 对应边 border-width 的倍数。
+    Number(f32),
+}
+
+/// border-image-outset：1-4 值 TRBL 展开 [top, right, bottom, left]。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct BorderImageOutset {
+    /// 四边外扩量 [top, right, bottom, left]。
+    pub comps: [BorderImageOutsetComp; 4],
+}
+
+/// border-image-repeat 单轴样式。round/space v1 按 repeat/stretch 近似
+///（B 级在案，FEATURES 同 F3b 背景 space/round 边界）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum BorderImageRepeatKind {
+    /// stretch — 区域图拉伸填满（默认）。
+    #[default]
+    Stretch,
+    /// repeat — 平铺（必要时末片截断）。
+    Repeat,
+    /// round — 整数片拉伸填满（v1 ≈ repeat）。
+    Round,
+    /// space — 整数片均布留白（v1 ≈ repeat）。
+    Space,
+}
+
+/// border-image-repeat：x/y 双轴（单值双轴同值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct BorderImageRepeatXY {
+    /// 水平轴。
+    pub x: BorderImageRepeatKind,
+    /// 垂直轴。
+    pub y: BorderImageRepeatKind,
+}
+
+/// font-variant-caps 值族（css-fonts-4）。small-caps 族四值由引擎合成
+///（小写→大写 + 字号×0.8，ADR-0026 D3）；titling/unicase 并入 OpenType
+/// 特性推送。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum FontVariantCapsKind {
+    /// normal — 不变形（默认）。
+    #[default]
+    Normal,
+    /// small-caps — 小写转小型大写（合成）。
+    SmallCaps,
+    /// all-small-caps — 全部转小型大写（合成）。
+    AllSmallCaps,
+    /// petite-caps — 小写转 petite 大写（v1 按 small-caps 合成，B 级）。
+    PetiteCaps,
+    /// all-petite-caps — 全部转 petite 大写（v1 按 all-small-caps，B 级）。
+    AllPetiteCaps,
+    /// unicase — 'unic' 特性。
+    Unicase,
+    /// titling-caps — 'titl' 特性。
+    TitlingCaps,
+}
+
+/// CSS 宽关键字（B1，css-values-4）：整值语义，适用于一切属性。
+/// Revert/RevertLayer 在级联赛后回滚（cascade.rs resolve_revert）；
+/// Initial/Inherit/Unset 在计算值期物化（computed.rs）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WideKeyword {
+    /// inherit — 强制继承父值（含非继承属性）。
+    Inherit,
+    /// initial — 初始值。
+    Initial,
+    /// unset — 继承属性=inherit，否则=initial。
+    Unset,
+    /// revert — 回滚到更低级联起源（author→user→UA→initial）。
+    Revert,
+    /// revert-layer — 回滚到更早级联层（无→按 revert）。
+    RevertLayer,
 }
 
 /// 值族：按文法形状复用的声明值表示（不含简写；简写在解析期展开）。
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum DeclValue {
+    /// CSS 宽关键字整值（B1：initial/inherit/unset/revert/revert-layer）。
+    WideKeyword(WideKeyword),
+    /// direction（A8）。
+    Direction(DirectionKind),
+    /// unicode-bidi（A8）。
+    UnicodeBidi(UnicodeBidiKind),
+    /// hyphens 连字符断字模式（F4，ADR-0028 D2）。
+    Hyphens(HyphensKind),
     /// margin/padding/gap 等（letter-spacing 的 normal → None → 0）。
     Len(LengthPercentage),
     /// width/height/min-*/max-*/flex-basis/top..left（auto → None）。
@@ -583,12 +1316,30 @@ pub enum DeclValue {
     GridTracks(GridTemplate),
     /// aspect-ratio：none → None，否则宽/高比。
     AspectRatio(Option<f32>),
-    /// background-image — none|url()|渐变。
-    BackgroundImage(BackgroundImage),
+    /// background-image — none|url()|渐变（F3b：逗号分层列表）。
+    BackgroundImage(Vec<BackgroundImage>),
+    /// background-repeat — 平铺样式分层列表（F3b，ADR-0024）。
+    BackgroundRepeat(Vec<RepeatXY>),
+    /// background-attachment — 附着分层列表（F3b，ADR-0024）。
+    BackgroundAttachment(Vec<Attachment>),
+    /// background-position — 定位分层列表（F3b，ADR-0024）。
+    BackgroundPosition(Vec<Position2D>),
+    /// background-size — 尺寸分层列表（F3b，ADR-0024）。
+    BackgroundSize(Vec<BgSize>),
+    /// background-origin — 定位区盒分层列表（F3b，ADR-0024）。
+    BackgroundOrigin(Vec<BackgroundBox>),
+    /// background-clip — 绘制区盒分层列表（F3b，ADR-0024）。
+    BackgroundClip(Vec<BackgroundClip>),
+    /// clip-path — 裁剪形状（F3c，ADR-0025）。
+    ClipPath(ClipShape),
     /// box-shadow — 阴影列表（none → 空表）。
     BoxShadows(BoxShadowList),
     /// border-*-width：none → None（宽度归零）；thin/medium/thick → 定值。
     GridAutoFlow(GridAutoFlowKind),
+    /// grid-template-areas（E5，ADR-0020）：区域模板。
+    GridAreas(GridAreas),
+    /// grid-{row,column}-{start,end}（E5，ADR-0020）：放置线规格。
+    GridLine(GridLineSpec),
     /// border-*-width：none → None（宽度归零）；thin/medium/thick → 定值。
     BorderWidth(Option<LengthPercentage>),
     /// z-index：auto → None（级联缺席等价；「有值且为 Some」是将来 ADR-0008
@@ -625,13 +1376,77 @@ pub enum DeclValue {
     AnimationDirection(AnimDirection),
     /// animation-fill-mode — 动画外填充模式。
     AnimationFillMode(AnimFillMode),
-    /// filter/clip-path 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
-    /// 语义位（ADR-0008 全集），不携带也不实现滤镜/裁剪效果。
+    /// filter 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
+    /// 语义位（ADR-0008 全集），不携带也不实现滤镜效果。
+    /// （clip-path 已升级为 ClipPath(ClipShape) 形状值，F3c，ADR-0025。）
     Effect(bool),
     /// container-type（阶段2③）：normal|size|inline-size。
     ContainerType(ContainerType),
     /// container-name（阶段2③）：none → 空 Vec；custom-ident# → 名单。
     ContainerName(Vec<String>),
+    /// cursor（A1 行为提示）：宿主指针形状（关键字子集，url()=T2）。
+    Cursor(CursorKind),
+    /// user-select（A1）：文本可选择语义（不继承）。
+    UserSelect(UserSelectKind),
+    /// pointer-events（A1）：命中测试穿透语义。
+    PointerEvents(PointerEventsKind),
+    /// caret-color（A1）：None = auto；Some = 具体颜色。
+    CaretColor(Option<ColorValue>),
+    /// accent-color（A1）：None = auto；Some = 控件着色基调。
+    AccentColor(Option<ColorValue>),
+    /// outline-style（A2）：线型值族 + auto（宿主 focus ring 语义位）。
+    OutlineStyle(OutlineStyle),
+    /// content（C1）：伪元素生成内容（宿主节点无效、伪元素消费）。
+    Content(ContentValue),
+    /// text-transform（C2）：文本大小写/全角变换（继承）。
+    TextTransform(TextTransformKind),
+    /// overflow-wrap（C2）：长词溢出断行（parley 原生消费）。
+    OverflowWrap(OverflowWrapKind),
+    /// word-break（C2）：词内断行强度（parley 原生消费）。
+    WordBreak(WordBreakKind),
+    /// object-fit（C3，css-images-3）：替换内容适配模式。
+    ObjectFit(ObjectFitKind),
+    /// object-position（C3，css-images-3）：替换内容盒内对齐 (x, y)。
+    ObjectPosition(LengthPercentage, LengthPercentage),
+    /// text-overflow（F2，ADR-0022 D2）。
+    TextOverflow(TextOverflowKind),
+    /// -webkit-line-clamp 行数（F2，ADR-0022 D3；0=none）。
+    WebkitLineClamp(u32),
+    /// text-decoration-line 位集（F2，ADR-0022 D4；1=underline 2=overline
+    /// 4=line-through）。
+    TextDecorationLine(u8),
+    /// text-decoration-style（F2，ADR-0022 D4）。
+    TextDecorationStyle(TextDecoStyleKind),
+    /// text-decoration-thickness（F2，ADR-0022 D4）。
+    TextDecorationThickness(TextDecoThickness),
+    /// text-shadow 影列表（F2，ADR-0022 D5；空=none）。
+    TextShadow(Vec<TextShadowSpec>),
+    /// float（E4，css-position-3 / ADR-0019）：浮动出流。
+    Float(FloatKind),
+    /// clear（E4，css-position-3 / ADR-0019）：浮动钳位。
+    Clear(ClearKind),
+    // F3d（ADR-0026）：border-image 全集
+    /// border-image-source — none|url()|渐变（复用背景图单层值族）。
+    BorderImageSource(BackgroundImage),
+    /// border-image-slice — 源切片四线（number=像素/percentage）+ fill。
+    BorderImageSlice(BorderImageSlice),
+    /// border-image-width — 绘制域带宽（length|number×border-width|auto）。
+    BorderImageWidth(BorderImageWidth),
+    /// border-image-outset — 绘制域外扩（length|number×border-width）。
+    BorderImageOutset(BorderImageOutset),
+    /// border-image-repeat — 区域平铺（x/y 双轴）。
+    BorderImageRepeat(BorderImageRepeatXY),
+    // F3d（ADR-0026）：字体深化
+    /// font-stretch — 字宽轴（百分比归一 50..=200，normal=100）。
+    FontStretch(f32),
+    /// word-spacing — 词间距（normal → None → 0；% 基 = font-size）。
+    WordSpacing(Option<LengthPercentage>),
+    /// font-feature-settings — OpenType 特性 (tag, value) 列表。
+    FontFeatures(Vec<([u8; 4], u16)>),
+    /// font-variation-settings — 可变字体轴 (tag, value) 列表。
+    FontVariations(Vec<([u8; 4], f32)>),
+    /// font-variant-caps — 大写形变体（small-caps 族合成，ADR-0026 D3）。
+    FontVariantCaps(FontVariantCapsKind),
 }
 
 /// container-type（阶段2③）：size/inline-size 使节点成为可查询容器；
@@ -649,6 +1464,101 @@ pub enum ContainerType {
     InlineSize,
 }
 
+/// cursor（A1 行为提示，CSS UI 4 关键字子集）：宿主消费、零绘制语义；
+/// url() 自定义指针=T2。初始 auto。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CursorKind {
+    /// auto — 宿主按元素语义自定（默认）。
+    #[default]
+    Auto,
+    /// none — 隐藏指针。
+    None,
+    /// default — 系统默认箭头。
+    Default,
+    /// pointer — 可点击（手型）。
+    Pointer,
+    /// text — 文本 I 型。
+    Text,
+    /// wait — 忙碌。
+    Wait,
+    /// progress — 忙碌但可交互。
+    Progress,
+    /// help — 帮助。
+    Help,
+    /// not-allowed — 禁止。
+    NotAllowed,
+    /// move — 移动。
+    Move,
+    /// grab — 抓取。
+    Grab,
+    /// grabbing — 抓取中。
+    Grabbing,
+    /// crosshair — 十字。
+    Crosshair,
+    /// zoom-in — 放大。
+    ZoomIn,
+    /// zoom-out — 缩小。
+    ZoomOut,
+}
+
+/// user-select（A1，CSS UI 4）：文本选择语义；**不继承**（spec 明确
+/// auto 值行为依赖父级级联而非属性继承，宿主侧实现选择时自行取值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum UserSelectKind {
+    /// auto — 宿主按元素语义自定（默认）。
+    #[default]
+    Auto,
+    /// none — 文本不可选。
+    None,
+    /// text — 可选。
+    Text,
+    /// all — 整元素单元选择。
+    All,
+    /// contain — 选择起止钳制在元素内（宿主自解释）。
+    Contain,
+}
+
+/// pointer-events（A1）：命中测试语义；继承。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PointerEventsKind {
+    /// auto — 正常命中（默认）。
+    #[default]
+    Auto,
+    /// none — 元素（含子树）不参与命中。
+    None,
+}
+
+/// outline-style（A2，css-ui-4）：描边线型；auto = 宿主 focus ring 语义位
+///（引擎无焦点概念，绘制按 Solid 近似=B 级在案）。不继承；初始 none。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OutlineStyle {
+    /// none — 不绘制（默认）。
+    #[default]
+    None,
+    /// auto — 宿主 focus ring（引擎绘制按 Solid 近似）。
+    Auto,
+    /// solid — 实线。
+    Solid,
+    /// dashed — 虚线。
+    Dashed,
+    /// dotted — 点线。
+    Dotted,
+    /// double — 双线。
+    Double,
+    /// groove — 凹槽。
+    Groove,
+    /// ridge — 凸脊。
+    Ridge,
+    /// inset — 内凸。
+    Inset,
+    /// outset — 外凸。
+    Outset,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 /// grid-auto-flow 值族（自动放置方向）。
@@ -660,12 +1570,18 @@ pub enum GridAutoFlowKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// display 值族（inline* 已在解析期归一为块级等价）。
+/// display 值族（inline/inline-block=F1 行内语义，其余 inline* 解析期归一）。
 #[non_exhaustive]
 pub enum Display {
-    /// taffy 无 IFC；inline* 解析期归一并 tracing 告警（第五批⑧契约）：
-    /// inline/inline-block→Block、inline-flex→Flex、inline-grid→Grid。
+    /// taffy 无原生 IFC；F1（ADR-0021）前 inline* 全归一为块级等价：
+    /// inline-flex→Flex、inline-grid→Grid、inline-table→Table。
     Block,
+    /// F1（ADR-0021）：display:inline——连续性标记（盒透明）：自身不生成
+    /// 参与盒，扁平化其文本叶后代参与父运行；layout 映射 taffy Block。
+    Inline,
+    /// F1（ADR-0021）：display:inline-block——原子行内盒（taffy 布局尺寸
+    /// 参与父行打包）；layout 映射 taffy Block。
+    InlineBlock,
     /// flex / inline-flex — flex 容器。
     Flex,
     /// grid / inline-grid — grid 容器。
@@ -697,6 +1613,13 @@ pub enum Position {
     Relative,
     /// absolute — 绝对定位（相对最近定位祖先）。
     Absolute,
+    /// fixed — 视口锚定（A4：包含块=transformed 祖先或初始包含块；
+    /// positioned 祖先不构成 fixed 的包含块）。
+    Fixed,
+    /// sticky — 粘滞定位（A4：布局=in-flow；粘滞偏移由宿主按其滚动
+    /// 运行时施加——引擎经 scroll_offsets 绘制期平移，ADR-0006 引擎
+    /// 无运行期状态）。
+    Sticky,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,6 +1762,231 @@ pub enum WhiteSpace {
     NoWrap,
     /// pre — 保留空白与换行、不自动换行。
     Pre,
+    /// pre-wrap（A5）— 保留空白与换行、按包含块宽自动换行。
+    PreWrap,
+    /// pre-line（A5）— 折叠空格但保留换行符、按宽自动换行。
+    PreLine,
+    /// break-spaces（A5）— 同 pre-wrap，且任意字符处可断行（A5 v1：
+    /// 断行点=常规换行近似，任意断=B 级在案 FEATURES.md）。
+    BreakSpaces,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+/// text-overflow 值族（F2，ADR-0022 D2）。
+pub enum TextOverflowKind {
+    /// clip — 直接裁剪（默认）。
+    #[default]
+    Clip,
+    /// ellipsis — 截断尾接省略号（裁剪语境下生效）。
+    Ellipsis,
+}
+
+/// -webkit-line-clamp 整数|none → WebkitLineClamp（F2，ADR-0022 D3；
+/// none→0；0/负整数非法丢弃——语义上 none 即 0，正整数≥1 有效）。
+pub fn parse_webkit_line_clamp(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) if id.eq_ignore_ascii_case("none") => Ok(DeclValue::WebkitLineClamp(0)),
+        Token::Number {
+            int_value: Some(n), ..
+        } if *n >= 1 => {
+            // 上限钳 i32::MAX（注意 u32::MAX as i32 回绕 -1 陷阱）。
+            Ok(DeclValue::WebkitLineClamp((*n) as u32))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+// ===== F2（ADR-0022 D4）：text-decoration =====
+
+/// text-decoration-line 位：underline。
+pub const TD_LINE_UNDERLINE: u8 = 1;
+/// text-decoration-line 位：overline。
+pub const TD_LINE_OVERLINE: u8 = 2;
+/// text-decoration-line 位：line-through。
+pub const TD_LINE_LINE_THROUGH: u8 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+/// text-decoration-style 值族（F2，ADR-0022 D4）。
+pub enum TextDecoStyleKind {
+    /// solid — 实线（默认）。
+    #[default]
+    Solid,
+    /// double — 双线。
+    Double,
+    /// dotted — 点线（B 级：软 sink 分段实绘）。
+    Dotted,
+    /// dashed — 虚线（B 级）。
+    Dashed,
+    /// wavy — 波浪线（B 级：折线近似）。
+    Wavy,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+/// text-decoration-thickness 值族（F2，ADR-0022 D4）。
+pub enum TextDecoThickness {
+    /// auto — 字号比例近似（绘制期 font_size/12）。
+    #[default]
+    Auto,
+    /// from-font — 字体首选厚度（缺度数→auto 退化）。
+    FromFont,
+    /// <length-percentage> 声明值。
+    Length(crate::css::value::LengthPercentage),
+}
+
+/// 行关键字单部件 → 位（长手循环与简写贪心共用；F2 D4）。
+pub(crate) fn parse_td_line_component(p: &mut Parser<'_>) -> ValResult<u8> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) => match_ignore_ascii_case!(id,
+            "underline" => Ok(TD_LINE_UNDERLINE),
+            "overline" => Ok(TD_LINE_OVERLINE),
+            "line-through" => Ok(TD_LINE_LINE_THROUGH),
+            _ => Err(p.new_error_for_next_token()),
+        ),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// text-decoration-line（F2 D4）：none | 空格分隔多关键字。
+pub fn parse_text_decoration_line(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    if let Ok(()) = p.try_parse(|p| -> ValResult<()> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(id) if id.eq_ignore_ascii_case("none") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    }) {
+        return Ok(DeclValue::TextDecorationLine(0));
+    }
+    let mut bits = parse_td_line_component(p)?;
+    while let Ok(bit) = p.try_parse(|p| parse_td_line_component(p)) {
+        bits |= bit;
+    }
+    Ok(DeclValue::TextDecorationLine(bits))
+}
+
+/// 样式关键字单部件（简写贪心共用；F2 D4）。
+pub(crate) fn parse_td_style_component(p: &mut Parser<'_>) -> ValResult<TextDecoStyleKind> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) => match_ignore_ascii_case!(id,
+            "solid" => Ok(TextDecoStyleKind::Solid),
+            "double" => Ok(TextDecoStyleKind::Double),
+            "dotted" => Ok(TextDecoStyleKind::Dotted),
+            "dashed" => Ok(TextDecoStyleKind::Dashed),
+            "wavy" => Ok(TextDecoStyleKind::Wavy),
+            _ => Err(p.new_error_for_next_token()),
+        ),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// text-decoration-style（F2 D4）。
+pub fn parse_text_decoration_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_td_style_component(p).map(DeclValue::TextDecorationStyle)
+}
+
+/// 厚度单部件（简写贪心共用；F2 D4）：auto | from-font | <length-percentage>。
+pub(crate) fn parse_td_thickness_component(p: &mut Parser<'_>) -> ValResult<TextDecoThickness> {
+    let kw = p.try_parse(|p| -> ValResult<Option<TextDecoThickness>> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(id) if id.eq_ignore_ascii_case("auto") => {
+                Ok(Some(TextDecoThickness::Auto))
+            }
+            Token::Ident(id) if id.eq_ignore_ascii_case("from-font") => {
+                Ok(Some(TextDecoThickness::FromFont))
+            }
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if let Ok(Some(k)) = kw {
+        return Ok(k);
+    }
+    let l = parse_length_percentage(p)?;
+    Ok(TextDecoThickness::Length(l))
+}
+
+/// text-decoration-thickness（F2 D4）。
+pub fn parse_text_decoration_thickness(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_td_thickness_component(p).map(DeclValue::TextDecorationThickness)
+}
+
+/// 颜色单部件（简写贪心共用；F2 D4）。
+pub(crate) fn parse_td_color_component(p: &mut Parser<'_>) -> ValResult<ColorValue> {
+    match parse_color(p)? {
+        DeclValue::Color(cv) => Ok(cv),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+// ===== F2（ADR-0022 D5）：text-shadow =====
+
+/// text-shadow 单影（F2，ADR-0022 D5）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextShadowSpec {
+    /// 水平偏移（<length-percentage>）。
+    pub dx: crate::css::value::LengthPercentage,
+    /// 垂直偏移（<length-percentage>）。
+    pub dy: crate::css::value::LengthPercentage,
+    /// 模糊半径（缺省 0=锐利）。
+    pub blur: Option<crate::css::value::LengthPercentage>,
+    /// 颜色（缺省 currentColor）。
+    pub color: Option<ColorValue>,
+}
+
+/// text-shadow（F2，ADR-0022 D5）：none | [<color>? <dx> <dy> <blur>?
+/// <color>?]#（<color> 前后均可置——css-backgrounds-3 && 组合；逗号分隔
+/// 多影）。
+pub fn parse_text_shadow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    if let Ok(()) = p.try_parse(|p| -> ValResult<()> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(id) if id.eq_ignore_ascii_case("none") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    }) {
+        return Ok(DeclValue::TextShadow(Vec::new()));
+    }
+    let mut shadows = Vec::new();
+    loop {
+        let mut color: Option<ColorValue> = p.try_parse(parse_color_value).ok();
+        let dx = parse_length_percentage(p)?;
+        let dy = parse_length_percentage(p)?;
+        let blur = p.try_parse(parse_length_percentage).ok();
+        if color.is_none() {
+            color = p.try_parse(parse_color_value).ok();
+        }
+        shadows.push(TextShadowSpec {
+            dx,
+            dy,
+            blur,
+            color,
+        });
+        if p.is_exhausted() {
+            break;
+        }
+        if p.try_parse(|p| p.expect_comma()).is_err() {
+            return Err(p.new_error_for_next_token());
+        }
+    }
+    Ok(DeclValue::TextShadow(shadows))
+}
+
+/// text-overflow 关键字 → TextOverflow（F2，ADR-0022 D2）。
+pub fn parse_text_overflow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "clip" => TextOverflowKind::Clip,
+            "ellipsis" => TextOverflowKind::Ellipsis,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::TextOverflow)
 }
 
 /// font-style 值族。
@@ -893,6 +2041,10 @@ pub enum FamilyName {
 pub struct GridTemplate {
     /// 轨道尺寸序列（columns 或 rows，方向随属性）。
     pub tracks: Vec<TrackSize>,
+    /// 线名槽（E5，ADR-0020）：N 轨 N+1 槽——line_names[i] = 第 i 轨
+    /// 之前的线名集，line_names[tracks.len()] = 尾线名；`[a b]` 括号段
+    /// 解析产物（缺省 = 空）。
+    pub line_names: Vec<Vec<String>>,
 }
 
 /// grid 轨道尺寸单项。
@@ -918,6 +2070,33 @@ pub enum TrackSize {
     RepeatAuto(bool, Vec<TrackSize>),
 }
 
+/// grid-template-areas 值（E5，ADR-0020）：区域模板。rows[r][c] =
+/// 区域名或 `.`（空格）；矩形性 + 逐名矩形校验在解析期完成
+///（违反 = 声明无效，spec §8.5）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GridAreas {
+    /// 逐行格名（`.` = 空格）。
+    pub rows: Vec<Vec<String>>,
+}
+
+/// grid-{row,column}-{start,end} 值（E5，ADR-0020）：
+/// `auto | <ident> | <integer> | span <integer> | span <ident>`
+///（spec 混合形 `<integer> && <ident>` v1 偏差在案）。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum GridLineSpec {
+    /// auto — 自动放置。
+    Auto,
+    /// <integer> — 线号（1 基；0 非法解析拒绝；负数 = 自端计数）。
+    Number(i16),
+    /// span <integer> — 跨 k 轨（k ≥ 1）。
+    Span(u16),
+    /// span <ident> — 跨至第 k 条名线（解析期解析，未知名 = Auto）。
+    SpanName(String),
+    /// <ident> — 区域边线或线名（解析期解析，未知名 = Auto）。
+    Name(String),
+}
+
 /// background-image 值族。
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -928,6 +2107,198 @@ pub enum BackgroundImage {
     Url(String),
     /// 渐变函数（linear/radial）。
     Gradient(Gradient),
+}
+
+/// 平铺轴单项（css-backgrounds-3 repeat-style 分轴）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatAxis {
+    /// repeat — 平铺。
+    Repeat,
+    /// space — 均布留白（B 级：绘制近似 repeat）。
+    Space,
+    /// round — 缩放取整（B 级：绘制近似 repeat）。
+    Round,
+    /// no-repeat — 不平铺。
+    NoRepeat,
+}
+
+/// repeat 平铺双轴（`repeat` 单关键字 = 双轴 Repeat；`repeat-x` =
+/// {Repeat, NoRepeat}；双值首 = x、次 = y）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepeatXY {
+    /// 水平轴。
+    pub x: RepeatAxis,
+    /// 垂直轴。
+    pub y: RepeatAxis,
+}
+
+/// background-attachment 值族。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attachment {
+    /// scroll — 随元素滚动内容（默认）。
+    Scroll,
+    /// fixed — 视口锚定（绘制期忽略元素偏移）。
+    Fixed,
+    /// local — 随滚动容器内容（B 级：≈scroll）。
+    Local,
+}
+
+/// bg-position 单轴分量：关键字归一基（left/top=0、center=50%、
+/// right/bottom=100%；长度/百分比直存）+ 三/四值语法的可选偏移。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionComp {
+    /// 基准（关键字等价百分比或长度/百分比直存）。
+    pub base: LengthPercentage,
+    /// 边偏移（`left 10px` 四值语法的第二段；right/bottom 语义负号在
+    /// 绘制期结算）。
+    pub offset: Option<LengthPercentage>,
+}
+
+/// bg-position 双轴。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Position2D {
+    /// 水平分量。
+    pub x: PositionComp,
+    /// 垂直分量。
+    pub y: PositionComp,
+}
+
+/// 背景盒关键字（background-origin；clip 另含 Text）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundBox {
+    /// border-box — 边框盒。
+    BorderBox,
+    /// padding-box — 内边距盒（origin 初始值）。
+    PaddingBox,
+    /// content-box — 内容盒。
+    ContentBox,
+}
+
+/// background-clip 单项（css-backgrounds-3 盒族 + css-backgrounds-4
+/// text；Text 解析收容、绘制降级 border-box+warn，B 级偏差在案）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundClip {
+    /// 盒关键字（border-box 初始值）。
+    Box(BackgroundBox),
+    /// text — 文字遮罩裁剪（B 级：绘制降级）。
+    Text,
+}
+
+/// background-size 分量：`<length-percentage> | auto`。
+#[derive(Debug, Clone, PartialEq)]
+pub enum LPorAuto {
+    /// 长度/百分比。
+    LP(LengthPercentage),
+    /// auto（该轴按内在比例）。
+    Auto,
+}
+
+/// background-size 单项。
+#[derive(Debug, Clone, PartialEq)]
+pub enum BgSize {
+    /// auto — 内在尺寸（gradient = 定位区）。
+    Auto,
+    /// cover — 覆盖定位区（保持比例取大）。
+    Cover,
+    /// contain — 容纳定位区（保持比例取小）。
+    Contain,
+    /// 显式宽高（单值 = 宽 auto 高）。
+    Explicit {
+        /// 宽。
+        w: LPorAuto,
+        /// 高。
+        h: LPorAuto,
+    },
+}
+
+/// F3b（ADR-0024）：对齐后的单背景层（cycling 补齐语义）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundLayer {
+    /// 层图像。
+    pub image: BackgroundImage,
+    /// 平铺。
+    pub repeat: RepeatXY,
+    /// 附着。
+    pub attachment: Attachment,
+    /// 定位。
+    pub position: Position2D,
+    /// 尺寸。
+    pub size: BgSize,
+    /// 定位区盒（origin）。
+    pub origin: BackgroundBox,
+    /// 绘制区盒（clip）。
+    pub clip: BackgroundClip,
+}
+
+/// F3c（ADR-0025）：clip-path 裁剪形状。文法 `<basic-shape> ||
+/// <geometry-box>`（次序不限）| none。参考盒随形状平铺存储（百分比
+/// 半径/圆心/最近最远边均以参考盒解析）；geometry-box 单独出现 =
+/// inset(0) 基准该盒（语义等价，css-masking-1 §5.1）。url()/path()
+/// 收容为 Other（SVG 资源与 path 语法 = T2，绘制语义 none）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipShape {
+    /// none — 不裁剪（初始值）。
+    None,
+    /// inset( <lp>{1,4} [round <lp>{1,4} [ / <lp>{1,4} ]?]? ) —
+    /// 内缩矩形（可选圆角，精确消费复用 PushClip radius 能力）。
+    Inset {
+        /// 四边内缩量（上右下左，解析期展开简写）。
+        insets: [LengthPercentage; 4],
+        /// 可选圆角：(水平集, 垂直集) 各四角（上右下左序，解析期展开
+        /// 简写；无斜杠时垂直集 = 水平集；None = 直角）。
+        radius: Option<([LengthPercentage; 4], [LengthPercentage; 4])>,
+        /// 参考盒（默认 border-box）。
+        reference: BackgroundBox,
+    },
+    /// circle( <radius>? at <position>? ) — 正圆。
+    Circle {
+        /// 半径（缺省 closest-side）。
+        radius: ClipRadius,
+        /// 圆心（缺省盒中心 50% 50%）。
+        at: Position2D,
+        /// 参考盒（默认 border-box）。
+        reference: BackgroundBox,
+    },
+    /// ellipse( <rx>? <ry>? at <position>? ) — 椭圆。
+    Ellipse {
+        /// 水平半径（缺省 closest-side）。
+        rx: ClipRadius,
+        /// 垂直半径（缺省 closest-side）。
+        ry: ClipRadius,
+        /// 圆心（缺省盒中心 50% 50%）。
+        at: Position2D,
+        /// 参考盒（默认 border-box）。
+        reference: BackgroundBox,
+    },
+    /// polygon( [nonzero|evenodd,]? <x> <y>, ... ) — 多边形（坐标对
+    /// <3 = 解析整条丢弃）。
+    Polygon {
+        /// 填充规则（默认 nonzero）。
+        nonzero: bool,
+        /// 顶点序列（length-percentage 全值，基准参考盒）。
+        points: Vec<(LengthPercentage, LengthPercentage)>,
+        /// 参考盒（默认 border-box）。
+        reference: BackgroundBox,
+    },
+    /// 宽容收容：url()/path() 及未来函数（绘制语义 = none，tracing 警告）。
+    Other,
+}
+
+/// clip-path 圆/椭圆半径（css-shapes-1 §3.2.1）：显式长度/百分比或
+/// 边/角关键字（绘制期按参考盒解析；百分比半径 circle 基准
+/// √(w²+h²)/√2、ellipse 逐轴基准宽/高）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipRadius {
+    /// 显式半径（length-percentage；负值解析期拒绝）。
+    Length(LengthPercentage),
+    /// closest-side — 最近边。
+    ClosestSide,
+    /// farthest-side — 最远边。
+    FarthestSide,
+    /// closest-corner — 最近角（半径 = 该角距离）。
+    ClosestCorner,
+    /// farthest-corner — 最远角。
+    FarthestCorner,
 }
 
 /// MVP 渐变：linear（角度/to 方向）与 radial（正圆、默认 farthest-corner）。
@@ -947,6 +2318,8 @@ pub enum GradientKind {
     Linear(Angle),
     /// 径向：shape/size/position 为语义值，paint 层按盒子解析为绝对几何（T4c）。
     Radial(RadialSpec),
+    /// 锥形（C3，css-images-3）：from 起始角 + at 圆心，顺时针一周。
+    Conic(ConicSpec),
 }
 
 /// 径向渐变语义（css-images-3 子集）。
@@ -957,6 +2330,16 @@ pub struct RadialSpec {
     /// 尺寸关键字或显式半径。
     pub size: RadialSize,
     /// 圆心 (x, y)；百分比分别基准盒子宽/高。
+    pub position: (LengthPercentage, LengthPercentage),
+}
+
+/// 锥形渐变语义（C3，css-images-3；ADR-0017）。
+/// CSS 0deg = 12 点方向顺时针；peniko 映射时平移至 +X 轴起（D1）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConicSpec {
+    /// 起始角（`from <angle>`；默认 0deg）。
+    pub from: Angle,
+    /// 圆心 (x, y)；百分比分别基准盒子宽/高（`at <position>`，默认中心）。
     pub position: (LengthPercentage, LengthPercentage),
 }
 
@@ -1053,6 +2436,85 @@ fn len_auto_with(p: &mut Parser<'_>, autos: &[&str]) -> ValResult<Option<LengthP
         return Ok(None);
     }
     Ok(Some(parse_length_percentage(p)?))
+}
+
+/// content 解析（C1，css-content-3 MVP）：none/normal/字符串字面量。
+/// attr()/url()/counter()/quotes 为 T2——解析期拒绝（调用方按 Dropped
+/// 告警丢弃声明）。
+pub fn parse_content(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    match t {
+        cssparser::Token::Ident(ref id) if id.eq_ignore_ascii_case("none") => {
+            Ok(DeclValue::Content(ContentValue::None))
+        }
+        cssparser::Token::Ident(ref id) if id.eq_ignore_ascii_case("normal") => {
+            Ok(DeclValue::Content(ContentValue::Normal))
+        }
+        cssparser::Token::QuotedString(ref s) => {
+            p.skip_whitespace();
+            p.expect_exhausted()?;
+            Ok(DeclValue::Content(ContentValue::Str(s.to_string())))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// text-transform 解析（C2，css-text-3）：五关键字 + full-size-kana
+///（T2：接受但不变换，FEATURES 偏差条在案）。
+pub fn parse_text_transform(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "none" => TextTransformKind::None,
+            "uppercase" => TextTransformKind::Uppercase,
+            "lowercase" => TextTransformKind::Lowercase,
+            "capitalize" => TextTransformKind::Capitalize,
+            "full-width" => TextTransformKind::FullWidth,
+            "full-size-kana" => TextTransformKind::FullSizeKana,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::TextTransform)
+}
+
+/// overflow-wrap 解析（C2，css-text-3；legacy 别名 word-wrap 由
+/// from_css_name 补表路由）。
+pub fn parse_overflow_wrap(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "normal" => OverflowWrapKind::Normal,
+            "break-word" => OverflowWrapKind::BreakWord,
+            "anywhere" => OverflowWrapKind::Anywhere,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::OverflowWrap)
+}
+
+/// word-break 解析（C2，css-text-3）。
+pub fn parse_word_break(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "normal" => WordBreakKind::Normal,
+            "break-all" => WordBreakKind::BreakAll,
+            "keep-all" => WordBreakKind::KeepAll,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::WordBreak)
+}
+
+/// hyphens 解析（F4，ADR-0028 D2，css-text-3 §5.4）：none|manual|auto。
+pub fn parse_hyphens(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "none" => HyphensKind::None,
+            "manual" => HyphensKind::Manual,
+            "auto" => HyphensKind::Auto,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::Hyphens)
 }
 
 /// 长度族 + `auto`（auto → LenAuto(None)），用于 width/height/margin 等自适应用途。
@@ -1243,12 +2705,12 @@ pub fn parse_border_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 /// display 关键字 → Display（inline* 按⑤⑧契约归一为块级等价并告警）。
 pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
-        // display:inline* 归一化告警（第五批⑧契约）：taffy 无 IFC——
-        // inline/inline-block 参与 Block、inline-flex/inline-grid 参与
-        // Flex/Grid；inline 内容经文本叶承载（语义契约见 FEATURES 布局映射条）
+        // display:inline* 归一化告警（第五批⑧契约收窄，F1 ADR-0021）：
+        // inline/inline-block 已成真变体；inline-flex/inline-grid/
+        // inline-table 仍归一并告警。
         if matches!(
             s.to_ascii_lowercase().as_str(),
-            "inline" | "inline-block" | "inline-flex" | "inline-grid"
+            "inline-flex" | "inline-grid" | "inline-table"
         ) {
             tracing::warn!(
                 target: "style_engine::css",
@@ -1257,7 +2719,9 @@ pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             );
         }
         Some(match_ignore_ascii_case!(s,
-            "block" | "inline" | "inline-block" | "flow-root" => Display::Block,
+            "block" | "flow-root" => Display::Block,
+            "inline" => Display::Inline,
+            "inline-block" => Display::InlineBlock,
             "flex" | "inline-flex" => Display::Flex,
             "grid" | "inline-grid" => Display::Grid,
             // 二期②表格核心值（inline-table 归一 Block 级语义，同⑧契约）；
@@ -1274,14 +2738,15 @@ pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::Display)
 }
 
-/// position 关键字 → Position（sticky/fixed 容错拒绝）。
+/// position 关键字 → Position（A4 起全值支持）。
 pub fn parse_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
             "static" => Position::Static,
             "relative" => Position::Relative,
             "absolute" => Position::Absolute,
-            // sticky/fixed 属 FEATURES.md T2；这里按容错拒绝（ warn 由上层统一发）
+            "fixed" => Position::Fixed,
+            "sticky" => Position::Sticky,
             _ => return None,
         ))
     })
@@ -1300,6 +2765,101 @@ pub fn parse_overflow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         ))
     })
     .map(DeclValue::Overflow)
+}
+
+/// cursor（A1）：关键字子集；url() 自定义=T2 解析期拒绝（声明丢弃）。
+pub fn parse_cursor(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "auto" => CursorKind::Auto,
+            "none" => CursorKind::None,
+            "default" => CursorKind::Default,
+            "pointer" => CursorKind::Pointer,
+            "text" => CursorKind::Text,
+            "wait" => CursorKind::Wait,
+            "progress" => CursorKind::Progress,
+            "help" => CursorKind::Help,
+            "not-allowed" => CursorKind::NotAllowed,
+            "move" => CursorKind::Move,
+            "grab" => CursorKind::Grab,
+            "grabbing" => CursorKind::Grabbing,
+            "crosshair" => CursorKind::Crosshair,
+            "zoom-in" => CursorKind::ZoomIn,
+            "zoom-out" => CursorKind::ZoomOut,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::Cursor)
+}
+
+/// user-select（A1）。
+pub fn parse_user_select(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "auto" => UserSelectKind::Auto,
+            "none" => UserSelectKind::None,
+            "text" => UserSelectKind::Text,
+            "all" => UserSelectKind::All,
+            "contain" => UserSelectKind::Contain,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::UserSelect)
+}
+
+/// pointer-events（A1）。
+pub fn parse_pointer_events(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "auto" => PointerEventsKind::Auto,
+            "none" => PointerEventsKind::None,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::PointerEvents)
+}
+
+/// outline-style（A2）：线型 + auto。
+pub fn parse_outline_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "none" => OutlineStyle::None,
+            "auto" => OutlineStyle::Auto,
+            "solid" => OutlineStyle::Solid,
+            "dashed" => OutlineStyle::Dashed,
+            "dotted" => OutlineStyle::Dotted,
+            "double" => OutlineStyle::Double,
+            "groove" => OutlineStyle::Groove,
+            "ridge" => OutlineStyle::Ridge,
+            "inset" => OutlineStyle::Inset,
+            "outset" => OutlineStyle::Outset,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::OutlineStyle)
+}
+
+/// caret-color / accent-color（A1）：`auto | <color>` → Option<ColorValue>
+///（None = auto；初始同型 None）。与背景色 `auto` 语义同 CSS UI 4。
+pub fn parse_caret_color(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_auto_or_color(p).map(DeclValue::CaretColor)
+}
+
+/// accent-color（A1）。
+pub fn parse_accent_color(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_auto_or_color(p).map(DeclValue::AccentColor)
+}
+
+/// `auto | <color>` 共用文法（A1 行为提示色属性）。
+fn parse_auto_or_color(p: &mut Parser<'_>) -> ValResult<Option<ColorValue>> {
+    let start = p.state();
+    if let Ok(name) = p.expect_ident()
+        && name.eq_ignore_ascii_case("auto")
+    {
+        return Ok(None);
+    }
+    p.reset(&start);
+    parse_color_value(p).map(Some)
 }
 
 /// box-sizing 关键字 → BoxSizing。
@@ -1442,8 +3002,8 @@ pub fn parse_transform(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::Transform(fns))
 }
 
-/// filter/clip-path 的 v0 解析（第四批④，ADR-0008 触发全集）：不实现滤镜/
-/// 裁剪效果，仅保留「值 ≠ none」存在性语义位（`DeclValue::Effect`）供 SC
+/// filter 的 v0 解析（第四批④，ADR-0008 触发全集）：不实现滤镜效果，
+/// 仅保留「值 ≠ none」存在性语义位（`DeclValue::Effect`）供 SC
 /// 判定与带序消费。任意函数/值宽容吞下，终止符（`;`/EOF）不消费交回声明循环。
 fn parse_sc_effect(p: &mut Parser) -> ValResult<DeclValue> {
     let mut present = false;
@@ -1695,7 +3255,12 @@ pub fn parse_white_space(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         Some(match_ignore_ascii_case!(s,
             "normal" => WhiteSpace::Normal,
             "nowrap" => WhiteSpace::NoWrap,
-            "pre" | "pre-wrap" | "break-spaces" => WhiteSpace::Pre,
+            "pre" => WhiteSpace::Pre,
+            // A5 全值：pre-wrap/break-spaces 不再容错映射 Pre（保留+换行
+            // 是真实语义）；pre-line=折叠空格保留换行。
+            "pre-wrap" => WhiteSpace::PreWrap,
+            "pre-line" => WhiteSpace::PreLine,
+            "break-spaces" => WhiteSpace::BreakSpaces,
             _ => return None,
         ))
     })
@@ -1869,20 +3434,152 @@ fn generic_or_named(name: &str) -> FamilyName {
 
 // ---------- grid track 列表 ----------
 
+/// 括号开段探测：cssparser 把 `[ … ]` 词法化为 SquareBracketBlock 块
+/// token（非 Delim，同 `(`→ParenthesisBlock 先例）→ 命中即 Ok（随后
+/// parse_nested_block 读取块内容），否则 Err（try_parse 回滚）。
+/// 独立辅助函数使错误型 E 经 ValResult 推断（闭包内联 = E0282）。
+fn bracket_open(p: &mut Parser<'_>) -> ValResult<()> {
+    match p.next() {
+        Ok(Token::SquareBracketBlock) => Ok(()),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// 括号块内线名收集（SquareBracketBlock 内容 → 名表；块内耗尽即止）。
+/// 仅 <custom-ident> 合法（spec §8.3），其余 token = 声明无效。
+fn bracket_names(p: &mut Parser<'_>) -> ValResult<Vec<String>> {
+    let mut names = Vec::new();
+    loop {
+        match p.next() {
+            Ok(Token::Ident(id)) => names.push(id.to_string()),
+            Ok(_) => return Err(p.new_error_for_next_token()),
+            Err(_) => break,
+        }
+    }
+    Ok(names)
+}
+
 /// grid-template-columns/rows 与 grid-auto-* 共用：轨道列表
 /// （repeat(整数, …) / repeat(auto-fill|auto-fit, …)）。
 pub fn parse_grid_tracks(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let mut tracks = Vec::new();
+    let mut line_names: Vec<Vec<String>> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
     loop {
-        tracks.push(parse_track_size(p)?);
+        // [名1 名2] 括号线名段（E5，ADR-0020）——任意轨前/轨间/尾合法；
+        // 同线多段（`[a] [b]`）合并为一槽（try_parse 失败自动回滚）。
+        // cssparser 把 `[ … ]` 整体给成 SquareBracketBlock 块 token →
+        // try_parse 命中后 parse_nested_block 取块内容读名。
+        while p.try_parse(bracket_open).is_ok() {
+            pending.extend(p.parse_nested_block(bracket_names)?);
+        }
         if p.is_exhausted() {
+            // 尾线名槽（第 N+1 槽）。
+            line_names.push(std::mem::take(&mut pending));
             break;
         }
+        // 轨前线名槽（第 i 槽）。
+        line_names.push(std::mem::take(&mut pending));
+        tracks.push(parse_track_size(p)?);
     }
     if tracks.is_empty() {
         return Err(p.new_error_for_next_token());
     }
-    Ok(DeclValue::GridTracks(GridTemplate { tracks }))
+    Ok(DeclValue::GridTracks(GridTemplate { tracks, line_names }))
+}
+
+/// grid-template-areas（E5，ADR-0020）：引号串行；每行空白分词，
+/// `.` = 空格。校验：各行格数一致（矩形性）+ 同名格数 == 行跨度×列
+/// 跨度（逐名矩形——min/max 边界法漏对角格，必须计数）；违反 = 声明
+/// 无效（spec §8.5）。
+pub fn parse_grid_areas(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    loop {
+        let s = match p.next() {
+            Ok(Token::QuotedString(s)) => s.to_string(),
+            _ => return Err(p.new_error_for_next_token()),
+        };
+        let row: Vec<String> = s.split_ascii_whitespace().map(String::from).collect();
+        if row.is_empty() {
+            return Err(p.new_error_for_next_token());
+        }
+        rows.push(row);
+        if p.is_exhausted() {
+            break;
+        }
+    }
+    let w = rows[0].len();
+    if rows.iter().any(|r| r.len() != w) {
+        return Err(p.new_error_for_next_token());
+    }
+    // (r_min, r_max, c_min, c_max, 格数)
+    let mut spans: std::collections::HashMap<&str, (usize, usize, usize, usize, usize)> =
+        std::collections::HashMap::new();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, name) in row.iter().enumerate() {
+            if name == "." {
+                continue;
+            }
+            let e = spans.entry(name.as_str()).or_insert((r, r, c, c, 0));
+            e.0 = e.0.min(r);
+            e.1 = e.1.max(r);
+            e.2 = e.2.min(c);
+            e.3 = e.3.max(c);
+            e.4 += 1;
+        }
+    }
+    for (_r, _c, name) in rows
+        .iter()
+        .enumerate()
+        .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, n)| (r, c, n)))
+    {
+        if name == "." {
+            continue;
+        }
+        let (r0, r1, c0, c1, count) = spans[name.as_str()];
+        if count != (r1 - r0 + 1) * (c1 - c0 + 1) {
+            return Err(p.new_error_for_next_token());
+        }
+    }
+    Ok(DeclValue::GridAreas(GridAreas { rows }))
+}
+
+/// grid-{row,column}-{start,end}（E5，ADR-0020）：
+/// auto | <integer> | span <integer> | span <ident> | <ident>。
+///（0 线号非法；spec 混合形 `<integer> && <ident>` v1 偏差在案。）
+pub fn parse_grid_line_spec(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    Ok(DeclValue::GridLine(parse_line_spec_value(p)?))
+}
+
+/// <grid-line> 值解析（不含 DeclValue 包装；简写展开共用）。
+pub(crate) fn parse_line_spec_value(p: &mut Parser<'_>) -> ValResult<GridLineSpec> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) if id.eq_ignore_ascii_case("auto") => Ok(GridLineSpec::Auto),
+        Token::Ident(id) if id.eq_ignore_ascii_case("span") => {
+            let t2 = p.next()?.clone();
+            match &t2 {
+                Token::Number { value, .. } => {
+                    let k = *value as u16;
+                    if *value < 1.0 || *value != k as f32 {
+                        return Err(p.new_error_for_next_token());
+                    }
+                    Ok(GridLineSpec::Span(k))
+                }
+                Token::Ident(id2) => Ok(GridLineSpec::SpanName(id2.to_string())),
+                _ => Err(p.new_error_for_next_token()),
+            }
+        }
+        Token::Number { value, .. } => {
+            let n = *value as i64;
+            if n == 0 || n < i16::MIN as i64 || n > i16::MAX as i64 || n as f32 != *value {
+                return Err(p.new_error_for_next_token());
+            }
+            Ok(GridLineSpec::Number(n as i16))
+        }
+        Token::Ident(id) => Ok(GridLineSpec::Name(id.to_string())),
+        _ => Err(p.new_error_for_next_token()),
+    }
 }
 
 fn parse_track_min(p: &mut Parser<'_>) -> ValResult<TrackSize> {
@@ -1962,16 +3659,26 @@ fn parse_repeat_track_list(p: &mut Parser<'_>) -> ValResult<Vec<TrackSize>> {
 
 // ---------- background / box-shadow ----------
 
-/// background-image：none | url() | linear-gradient()/radial-gradient()。
+/// background-image：`<bg-image>#` = none | url() | linear-gradient() |
+/// radial-gradient() | conic-gradient()（逗号分层；F3b，ADR-0024）。
 pub fn parse_background_image(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut layers = Vec::new();
+    loop {
+        layers.push(parse_background_image_one(p)?);
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::BackgroundImage(layers))
+}
+
+/// 单层背景图（none | url() | 渐变函数）。pub(crate)：background 简写复用。
+pub(crate) fn parse_background_image_one(p: &mut Parser<'_>) -> ValResult<BackgroundImage> {
     let t = p.next()?.clone();
     match &t {
-        Token::Ident(name) if name.eq_ignore_ascii_case("none") => {
-            Ok(DeclValue::BackgroundImage(BackgroundImage::None))
-        }
-        Token::UnquotedUrl(url) => Ok(DeclValue::BackgroundImage(BackgroundImage::Url(
-            url.to_string(),
-        ))),
+        Token::Ident(name) if name.eq_ignore_ascii_case("none") => Ok(BackgroundImage::None),
+        Token::UnquotedUrl(url) => Ok(BackgroundImage::Url(url.to_string())),
         Token::Function(name) if name.eq_ignore_ascii_case("url") => {
             let url: String = p.parse_nested_block(|p| {
                 let t = p.next()?.clone();
@@ -1980,18 +3687,778 @@ pub fn parse_background_image(p: &mut Parser<'_>) -> ValResult<DeclValue> {
                     _ => Err(p.new_error_for_next_token()),
                 }
             })?;
-            Ok(DeclValue::BackgroundImage(BackgroundImage::Url(url)))
+            Ok(BackgroundImage::Url(url))
         }
         Token::Function(name) if name.eq_ignore_ascii_case("linear-gradient") => {
             let g = p.parse_nested_block(parse_linear_gradient)?;
-            Ok(DeclValue::BackgroundImage(BackgroundImage::Gradient(g)))
+            Ok(BackgroundImage::Gradient(g))
         }
         Token::Function(name) if name.eq_ignore_ascii_case("radial-gradient") => {
             let g = p.parse_nested_block(parse_radial_gradient)?;
-            Ok(DeclValue::BackgroundImage(BackgroundImage::Gradient(g)))
+            Ok(BackgroundImage::Gradient(g))
+        }
+        Token::Function(name) if name.eq_ignore_ascii_case("conic-gradient") => {
+            let g = p.parse_nested_block(parse_conic_gradient)?;
+            Ok(BackgroundImage::Gradient(g))
         }
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+/// repeat-style 单关键字 → 轴值。
+fn repeat_axis_from(name: &str) -> Option<RepeatAxis> {
+    if name.eq_ignore_ascii_case("repeat") {
+        Some(RepeatAxis::Repeat)
+    } else if name.eq_ignore_ascii_case("space") {
+        Some(RepeatAxis::Space)
+    } else if name.eq_ignore_ascii_case("round") {
+        Some(RepeatAxis::Round)
+    } else if name.eq_ignore_ascii_case("no-repeat") {
+        Some(RepeatAxis::NoRepeat)
+    } else {
+        None
+    }
+}
+
+/// 单层 repeat-style：repeat-x | repeat-y | [repeat|space|round|
+/// no-repeat]{1,2}（双值首 = x、次 = y；单值双轴同值）。
+/// pub(crate)：background 简写复用。
+pub(crate) fn parse_repeat_xy(p: &mut Parser<'_>) -> ValResult<RepeatXY> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(name) if name.eq_ignore_ascii_case("repeat-x") => Ok(RepeatXY {
+            x: RepeatAxis::Repeat,
+            y: RepeatAxis::NoRepeat,
+        }),
+        Token::Ident(name) if name.eq_ignore_ascii_case("repeat-y") => Ok(RepeatXY {
+            x: RepeatAxis::NoRepeat,
+            y: RepeatAxis::Repeat,
+        }),
+        Token::Ident(name) => {
+            let first = repeat_axis_from(name).ok_or_else(|| p.new_error_for_next_token())?;
+            // 可选第二关键字（try_parse 失败回滚 = 单值形式）
+            let second = p.try_parse(|p| -> ValResult<RepeatAxis> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) => {
+                        repeat_axis_from(name).ok_or_else(|| p.new_error_for_next_token())
+                    }
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            Ok(match second {
+                Ok(y) => RepeatXY { x: first, y },
+                Err(_) => RepeatXY { x: first, y: first },
+            })
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// background-repeat：`<repeat-style>#`（F3b，ADR-0024）。
+pub fn parse_background_repeat(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut layers = Vec::new();
+    loop {
+        layers.push(parse_repeat_xy(p)?);
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::BackgroundRepeat(layers))
+}
+
+/// attachment 单分量（scroll | fixed | local）。pub(crate)：background
+/// 简写复用（ADR-0024）。
+pub(crate) fn parse_attachment_one(p: &mut Parser<'_>) -> ValResult<Attachment> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(name) if name.eq_ignore_ascii_case("scroll") => Ok(Attachment::Scroll),
+        Token::Ident(name) if name.eq_ignore_ascii_case("fixed") => Ok(Attachment::Fixed),
+        Token::Ident(name) if name.eq_ignore_ascii_case("local") => Ok(Attachment::Local),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// background-attachment：`<attachment>#` = scroll | fixed | local。
+pub fn parse_background_attachment(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut layers = Vec::new();
+    loop {
+        layers.push(parse_attachment_one(p)?);
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::BackgroundAttachment(layers))
+}
+
+/// bg-position 单 token 读数（关键字或长度/百分比）。
+/// pub(crate)：background 简写经 parse_pos_toks 复用。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PosTok {
+    /// left。
+    Left,
+    /// right。
+    Right,
+    /// top。
+    Top,
+    /// bottom。
+    Bottom,
+    /// center。
+    Center,
+    /// 长度/百分比。
+    LP(LengthPercentage),
+}
+
+/// 读单个 bg-position token：LP 先试（try_parse 失败回滚），再试关键字。
+fn pos_tok(p: &mut Parser<'_>) -> ValResult<PosTok> {
+    if let Ok(lp) = p.try_parse(|p| -> ValResult<LengthPercentage> { parse_length_percentage(p) }) {
+        return Ok(PosTok::LP(lp));
+    }
+    let t = p.next()?.clone();
+    Ok(match &t {
+        Token::Ident(name) if name.eq_ignore_ascii_case("left") => PosTok::Left,
+        Token::Ident(name) if name.eq_ignore_ascii_case("right") => PosTok::Right,
+        Token::Ident(name) if name.eq_ignore_ascii_case("top") => PosTok::Top,
+        Token::Ident(name) if name.eq_ignore_ascii_case("bottom") => PosTok::Bottom,
+        Token::Ident(name) if name.eq_ignore_ascii_case("center") => PosTok::Center,
+        _ => return Err(p.new_error_for_next_token()),
+    })
+}
+
+/// 读一层 bg-position token 流（语法上限 4 值）。
+pub(crate) fn parse_pos_toks(p: &mut Parser<'_>) -> ValResult<Vec<PosTok>> {
+    let mut toks = Vec::new();
+    while toks.len() < 4
+        && let Ok(t) = p.try_parse(|p| -> ValResult<PosTok> { pos_tok(p) })
+    {
+        toks.push(t);
+    }
+    if toks.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(toks)
+}
+
+/// 边关键字 → 等价基（left/top=0%、right/bottom=100%）。
+fn edge_base(tok: &PosTok) -> LengthPercentage {
+    match tok {
+        PosTok::Right | PosTok::Bottom => LengthPercentage::Percent(1.0),
+        _ => LengthPercentage::Percent(0.0),
+    }
+}
+
+/// right/bottom 偏移取负（绘制期统一正向公式：pos =
+/// pct(base)·(area−img) + len(base) + pct(offset)·(area−img) + len(offset)）。
+fn neg_lp(lp: LengthPercentage) -> LengthPercentage {
+    match lp {
+        LengthPercentage::Px(v) => LengthPercentage::Px(-v),
+        LengthPercentage::Em(v) => LengthPercentage::Em(-v),
+        LengthPercentage::Rem(v) => LengthPercentage::Rem(-v),
+        LengthPercentage::Percent(v) => LengthPercentage::Percent(-v),
+        LengthPercentage::Vw(v) => LengthPercentage::Vw(-v),
+        LengthPercentage::Vh(v) => LengthPercentage::Vh(-v),
+        LengthPercentage::Cqw(v) => LengthPercentage::Cqw(-v),
+        LengthPercentage::Cqh(v) => LengthPercentage::Cqh(-v),
+        LengthPercentage::Cqi(v) => LengthPercentage::Cqi(-v),
+        LengthPercentage::Cqb(v) => LengthPercentage::Cqb(-v),
+        LengthPercentage::Ch(v) => LengthPercentage::Ch(-v),
+        LengthPercentage::Ex(v) => LengthPercentage::Ex(-v),
+        LengthPercentage::Ic(v) => LengthPercentage::Ic(-v),
+        // calc() 结构性取负不支持（CalcNode 无取负变换）——B 级：原样保留，
+        // right/bottom calc 偏移语义偏差在案（ADR-0024）。
+        LengthPercentage::Calc(c) => LengthPercentage::Calc(c),
+    }
+}
+
+/// bg-position token 流 → Position2D（css-backgrounds-3 §4 全语法：
+/// 边+可选偏移成组；裸 LP 依序填 x/y；center 补缺轴；单 center = 双轴）。
+pub(crate) fn interpret_position(toks: &[PosTok]) -> Option<Position2D> {
+    let mut x: Option<PositionComp> = None;
+    let mut y: Option<PositionComp> = None;
+    let mut bare: Vec<LengthPercentage> = Vec::new();
+    let mut centers = 0usize;
+    let mut i = 0;
+    while i < toks.len() {
+        match &toks[i] {
+            PosTok::Left | PosTok::Right => {
+                if x.is_some() {
+                    return None;
+                }
+                let base = edge_base(&toks[i]);
+                let offset = match toks.get(i + 1) {
+                    Some(PosTok::LP(lp)) => {
+                        let off = if matches!(toks[i], PosTok::Right) {
+                            neg_lp(lp.clone())
+                        } else {
+                            lp.clone()
+                        };
+                        i += 1;
+                        Some(off)
+                    }
+                    _ => None,
+                };
+                x = Some(PositionComp { base, offset });
+            }
+            PosTok::Top | PosTok::Bottom => {
+                if y.is_some() {
+                    return None;
+                }
+                let base = edge_base(&toks[i]);
+                let offset = match toks.get(i + 1) {
+                    Some(PosTok::LP(lp)) => {
+                        let off = if matches!(toks[i], PosTok::Bottom) {
+                            neg_lp(lp.clone())
+                        } else {
+                            lp.clone()
+                        };
+                        i += 1;
+                        Some(off)
+                    }
+                    _ => None,
+                };
+                y = Some(PositionComp { base, offset });
+            }
+            PosTok::LP(lp) => bare.push(lp.clone()),
+            PosTok::Center => centers += 1,
+        }
+        i += 1;
+    }
+    // 裸 LP：第一 → x，第二 → y（production 2 顺序语义）；多余非法。
+    for lp in bare {
+        if x.is_none() {
+            x = Some(PositionComp {
+                base: lp,
+                offset: None,
+            });
+        } else if y.is_none() {
+            y = Some(PositionComp {
+                base: lp,
+                offset: None,
+            });
+        } else {
+            return None;
+        }
+    }
+    // center：双缺=双轴 Center；单缺按轴补；有余非法。
+    for _ in 0..centers {
+        if x.is_none() && y.is_none() {
+            // 单/双 center 开局：首个占 x（结尾统一补 y 缺省）
+            x = Some(PositionComp {
+                base: LengthPercentage::Percent(0.5),
+                offset: None,
+            });
+        } else if y.is_none() {
+            y = Some(PositionComp {
+                base: LengthPercentage::Percent(0.5),
+                offset: None,
+            });
+        } else {
+            return None;
+        }
+    }
+    // 缺省补 Center（如 `left` → y=center；`10px` → y=center）。
+    let center = PositionComp {
+        base: LengthPercentage::Percent(0.5),
+        offset: None,
+    };
+    Some(Position2D {
+        x: x.unwrap_or_else(|| center.clone()),
+        y: y.unwrap_or(center),
+    })
+}
+
+/// background-position：`<bg-position>#`（F3b，ADR-0024）。
+pub fn parse_background_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut layers = Vec::new();
+    loop {
+        let toks = parse_pos_toks(p)?;
+        let pos = interpret_position(&toks).ok_or_else(|| p.new_error_for_next_token())?;
+        layers.push(pos);
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::BackgroundPosition(layers))
+}
+
+/// background-size 单分量（LP 先试 try_parse，auto 关键字回退）。
+fn parse_lpor_auto(p: &mut Parser<'_>) -> ValResult<LPorAuto> {
+    if let Ok(lp) =
+        p.try_parse(|p| -> ValResult<LPorAuto> { Ok(LPorAuto::LP(parse_length_percentage(p)?)) })
+    {
+        return Ok(lp);
+    }
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(name) if name.eq_ignore_ascii_case("auto") => Ok(LPorAuto::Auto),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// bg-size 单分量：auto | cover | contain | [<LP> | auto]{1,2}
+/// （单值 = 宽给值高 auto）。pub(crate)：background 简写复用（ADR-0024）。
+pub(crate) fn parse_bg_size_one(p: &mut Parser<'_>) -> ValResult<BgSize> {
+    // 关键字三项先试（try_parse 失败回滚）。
+    let kw = p.try_parse(|p| -> ValResult<BgSize> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) if name.eq_ignore_ascii_case("auto") => Ok(BgSize::Auto),
+            Token::Ident(name) if name.eq_ignore_ascii_case("cover") => Ok(BgSize::Cover),
+            Token::Ident(name) if name.eq_ignore_ascii_case("contain") => Ok(BgSize::Contain),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    match kw {
+        Ok(s) => Ok(s),
+        Err(_) => {
+            let w = parse_lpor_auto(p)?;
+            // 可选第二分量
+            let h = match p.try_parse(|p| parse_lpor_auto(p)) {
+                Ok(a) => a,
+                Err(_) => LPorAuto::Auto,
+            };
+            Ok(BgSize::Explicit { w, h })
+        }
+    }
+}
+
+/// background-size：`<bg-size>#` = auto | cover | contain |
+/// [<length-percentage> | auto]{1,2}（单值 = 宽给值高 auto；F3b ADR-0024）。
+pub fn parse_background_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut layers = Vec::new();
+    loop {
+        layers.push(parse_bg_size_one(p)?);
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::BackgroundSize(layers))
+}
+
+/// 背景盒关键字 → 值。
+pub(crate) fn background_box_from(name: &str) -> Option<BackgroundBox> {
+    if name.eq_ignore_ascii_case("border-box") {
+        Some(BackgroundBox::BorderBox)
+    } else if name.eq_ignore_ascii_case("padding-box") {
+        Some(BackgroundBox::PaddingBox)
+    } else if name.eq_ignore_ascii_case("content-box") {
+        Some(BackgroundBox::ContentBox)
+    } else {
+        None
+    }
+}
+
+/// background-origin：`<box>#` = border-box | padding-box | content-box。
+pub fn parse_background_origin(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut layers = Vec::new();
+    loop {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) => {
+                let b = background_box_from(name).ok_or_else(|| p.new_error_for_next_token())?;
+                layers.push(b);
+            }
+            _ => return Err(p.new_error_for_next_token()),
+        }
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::BackgroundOrigin(layers))
+}
+
+/// background-clip：`<box># | text`（css-backgrounds-4 text 收容；绘制
+/// 降级 B 级，ADR-0024）。
+pub fn parse_background_clip(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut layers = Vec::new();
+    loop {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) if name.eq_ignore_ascii_case("text") => {
+                layers.push(BackgroundClip::Text);
+            }
+            Token::Ident(name) => {
+                let b = background_box_from(name).ok_or_else(|| p.new_error_for_next_token())?;
+                layers.push(BackgroundClip::Box(b));
+            }
+            _ => return Err(p.new_error_for_next_token()),
+        }
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::BackgroundClip(layers))
+}
+
+// ---------- clip-path（F3c，ADR-0025）----------
+
+/// geometry-box 关键字 → 参考盒。margin-box 降级 border-box（B 级在案，
+/// css-masking-1 参考盒族完整版含 margin-box）。
+fn geometry_box_from(name: &str) -> Option<BackgroundBox> {
+    if name.eq_ignore_ascii_case("border-box") {
+        Some(BackgroundBox::BorderBox)
+    } else if name.eq_ignore_ascii_case("padding-box") {
+        Some(BackgroundBox::PaddingBox)
+    } else if name.eq_ignore_ascii_case("content-box") {
+        Some(BackgroundBox::ContentBox)
+    } else if name.eq_ignore_ascii_case("margin-box") {
+        tracing::warn!("clip-path: margin-box 参考盒降级为 border-box（B 级）");
+        Some(BackgroundBox::BorderBox)
+    } else {
+        None
+    }
+}
+
+/// 形状替换参考盒（`<basic-shape> || <geometry-box>` 组合的第二步；
+/// Other/None 不组合）。
+fn clip_shape_with_reference(s: ClipShape, b: BackgroundBox) -> ClipShape {
+    match s {
+        ClipShape::Inset {
+            insets,
+            radius,
+            reference: _,
+        } => ClipShape::Inset {
+            insets,
+            radius,
+            reference: b,
+        },
+        ClipShape::Circle {
+            radius,
+            at,
+            reference: _,
+        } => ClipShape::Circle {
+            radius,
+            at,
+            reference: b,
+        },
+        ClipShape::Ellipse {
+            rx,
+            ry,
+            at,
+            reference: _,
+        } => ClipShape::Ellipse {
+            rx,
+            ry,
+            at,
+            reference: b,
+        },
+        ClipShape::Polygon {
+            nonzero,
+            points,
+            reference: _,
+        } => ClipShape::Polygon {
+            nonzero,
+            points,
+            reference: b,
+        },
+        other => other,
+    }
+}
+
+/// margin 简写 1..=4 值 → 上右下左四值（inset() 内缩量/圆角共用）。
+fn expand_lp_shorthand(vals: Vec<LengthPercentage>) -> [LengthPercentage; 4] {
+    match vals.as_slice() {
+        [a] => [a.clone(), a.clone(), a.clone(), a.clone()],
+        [a, b] => [a.clone(), b.clone(), a.clone(), b.clone()],
+        [a, b, c] => [a.clone(), b.clone(), c.clone(), b.clone()],
+        [a, b, c, d] => [a.clone(), b.clone(), c.clone(), d.clone()],
+        _ => unreachable!("调用方保证 1..=4 个值"),
+    }
+}
+
+/// 读 1..=4 个连续 LP（margin 简写段；第 5 个起不消费）。
+fn parse_lp_run(p: &mut Parser<'_>) -> ValResult<Vec<LengthPercentage>> {
+    let mut vals = Vec::new();
+    while vals.len() < 4 {
+        match p.try_parse(parse_length_percentage) {
+            Ok(lp) => vals.push(lp),
+            Err(_) => break,
+        }
+    }
+    if vals.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(vals)
+}
+
+/// clip-path 圆/椭圆显式半径：非负 length-percentage（css-shapes-1
+/// §3.2.1；circle 百分比基准 √(w²+h²)/√2、ellipse 逐轴宽/高，paint.rs
+/// 同步解析；负值拒绝；Calc 无法判号收容）。
+fn parse_clip_radius_lp(p: &mut Parser<'_>, allow_percent: bool) -> ValResult<LengthPercentage> {
+    let lp = parse_length_percentage(p)?;
+    match &lp {
+        LengthPercentage::Percent(_) if !allow_percent => {
+            return Err(p.new_error_for_next_token());
+        }
+        LengthPercentage::Px(v)
+        | LengthPercentage::Em(v)
+        | LengthPercentage::Rem(v)
+        | LengthPercentage::Vw(v)
+        | LengthPercentage::Vh(v)
+        | LengthPercentage::Cqw(v)
+        | LengthPercentage::Cqh(v)
+        | LengthPercentage::Cqi(v)
+        | LengthPercentage::Cqb(v)
+        | LengthPercentage::Ch(v)
+        | LengthPercentage::Ex(v)
+        | LengthPercentage::Ic(v)
+            if *v < 0.0 =>
+        {
+            return Err(p.new_error_for_next_token());
+        }
+        _ => {}
+    }
+    Ok(lp)
+}
+
+/// clip-path 半径单项：显式 LP 或 closest-side/farthest-side/
+/// closest-corner/farthest-corner 关键字。
+fn parse_clip_radius(p: &mut Parser<'_>, allow_percent: bool) -> ValResult<ClipRadius> {
+    if let Ok(lp) = p.try_parse(|p| parse_clip_radius_lp(p, allow_percent)) {
+        return Ok(ClipRadius::Length(lp));
+    }
+    let t = p.next()?.clone();
+    Ok(match &t {
+        Token::Ident(name) if name.eq_ignore_ascii_case("closest-side") => ClipRadius::ClosestSide,
+        Token::Ident(name) if name.eq_ignore_ascii_case("farthest-side") => {
+            ClipRadius::FarthestSide
+        }
+        Token::Ident(name) if name.eq_ignore_ascii_case("closest-corner") => {
+            ClipRadius::ClosestCorner
+        }
+        Token::Ident(name) if name.eq_ignore_ascii_case("farthest-corner") => {
+            ClipRadius::FarthestCorner
+        }
+        _ => return Err(p.new_error_for_next_token()),
+    })
+}
+
+/// circle/ellipse 的 `at <bg-position>`（复用 bg-position 全语法工具）。
+fn parse_clip_at(p: &mut Parser<'_>) -> ValResult<Position2D> {
+    let toks = parse_pos_toks(p)?;
+    interpret_position(&toks).ok_or_else(|| p.new_error_for_next_token())
+}
+
+/// `<basic-shape>` 单项：inset()/circle()/ellipse()/polygon() 函数；
+/// url()/path() 宽容吞咽 → Other（SVG 资源与 path 语法 = T2，B 级）。
+/// 参考盒由调用方组合回填（暂置 border-box）。
+fn parse_basic_shape(p: &mut Parser<'_>) -> ValResult<ClipShape> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Function(name) if name.eq_ignore_ascii_case("inset") => {
+            p.parse_nested_block(|p| {
+                let insets = expand_lp_shorthand(parse_lp_run(p)?);
+                // round <水平集> [ / <垂直集> ]?（无斜杠 = 垂直集取水平集）
+                let radius = p
+                    .try_parse(
+                        |p| -> ValResult<([LengthPercentage; 4], [LengthPercentage; 4])> {
+                            let t = p.next()?.clone();
+                            match &t {
+                                Token::Ident(n) if n.eq_ignore_ascii_case("round") => {
+                                    let h = expand_lp_shorthand(parse_lp_run(p)?);
+                                    let v = p
+                                        .try_parse(|p| -> ValResult<[LengthPercentage; 4]> {
+                                            match p.next()? {
+                                                Token::Delim('/') => {}
+                                                _ => return Err(p.new_error_for_next_token()),
+                                            }
+                                            Ok(expand_lp_shorthand(parse_lp_run(p)?))
+                                        })
+                                        .unwrap_or_else(|_| h.clone());
+                                    Ok((h, v))
+                                }
+                                _ => Err(p.new_error_for_next_token()),
+                            }
+                        },
+                    )
+                    .ok();
+                Ok(ClipShape::Inset {
+                    insets,
+                    radius,
+                    reference: BackgroundBox::BorderBox,
+                })
+            })
+        }
+        Token::Function(name) if name.eq_ignore_ascii_case("circle") => p.parse_nested_block(|p| {
+            let radius = p
+                .try_parse(|p| parse_clip_radius(p, true))
+                .unwrap_or(ClipRadius::ClosestSide);
+            let at = p.try_parse(|p| -> ValResult<Position2D> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(n) if n.eq_ignore_ascii_case("at") => parse_clip_at(p),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            let at = at.unwrap_or(Position2D {
+                x: PositionComp {
+                    base: LengthPercentage::Percent(0.5),
+                    offset: None,
+                },
+                y: PositionComp {
+                    base: LengthPercentage::Percent(0.5),
+                    offset: None,
+                },
+            });
+            Ok(ClipShape::Circle {
+                radius,
+                at,
+                reference: BackgroundBox::BorderBox,
+            })
+        }),
+        Token::Function(name) if name.eq_ignore_ascii_case("ellipse") => {
+            p.parse_nested_block(|p| {
+                let rx = p.try_parse(|p| parse_clip_radius(p, true));
+                let ry = p.try_parse(|p| parse_clip_radius(p, true));
+                let at = p.try_parse(|p| -> ValResult<Position2D> {
+                    let t = p.next()?.clone();
+                    match &t {
+                        Token::Ident(n) if n.eq_ignore_ascii_case("at") => parse_clip_at(p),
+                        _ => Err(p.new_error_for_next_token()),
+                    }
+                });
+                let at = at.unwrap_or(Position2D {
+                    x: PositionComp {
+                        base: LengthPercentage::Percent(0.5),
+                        offset: None,
+                    },
+                    y: PositionComp {
+                        base: LengthPercentage::Percent(0.5),
+                        offset: None,
+                    },
+                });
+                Ok(ClipShape::Ellipse {
+                    rx: rx.unwrap_or(ClipRadius::ClosestSide),
+                    ry: ry.unwrap_or(ClipRadius::ClosestSide),
+                    at,
+                    reference: BackgroundBox::BorderBox,
+                })
+            })
+        }
+        Token::Function(name) if name.eq_ignore_ascii_case("polygon") => {
+            p.parse_nested_block(|p| {
+                let mut nonzero = true;
+                if let Ok(rule) = p.try_parse(|p| -> ValResult<bool> {
+                    let t = p.next()?.clone();
+                    match &t {
+                        Token::Ident(n) if n.eq_ignore_ascii_case("nonzero") => Ok(true),
+                        Token::Ident(n) if n.eq_ignore_ascii_case("evenodd") => Ok(false),
+                        _ => Err(p.new_error_for_next_token()),
+                    }
+                }) {
+                    nonzero = rule;
+                    if !matches!(p.next(), Ok(Token::Comma)) {
+                        return Err(p.new_error_for_next_token());
+                    }
+                }
+                let mut points = Vec::new();
+                loop {
+                    let x = parse_length_percentage(p)?;
+                    let y = parse_length_percentage(p)?;
+                    points.push((x, y));
+                    match p.next() {
+                        Ok(Token::Comma) => continue,
+                        _ => break,
+                    }
+                }
+                if points.len() < 3 {
+                    return Err(p.new_error_for_next_token());
+                }
+                Ok(ClipShape::Polygon {
+                    nonzero,
+                    points,
+                    reference: BackgroundBox::BorderBox,
+                })
+            })
+        }
+        Token::Function(name) if name.eq_ignore_ascii_case("url") => {
+            p.parse_nested_block(|p| -> ValResult<()> {
+                while p.next().is_ok() {}
+                Ok(())
+            })?;
+            tracing::warn!("clip-path: url() 收容为无效（SVG clipPath = T2）");
+            Ok(ClipShape::Other)
+        }
+        Token::Function(name) if name.eq_ignore_ascii_case("path") => {
+            p.parse_nested_block(|p| -> ValResult<()> {
+                while p.next().is_ok() {}
+                Ok(())
+            })?;
+            tracing::warn!("clip-path: path() 收容为无效（path 语法 = T2）");
+            Ok(ClipShape::Other)
+        }
+        // cssparser 词法化：无引号 URL 是 UnquotedUrl 顶层 token，而非
+        // Function("url")——两形态都必须接住，否则宽容路径失效。
+        Token::UnquotedUrl(_) => {
+            tracing::warn!("clip-path: url() 收容为无效（SVG clipPath = T2）");
+            Ok(ClipShape::Other)
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// clip-path（css-masking-1 §5.1 / css-shapes-1 §3，F3c，ADR-0025）：
+/// `<basic-shape> || <geometry-box>` | none。次序不限；geometry-box
+/// 单独出现 = inset(0) 基准该盒；组合部件重复/残留 → 整条拒绝。
+pub fn parse_clip_path(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let none = p.try_parse(|p| -> ValResult<()> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) if name.eq_ignore_ascii_case("none") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if none.is_ok() {
+        return Ok(DeclValue::ClipPath(ClipShape::None));
+    }
+    let mut shape: Option<ClipShape> = None;
+    let mut reference: Option<BackgroundBox> = None;
+    // `||` = 次序不限、各至多一次；两轮试探。
+    for _ in 0..2 {
+        if shape.is_none()
+            && let Ok(s) = p.try_parse(parse_basic_shape)
+        {
+            shape = Some(s);
+            continue;
+        }
+        if reference.is_none()
+            && let Ok(b) = p.try_parse(|p| -> ValResult<BackgroundBox> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) => {
+                        geometry_box_from(name).ok_or_else(|| p.new_error_for_next_token())
+                    }
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            })
+        {
+            reference = Some(b);
+            continue;
+        }
+        break;
+    }
+    let value = match (shape, reference) {
+        (Some(s), Some(b)) => clip_shape_with_reference(s, b),
+        (Some(s), None) => s,
+        (None, Some(b)) => ClipShape::Inset {
+            insets: [
+                LengthPercentage::Px(0.0),
+                LengthPercentage::Px(0.0),
+                LengthPercentage::Px(0.0),
+                LengthPercentage::Px(0.0),
+            ],
+            radius: None,
+            reference: b,
+        },
+        (None, None) => return Err(p.new_error_for_next_token()),
+    };
+    Ok(DeclValue::ClipPath(value))
 }
 
 fn parse_linear_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
@@ -2131,6 +4598,109 @@ fn parse_radial_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
     })
 }
 
+/// 锥形渐变（C3，css-images-3；ADR-0017）：
+/// `conic-gradient([from <angle>]? [at <position>]? ,? <stop-list>)`。
+/// CSS 0deg = 12 点方向顺时针；角度存度数，peniko 映射时平移至 +X 轴起。
+fn parse_conic_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
+    let mut from: Option<Angle> = None;
+    let mut position: Option<(LengthPercentage, LengthPercentage)> = None;
+    loop {
+        if from.is_none() {
+            let f = p.try_parse(|p| -> ValResult<()> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) if name.eq_ignore_ascii_case("from") => Ok(()),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            if f.is_ok() {
+                from = Some(Angle(parse_angle_deg(p)?));
+                continue;
+            }
+        }
+        if position.is_none() {
+            let at = p.try_parse(|p| -> ValResult<()> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) if name.eq_ignore_ascii_case("at") => Ok(()),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            if at.is_ok() {
+                let x = parse_position_component(p)?;
+                let y = parse_position_component(p)?;
+                position = Some((x, y));
+                continue;
+            }
+        }
+        break;
+    }
+    if from.is_some() || position.is_some() {
+        p.expect_comma().map_err(cssparser::ParseError::from)?;
+    }
+    let stops = parse_gradient_stops(p)?;
+    Ok(Gradient {
+        kind: GradientKind::Conic(ConicSpec {
+            from: from.unwrap_or(Angle(0.0)),
+            position: position.unwrap_or((
+                LengthPercentage::Percent(0.5),
+                LengthPercentage::Percent(0.5),
+            )),
+        }),
+        stops,
+    })
+}
+
+/// object-fit 值解析（C3，css-images-3）：fill|contain|cover|none|scale-down。
+pub fn parse_object_fit(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "fill" => ObjectFitKind::Fill,
+            "contain" => ObjectFitKind::Contain,
+            "cover" => ObjectFitKind::Cover,
+            "none" => ObjectFitKind::None,
+            "scale-down" => ObjectFitKind::ScaleDown,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::ObjectFit)
+}
+
+/// float 值解析（E4，css-position-3 / ADR-0019）：none|left|right。
+pub fn parse_float(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "none" => FloatKind::None,
+            "left" => FloatKind::Left,
+            "right" => FloatKind::Right,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::Float)
+}
+
+/// clear 值解析（E4，css-position-3 / ADR-0019）：none|left|right|both。
+pub fn parse_clear(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "none" => ClearKind::None,
+            "left" => ClearKind::Left,
+            "right" => ClearKind::Right,
+            "both" => ClearKind::Both,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::Clear)
+}
+
+/// object-position 值解析（C3，css-images-3）：两分量 <position> (x, y)。
+/// 分量文法与 radial `at <position>` 同一（parse_position_component）。
+pub fn parse_object_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let x = parse_position_component(p)?;
+    let y = parse_position_component(p)?;
+    Ok(DeclValue::ObjectPosition(x, y))
+}
+
 /// 位置分量：<length-percentage> | left | center | right | top | bottom。
 fn parse_position_component(p: &mut Parser<'_>) -> ValResult<LengthPercentage> {
     if let Ok(lp) = p.try_parse(parse_length_percentage) {
@@ -2238,6 +4808,425 @@ pub fn parse_box_shadow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::BoxShadows(shadows))
 }
 
+// ---------- F3d（ADR-0026）：border-image + 字体深化解析器 ----------
+
+// border-image 源图直接复用 parse_background_image_one（dispatch 与简写
+// 均引用之，无独立别名）。
+
+/// border-image-slice 分量：<number [0,∞]> | <percentage [0,∞]>（负值拒绝）。
+fn parse_bi_slice_comp(p: &mut Parser<'_>) -> ValResult<BorderImageSliceComp> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Number { value, .. } => {
+            if *value < 0.0 {
+                return Err(p.new_error_for_next_token());
+            }
+            Ok(BorderImageSliceComp::Number(*value))
+        }
+        Token::Percentage { unit_value, .. } => {
+            if *unit_value < 0.0 {
+                return Err(p.new_error_for_next_token());
+            }
+            Ok(BorderImageSliceComp::Percentage(*unit_value))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// border-image-slice 值级：`[<number>|<percentage>]{1,4} && fill?`（fill
+/// 任意位宽容，Chromium 行为）。pub(crate)：border-image 简写复用。
+pub(crate) fn parse_bi_slice_value(p: &mut Parser<'_>) -> ValResult<BorderImageSlice> {
+    let mut vals: Vec<BorderImageSliceComp> = Vec::new();
+    let mut fill = false;
+    loop {
+        if vals.len() < 4
+            && let Ok(v) = p.try_parse(parse_bi_slice_comp)
+        {
+            vals.push(v);
+            continue;
+        }
+        if !fill
+            && p.try_parse(|p| -> ValResult<()> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) if name.eq_ignore_ascii_case("fill") => Ok(()),
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            })
+            .is_ok()
+        {
+            fill = true;
+            continue;
+        }
+        break;
+    }
+    if vals.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(BorderImageSlice {
+        slices: trbl_expand(&vals),
+        fill,
+    })
+}
+
+/// border-image-slice：值级包装（声明入口）。
+pub fn parse_border_image_slice(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_bi_slice_value(p).map(DeclValue::BorderImageSlice)
+}
+
+/// LP 简单维度负值拒绝（calc 无法静态判号 → 收容，F3c 先例）。
+fn lp_reject_negative(p: &mut Parser<'_>, lp: &LengthPercentage) -> ValResult<()> {
+    match lp {
+        LengthPercentage::Px(v)
+        | LengthPercentage::Em(v)
+        | LengthPercentage::Rem(v)
+        | LengthPercentage::Vw(v)
+        | LengthPercentage::Vh(v)
+        | LengthPercentage::Cqw(v)
+        | LengthPercentage::Cqh(v)
+        | LengthPercentage::Cqi(v)
+        | LengthPercentage::Cqb(v)
+        | LengthPercentage::Ch(v)
+        | LengthPercentage::Ex(v)
+        | LengthPercentage::Ic(v)
+            if *v < 0.0 =>
+        {
+            Err(p.new_error_for_next_token())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// border-image-width 分量：auto | <number [0,∞]> | <length-percentage>。
+fn parse_bi_width_comp(p: &mut Parser<'_>) -> ValResult<BorderImageWidthComp> {
+    // auto（try_parse 回滚语义，避免预消费后重复 next）
+    let auto = p.try_parse(|p| -> ValResult<()> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) if name.eq_ignore_ascii_case("auto") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if auto.is_ok() {
+        return Ok(BorderImageWidthComp::Auto);
+    }
+    // <number [0,∞]> — 对应边 border-width 倍数
+    let num = p.try_parse(|p| -> ValResult<f32> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Number { value, .. } if *value >= 0.0 => Ok(*value),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if let Ok(v) = num {
+        return Ok(BorderImageWidthComp::Number(v));
+    }
+    // <length-percentage>（负拒绝；% 相对绘制域，calc 收容）
+    let lp = parse_length_percentage(p)?;
+    lp_reject_negative(p, &lp)?;
+    Ok(BorderImageWidthComp::Length(lp))
+}
+
+/// border-image-width 值级：1-4 值 TRBL 展开。pub(crate)：简写复用。
+pub(crate) fn parse_bi_width_value(p: &mut Parser<'_>) -> ValResult<BorderImageWidth> {
+    let mut vals: Vec<BorderImageWidthComp> = Vec::new();
+    loop {
+        if vals.len() >= 4 {
+            break;
+        }
+        match p.try_parse(parse_bi_width_comp) {
+            Ok(v) => vals.push(v),
+            Err(_) => break,
+        }
+    }
+    if vals.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(BorderImageWidth {
+        comps: trbl_expand(&vals),
+    })
+}
+
+/// border-image-width：值级包装（声明入口）。
+pub fn parse_border_image_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_bi_width_value(p).map(DeclValue::BorderImageWidth)
+}
+
+/// border-image-outset 分量：<length [0,∞]> | <number [0,∞]>（负拒绝；
+/// 百分比非法——spec 仅 length|number；calc 收容）。
+fn parse_bi_outset_comp(p: &mut Parser<'_>) -> ValResult<BorderImageOutsetComp> {
+    // <number [0,∞]>
+    let num = p.try_parse(|p| -> ValResult<f32> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Number { value, .. } if *value >= 0.0 => Ok(*value),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if let Ok(v) = num {
+        return Ok(BorderImageOutsetComp::Number(v));
+    }
+    // <length>（% 拒绝；calc 收容）
+    let lp = parse_length_percentage(p)?;
+    if matches!(lp, LengthPercentage::Percent(_)) {
+        return Err(p.new_error_for_next_token());
+    }
+    lp_reject_negative(p, &lp)?;
+    Ok(BorderImageOutsetComp::Length(lp))
+}
+
+/// border-image-outset 值级：1-4 值 TRBL 展开。pub(crate)：简写复用。
+pub(crate) fn parse_bi_outset_value(p: &mut Parser<'_>) -> ValResult<BorderImageOutset> {
+    let mut vals: Vec<BorderImageOutsetComp> = Vec::new();
+    loop {
+        if vals.len() >= 4 {
+            break;
+        }
+        match p.try_parse(parse_bi_outset_comp) {
+            Ok(v) => vals.push(v),
+            Err(_) => break,
+        }
+    }
+    if vals.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(BorderImageOutset {
+        comps: trbl_expand(&vals),
+    })
+}
+
+/// border-image-outset：值级包装（声明入口）。
+pub fn parse_border_image_outset(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_bi_outset_value(p).map(DeclValue::BorderImageOutset)
+}
+
+/// border-image-repeat 单轴关键字。
+fn bi_repeat_axis_from(name: &str) -> Option<BorderImageRepeatKind> {
+    if name.eq_ignore_ascii_case("stretch") {
+        Some(BorderImageRepeatKind::Stretch)
+    } else if name.eq_ignore_ascii_case("repeat") {
+        Some(BorderImageRepeatKind::Repeat)
+    } else if name.eq_ignore_ascii_case("round") {
+        Some(BorderImageRepeatKind::Round)
+    } else if name.eq_ignore_ascii_case("space") {
+        Some(BorderImageRepeatKind::Space)
+    } else {
+        None
+    }
+}
+
+/// border-image-repeat 值级：`<stretch|repeat|round|space>{1,2}`（单值双
+/// 轴）。pub(crate)：简写复用。
+pub(crate) fn parse_bi_repeat_value(p: &mut Parser<'_>) -> ValResult<BorderImageRepeatXY> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(name) => {
+            let first = bi_repeat_axis_from(name).ok_or_else(|| p.new_error_for_next_token())?;
+            let second = p.try_parse(|p| -> ValResult<BorderImageRepeatKind> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) => {
+                        bi_repeat_axis_from(name).ok_or_else(|| p.new_error_for_next_token())
+                    }
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            });
+            Ok(match second {
+                Ok(y) => BorderImageRepeatXY { x: first, y },
+                Err(_) => BorderImageRepeatXY { x: first, y: first },
+            })
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// border-image-repeat：值级包装（声明入口）。
+pub fn parse_border_image_repeat(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_bi_repeat_value(p).map(DeclValue::BorderImageRepeat)
+}
+
+/// font-stretch：normal | <percentage [50,200]> | 九关键字（css-fonts-4）。
+pub fn parse_font_stretch(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(name) => {
+            let v = if name.eq_ignore_ascii_case("normal") {
+                100.0
+            } else if name.eq_ignore_ascii_case("ultra-condensed") {
+                50.0
+            } else if name.eq_ignore_ascii_case("extra-condensed") {
+                62.5
+            } else if name.eq_ignore_ascii_case("condensed") {
+                75.0
+            } else if name.eq_ignore_ascii_case("semi-condensed") {
+                87.5
+            } else if name.eq_ignore_ascii_case("semi-expanded") {
+                112.5
+            } else if name.eq_ignore_ascii_case("expanded") {
+                125.0
+            } else if name.eq_ignore_ascii_case("extra-expanded") {
+                150.0
+            } else if name.eq_ignore_ascii_case("ultra-expanded") {
+                200.0
+            } else {
+                return Err(p.new_error_for_next_token());
+            };
+            Ok(DeclValue::FontStretch(v))
+        }
+        Token::Percentage { unit_value, .. } => {
+            // unit_value 是 f32 分数（1.25 = 125%），×100 归一到百分比刻度
+            let v = *unit_value * 100.0;
+            if !(50.0..=200.0).contains(&v) {
+                return Err(p.new_error_for_next_token());
+            }
+            Ok(DeclValue::FontStretch(v))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// font-feature-settings / font-variation-settings 的 OpenType 特性 tag：
+/// 必须 <string>（css-fonts-4 严格式，Chromium 同拒 ident），恰 4 字符。
+fn parse_feature_tag(p: &mut Parser<'_>) -> ValResult<[u8; 4]> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::QuotedString(s) => {
+            let b = s.as_bytes();
+            if b.len() != 4 {
+                return Err(p.new_error_for_next_token());
+            }
+            Ok([b[0], b[1], b[2], b[3]])
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// font-feature-settings：`normal | <feature-tag-value>#`，value =
+/// on|off|<integer [0,65535]>（缺省 on=1）。
+pub fn parse_font_features(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    if let Token::Ident(name) = &t {
+        if name.eq_ignore_ascii_case("normal") {
+            return Ok(DeclValue::FontFeatures(Vec::new()));
+        }
+        return Err(p.new_error_for_next_token());
+    }
+    let mut list: Vec<([u8; 4], u16)> = Vec::new();
+    // 首 tag 已随 t 消费（string）；后续轮次逐个读 tag
+    let mut pending_tag: Option<[u8; 4]> = match &t {
+        Token::QuotedString(s) => {
+            let b = s.as_bytes();
+            if b.len() != 4 {
+                return Err(p.new_error_for_next_token());
+            }
+            Some([b[0], b[1], b[2], b[3]])
+        }
+        _ => None,
+    };
+    loop {
+        let tag = match pending_tag.take() {
+            Some(t) => t,
+            None => parse_feature_tag(p)?,
+        };
+        // 可选 value：on|off|<integer>（缺省 on=1；try_parse 失败回滚）
+        let value: u16 = p
+            .try_parse(|p| -> ValResult<u16> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(name) if name.eq_ignore_ascii_case("on") => Ok(1),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("off") => Ok(0),
+                    Token::Number {
+                        value,
+                        int_value: Some(_),
+                        ..
+                    } => {
+                        if !(0.0..=65535.0).contains(value) {
+                            return Err(p.new_error_for_next_token());
+                        }
+                        Ok(*value as u16)
+                    }
+                    _ => Err(p.new_error_for_next_token()),
+                }
+            })
+            .unwrap_or(1);
+        list.push((tag, value));
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::FontFeatures(list))
+}
+
+/// font-variation-settings：`normal | [ <string> <number> ]#`（value 必给，
+/// 可负）。
+pub fn parse_font_variations(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    if let Token::Ident(name) = &t {
+        if name.eq_ignore_ascii_case("normal") {
+            return Ok(DeclValue::FontVariations(Vec::new()));
+        }
+        return Err(p.new_error_for_next_token());
+    }
+    let mut list: Vec<([u8; 4], f32)> = Vec::new();
+    let mut tag = match &t {
+        Token::QuotedString(s) => {
+            let b = s.as_bytes();
+            if b.len() != 4 {
+                return Err(p.new_error_for_next_token());
+            }
+            Some([b[0], b[1], b[2], b[3]])
+        }
+        _ => None,
+    };
+    loop {
+        let tag = match tag.take() {
+            Some(t) => t,
+            None => parse_feature_tag(p)?,
+        };
+        let t = p.next()?.clone();
+        let value = match &t {
+            Token::Number { value, .. } => *value,
+            _ => return Err(p.new_error_for_next_token()),
+        };
+        list.push((tag, value));
+        match p.next() {
+            Ok(Token::Comma) => continue,
+            _ => break,
+        }
+    }
+    Ok(DeclValue::FontVariations(list))
+}
+
+/// font-variant-caps：七关键字值族。
+pub fn parse_font_variant_caps(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "normal" => FontVariantCapsKind::Normal,
+            "small-caps" => FontVariantCapsKind::SmallCaps,
+            "all-small-caps" => FontVariantCapsKind::AllSmallCaps,
+            "petite-caps" => FontVariantCapsKind::PetiteCaps,
+            "all-petite-caps" => FontVariantCapsKind::AllPetiteCaps,
+            "unicase" => FontVariantCapsKind::Unicase,
+            "titling-caps" => FontVariantCapsKind::TitlingCaps,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::FontVariantCaps)
+}
+
+/// F3d 通用 1-4 值 TRBL 展开（border-image 三长手共用；与 decl.rs
+/// collect_sides 同规则，此处为独立泛型避免跨文件借用）。
+fn trbl_expand<T: Clone>(vals: &[T]) -> [T; 4] {
+    match vals {
+        [a] => [a.clone(), a.clone(), a.clone(), a.clone()],
+        [a, b] => [a.clone(), b.clone(), a.clone(), b.clone()],
+        [a, b, c] => [a.clone(), b.clone(), c.clone(), b.clone()],
+        [a, b, c, d] => [a.clone(), b.clone(), c.clone(), d.clone()],
+        _ => unreachable!("调用方保证 1..=4 个值"),
+    }
+}
+
 // ---------- 属性分派 ----------
 
 /// 单条声明值解析入口：PropertyId → 值族解析器。
@@ -2297,12 +5286,33 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         })
         .map(DeclValue::ContainerType),
         P::ContainerName => parse_container_name(p),
+        // A1 行为提示（宿主可读、零绘制——docs/BEHAVIOR-HINT-PROPS.md）
+        P::Cursor => parse_cursor(p),
+        P::UserSelect => parse_user_select(p),
+        P::PointerEvents => parse_pointer_events(p),
+        P::CaretColor => parse_caret_color(p),
+        P::AccentColor => parse_accent_color(p),
+        // outline（A2）：width 复用 <line-width> 文法（BorderWidth 值族，
+        // none→None；槽位区分），color 复用 Color 值族，offset <length> 可负
+        P::OutlineWidth => parse_border_width(p),
+        P::OutlineStyle => parse_outline_style(p),
+        P::OutlineColor => parse_color(p),
+        P::OutlineOffset => parse_len(p),
         P::AnimationName => parse_animation_name(p),
         P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
         P::AnimationIterationCount => parse_iteration_count(p),
         P::AnimationTimingFunction => parse_timing_fn(p),
         P::AnimationDirection => parse_anim_direction(p),
         P::AnimationFillMode => parse_anim_fill_mode(p),
+        P::Hyphens => parse_hyphens(p),
+        P::BackdropFilter => parse_sc_effect(p),
+        P::TextOverflow => parse_text_overflow(p),
+        P::WebkitLineClamp => parse_webkit_line_clamp(p),
+        P::TextDecorationLine => parse_text_decoration_line(p),
+        P::TextDecorationStyle => parse_text_decoration_style(p),
+        P::TextDecorationColor => parse_color(p),
+        P::TextDecorationThickness => parse_text_decoration_thickness(p),
+        P::TextShadow => parse_text_shadow(p),
         P::FontWeight => parse_font_weight(p),
         P::Color
         | P::BackgroundColor
@@ -2316,7 +5326,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::OverflowX | P::OverflowY => parse_overflow(p),
         P::BoxSizing => parse_box_sizing(p),
         P::Transform => parse_transform(p),
-        P::Filter | P::ClipPath => parse_sc_effect(p),
+        P::Filter => parse_sc_effect(p),
         P::JustifyContent | P::AlignItems | P::AlignSelf | P::AlignContent => parse_align(p),
         P::FlexDirection => parse_flex_direction(p),
         P::FlexWrap => parse_flex_wrap(p),
@@ -2336,6 +5346,10 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::GridTemplateColumns | P::GridTemplateRows | P::GridAutoRows | P::GridAutoColumns => {
             parse_grid_tracks(p)
         }
+        P::GridTemplateAreas => parse_grid_areas(p),
+        P::GridRowStart | P::GridRowEnd | P::GridColumnStart | P::GridColumnEnd => {
+            parse_grid_line_spec(p)
+        }
         P::GridAutoFlow => keyword(p, |s| {
             Some(match_ignore_ascii_case!(s,
                 "row" => GridAutoFlowKind::Row,
@@ -2346,10 +5360,89 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         .map(DeclValue::GridAutoFlow),
         P::AspectRatio => parse_aspect_ratio(p),
         P::BackgroundImage => parse_background_image(p),
+        P::BackgroundRepeat => parse_background_repeat(p),
+        P::BackgroundAttachment => parse_background_attachment(p),
+        P::BackgroundPosition => parse_background_position(p),
+        P::BackgroundSize => parse_background_size(p),
+        P::BackgroundOrigin => parse_background_origin(p),
+        P::BackgroundClip => parse_background_clip(p),
+        P::ClipPath => parse_clip_path(p),
+        // F3d（ADR-0026）：border-image 全集五长手
+        P::BorderImageSource => parse_background_image_one(p).map(DeclValue::BorderImageSource),
+        P::BorderImageSlice => parse_border_image_slice(p),
+        P::BorderImageWidth => parse_border_image_width(p),
+        P::BorderImageOutset => parse_border_image_outset(p),
+        P::BorderImageRepeat => parse_border_image_repeat(p),
+        // F3d（ADR-0026）：字体深化五属性
+        P::FontStretch => parse_font_stretch(p),
+        P::WordSpacing => len_auto_with(p, &["normal"]).map(DeclValue::LenAuto),
+        P::FontFeatures => parse_font_features(p),
+        P::FontVariations => parse_font_variations(p),
+        P::FontVariantCaps => parse_font_variant_caps(p),
         P::BoxShadow => parse_box_shadow(p),
         P::BorderTopWidth | P::BorderRightWidth | P::BorderBottomWidth | P::BorderLeftWidth => {
             parse_border_width(p)
         }
+        // A8 逻辑属性（css-logical-1）：值族与物理同族完全一致（槽位区分
+        // + computed 期按 direction 定夺映射）；margin/inset 复用 LenAuto
+        //（auto 语义），padding 复用物理 padding 解析器，border 逻辑三族
+        // 复用 width/style/color 解析器，radius 逻辑四角复用角解析器。
+        P::Direction => keyword(p, |s| {
+            Some(match_ignore_ascii_case!(s,
+                "ltr" => DirectionKind::Ltr,
+                "rtl" => DirectionKind::Rtl,
+                _ => return None,
+            ))
+        })
+        .map(DeclValue::Direction),
+        P::UnicodeBidi => keyword(p, |s| {
+            Some(match_ignore_ascii_case!(s,
+                "normal" => UnicodeBidiKind::Normal,
+                "embed" => UnicodeBidiKind::Embed,
+                "isolate" => UnicodeBidiKind::Isolate,
+                "bidi-override" => UnicodeBidiKind::BidiOverride,
+                "isolate-override" => UnicodeBidiKind::IsolateOverride,
+                "plaintext" => UnicodeBidiKind::Plaintext,
+                _ => return None,
+            ))
+        })
+        .map(DeclValue::UnicodeBidi),
+        P::MarginInlineStart
+        | P::MarginInlineEnd
+        | P::MarginBlockStart
+        | P::MarginBlockEnd
+        | P::InsetInlineStart
+        | P::InsetInlineEnd
+        | P::InsetBlockStart
+        | P::InsetBlockEnd => parse_len_auto(p),
+        P::PaddingInlineStart
+        | P::PaddingInlineEnd
+        | P::PaddingBlockStart
+        | P::PaddingBlockEnd
+        | P::BorderStartStartRadius
+        | P::BorderStartEndRadius
+        | P::BorderEndStartRadius
+        | P::BorderEndEndRadius => parse_corner_radius(p),
+        P::Content => parse_content(p),
+        P::TextTransform => parse_text_transform(p),
+        P::OverflowWrap => parse_overflow_wrap(p),
+        P::WordBreak => parse_word_break(p),
+        P::ObjectFit => parse_object_fit(p),
+        P::ObjectPosition => parse_object_position(p),
+        P::Float => parse_float(p),
+        P::Clear => parse_clear(p),
+        P::BorderInlineStartWidth
+        | P::BorderInlineEndWidth
+        | P::BorderBlockStartWidth
+        | P::BorderBlockEndWidth => parse_border_width(p),
+        P::BorderInlineStartStyle
+        | P::BorderInlineEndStyle
+        | P::BorderBlockStartStyle
+        | P::BorderBlockEndStyle => parse_border_style(p),
+        P::BorderInlineStartColor
+        | P::BorderInlineEndColor
+        | P::BorderBlockStartColor
+        | P::BorderBlockEndColor => parse_color(p),
     }
 }
 

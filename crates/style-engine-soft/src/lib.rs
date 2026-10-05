@@ -12,11 +12,12 @@
 //! | op | 支持 | 备注 |
 //! |---|---|---|
 //! | FillRect | ✓ | 椭圆圆角逐像素覆盖测试 |
-//! | Gradient | ✓ | linear（CSS 角度）+ radial（RadialGeom 椭圆）；停点色仅 Absolute（其余视作全透明），位置仅 Px/Percent（其余/None 自动均布） |
+//! | Gradient | ✓ | linear（CSS 角度）+ radial（RadialGeom 椭圆）+ conic（ConicGeom 扫角，C3）；停点色仅 Absolute（其余视作全透明），位置仅 Px/Percent（其余/None 自动均布） |
 //! | Shadow | 近似 | 平移半透明矩形（blur 忽略——与 vello sink MVP 同偏差；inset=与盒求交） |
 //! | Image | ✓ | 最近邻采样（缩放无滤波） |
 //! | Border | 近似 | 直边带（Solid；Dashed/Dotted 近似为实线；圆角未斜切） |
 //! | PushClip/PopClip | ✓ | 矩形+圆角裁剪栈（裁剪矩节点随所在变换层） |
+//! | PushClipPath/PopClip | ✓ | 多边形裁剪（nonzero/evenodd 射线法，F3c） |
 //! | PushOpacity/PopOpacity | ✓ | 有界组 alpha（快照回混，ADR-0008；bbox 随变换层） |
 //! | PushScroll/PopScroll | ✓ | 平移折叠进变换矩阵（嵌套累加） |
 //! | PushTransform/PopTransform | ✓ | 逆映射逐像素反解 + 4×4 子采样覆盖；无旋转缩放时走中心采样快路径（与整数盒逐位一致）；斜向边缘为锯齿（无 AA，记录） |
@@ -34,7 +35,7 @@ use style_engine::css::property::{
     BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind,
 };
 use style_engine::css::value::{ColorValue, LengthPercentage};
-use style_engine::paint::RadialGeom;
+use style_engine::paint::{ConicGeom, RadialGeom};
 use style_engine::{DisplayList, PaintOp};
 
 /// 纯软件画布：RGBA8 直 alpha、sRGB 编码值（与 DisplayList 色彩语义一致）。
@@ -148,6 +149,22 @@ impl Mat {
     }
 }
 
+/// 多边形裁剪（F3c，ADR-0025）：nonzero winding / evenodd 射线法内含测试；
+/// 设备→源空间映射同 ClipRect（push 时刻矩阵之逆；奇异 = 恒不可见）。
+struct ClipPoly {
+    pts: Vec<(f32, f32)>,
+    nonzero: bool,
+    inv: Option<Mat>,
+}
+
+/// 活跃裁剪项（PushClip 矩形 / PushClipPath 多边形；单一 LIFO 栈）。
+enum Clip {
+    /// 矩形+圆角。
+    Rect(ClipRect),
+    /// 多边形。
+    Poly(ClipPoly),
+}
+
 struct ClipRect {
     x: f32,
     y: f32,
@@ -192,7 +209,7 @@ pub fn render_with_fonts(
     for px in canvas.pixels.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&base);
     }
-    let mut clips: Vec<ClipRect> = Vec::new();
+    let mut clips: Vec<Clip> = Vec::new();
     let mut mat = Mat::identity();
     let mut mat_stack: Vec<Mat> = Vec::new();
     let mut layers: Vec<OpacityLayer> = Vec::new();
@@ -214,7 +231,7 @@ pub fn render_with_fonts(
 fn apply_op(
     op: &PaintOp,
     canvas: &mut SoftCanvas,
-    clips: &mut Vec<ClipRect>,
+    clips: &mut Vec<Clip>,
     mat: &mut Mat,
     mat_stack: &mut Vec<Mat>,
     layers: &mut Vec<OpacityLayer>,
@@ -250,6 +267,8 @@ fn apply_op(
             radius,
             gradient,
             radial,
+            conic,
+            linear,
         } => {
             let (geom, line) = match gradient.kind {
                 GradientKind::Linear(angle) => {
@@ -282,7 +301,23 @@ fn apply_op(
                 }
             };
             let (bx, by, bw, bh) = (*x, *y, *width, *height);
+            // 锥形（C3，ADR-0017 D2）：圆心/起角 paint 层已解析（源空间）；
+            // 缺省几何 = 盒心 + 12 点方向起（−π/2）。
+            let cone = match gradient.kind {
+                GradientKind::Conic(_) => Some(conic.unwrap_or(ConicGeom {
+                    cx: x + width / 2.0,
+                    cy: y + height / 2.0,
+                    start: -(std::f32::consts::FRAC_PI_2),
+                })),
+                _ => None,
+            };
             let stops = gradient.stops.clone();
+            // F3d（ADR-0026）：linear 绝对几何优先——采样 = 对渐变线段
+            // （全盒解析，9-slice 区域共用）的归一投影；否则退回盒心投影。
+            let lin = *linear;
+            let line_len = lin
+                .map(|g| ((g.end[0] - g.start[0]).powi(2) + (g.end[1] - g.start[1]).powi(2)).sqrt())
+                .unwrap_or(line.2);
             fill_rect(
                 canvas,
                 clips,
@@ -293,21 +328,36 @@ fn apply_op(
                 bh,
                 radius,
                 move |fx, fy| {
-                    let t = match geom {
-                        // 线性：盒心投影归一（线过盒心，长 = |w·sin|+|h·cos|）
-                        None => {
-                            let (sx, sy, len) = line;
-                            let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
-                            ((fx - cx) * sx + (fy - cy) * sy) / len + 0.5
-                        }
-                        // 径向：椭圆归一距离
-                        Some(g) => {
-                            let nx = (fx - g.cx) / g.rx;
-                            let ny = (fy - g.cy) / g.ry;
-                            (nx * nx + ny * ny).sqrt()
+                    let t = if let Some(gm) = cone {
+                        // 锥形（C3）：扫角归一——atan2 自 +X 轴、Y-down 顺时针
+                        //（与 CSS/peniko Sweep 同向）；rel = ang − start 归一到 [0, 2π)。
+                        let ang = (fy - gm.cy).atan2(fx - gm.cx);
+                        let rel = ang - gm.start;
+                        rel.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU
+                    } else {
+                        match geom {
+                            // 线性：绝对渐变线段投影（F3d）优先，退回盒心投影
+                            None => {
+                                if let Some(gm) = lin {
+                                    let dx = gm.end[0] - gm.start[0];
+                                    let dy = gm.end[1] - gm.start[1];
+                                    ((fx - gm.start[0]) * dx + (fy - gm.start[1]) * dy)
+                                        / (dx * dx + dy * dy).max(1e-9)
+                                } else {
+                                    let (sx, sy, len) = line;
+                                    let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
+                                    ((fx - cx) * sx + (fy - cy) * sy) / len + 0.5
+                                }
+                            }
+                            // 径向：椭圆归一距离
+                            Some(g) => {
+                                let nx = (fx - g.cx) / g.rx;
+                                let ny = (fy - g.cy) / g.ry;
+                                (nx * nx + ny * ny).sqrt()
+                            }
                         }
                     };
-                    stop_at(&stops, t.clamp(0.0, 1.0), line.2)
+                    stop_at(&stops, t.clamp(0.0, 1.0), line_len)
                 },
             );
         }
@@ -351,12 +401,19 @@ fn apply_op(
             height,
             radius,
             pixels: img,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
             ..
         } => {
             if img.width == 0 || img.height == 0 {
                 return;
             }
             let (ix, iy, iw, ih) = (*x, *y, *width, *height);
+            // F3d 9-slice（ADR-0026）：采样窗 = src 子域（全图 = 0/0/源尺寸，
+            // 行为不变）；dest 盒 → 子域线性映射 → 源位图最近邻。
+            let (sxf, syf, swf, shf) = (*src_x, *src_y, *src_w, *src_h);
             let img = img.clone();
             fill_rect(
                 canvas,
@@ -368,9 +425,9 @@ fn apply_op(
                 ih,
                 radius,
                 move |fx, fy| {
-                    // 最近邻采样（源空间坐标 → 源位图）
-                    let u = ((fx - ix) / iw).clamp(0.0, 0.999_9);
-                    let v = ((fy - iy) / ih).clamp(0.0, 0.999_9);
+                    // 最近邻采样（源空间坐标 → 源位图；经 src 子域偏移缩放）
+                    let u = (sxf + (fx - ix) / iw.max(1e-6) * swf).clamp(0.0, 0.999_9);
+                    let v = (syf + (fy - iy) / ih.max(1e-6) * shf).clamp(0.0, 0.999_9);
                     let sx = (u * img.width as f32) as usize;
                     let sy = (v * img.height as f32) as usize;
                     let bytes = img.rgba.as_ref().as_ref();
@@ -426,17 +483,26 @@ fn apply_op(
             height,
             radius,
         } => {
-            clips.push(ClipRect {
+            clips.push(Clip::Rect(ClipRect {
                 x: *x,
                 y: *y,
                 w: *width,
                 h: *height,
                 radius: *radius,
                 inv: mat.invert(),
-            });
+            }));
         }
         PaintOp::PopClip => {
             clips.pop();
+        }
+        PaintOp::PushClipPath { points, nonzero } => {
+            // F3c（ADR-0025）：多边形裁剪——顶点视口坐标（源空间）直存，
+            // 内含测试经矩阵逆映射逐点判定（nonzero/evenodd 射线法）。
+            clips.push(Clip::Poly(ClipPoly {
+                pts: points.iter().map(|p| (p[0], p[1])).collect(),
+                nonzero: *nonzero,
+                inv: mat.invert(),
+            }));
         }
         PaintOp::PushOpacity {
             alpha,
@@ -525,11 +591,38 @@ fn apply_op(
             letter_spacing,
             line_height,
             text_align,
+            decorations,
+            shadows,
+            font_stretch,
+            word_spacing,
             ..
         } => {
             // v1 仅 Start 对齐（非 Start 按 Start 绘制——记录偏差）；
             // span 覆盖/合成粗斜体/max_advance 折行同属记录边界。
+            // F3d：features/variations 无消费点（FontBank 无 GSUB/gvar，
+            // 记录偏差）；stretch/word-spacing 伪合成消费（见 draw_text）。
             let _ = text_align;
+            // F2（ADR-0022 D5）：影字先绘（平移重发；blur=B 级在案——
+            // 软栅格逐字形模糊未启）。
+            for s in shadows.iter() {
+                draw_text(
+                    canvas,
+                    clips,
+                    *mat,
+                    *x + s.dx,
+                    *y + s.dy,
+                    text,
+                    s.color.components,
+                    *font_size,
+                    font_family,
+                    *letter_spacing,
+                    *line_height,
+                    *font_stretch,
+                    *word_spacing,
+                    bank,
+                    decorations,
+                );
+            }
             draw_text(
                 canvas,
                 clips,
@@ -542,7 +635,10 @@ fn apply_op(
                 font_family,
                 *letter_spacing,
                 *line_height,
+                *font_stretch,
+                *word_spacing,
                 bank,
+                decorations,
             );
         }
         // 未识别 op 忽略（PaintOp 非穷举演进——契约 sink 对未来 op 的默认
@@ -603,13 +699,52 @@ fn src_inside(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) ->
     px >= x && px < x + w && py >= y && py < y + h && corner_ok(px, py, x, y, w, h, r)
 }
 
-fn clip_ok(px: f32, py: f32, c: &ClipRect) -> bool {
-    let Some(inv) = &c.inv else { return false };
-    let (sx, sy) = inv.apply(px, py);
-    src_inside(sx, sy, c.x, c.y, c.w, c.h, &c.radius)
+/// 源空间多边形内含测试（F3c ADR-0025；nonzero = 环数 ≠ 0，evenodd =
+/// 射线穿越奇偶；半开边规则 yi ≤ py < yj 仅计上穿，顶点重合不双计；
+/// <3 顶点 = 空区域恒不可见）。
+fn poly_inside(px: f32, py: f32, pts: &[(f32, f32)], nonzero: bool) -> bool {
+    let n = pts.len();
+    if n < 3 {
+        return false;
+    }
+    let mut winding = 0i32;
+    let mut crossed = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = pts[i];
+        let (xj, yj) = pts[j];
+        // 有向边 i→j 相对点 P 的左侧量（>0 = P 在边左侧）
+        let side = (xj - xi) * (py - yi) - (px - xi) * (yj - yi);
+        if yi <= py {
+            if yj > py && side > 0.0 {
+                winding += 1;
+                crossed = !crossed;
+            }
+        } else if yj <= py && side < 0.0 {
+            winding -= 1;
+            crossed = !crossed;
+        }
+        j = i;
+    }
+    if nonzero { winding != 0 } else { crossed }
 }
 
-fn clips_ok(clips: &[ClipRect], px: f32, py: f32) -> bool {
+fn clip_ok(px: f32, py: f32, c: &Clip) -> bool {
+    match c {
+        Clip::Rect(r) => {
+            let Some(inv) = &r.inv else { return false };
+            let (sx, sy) = inv.apply(px, py);
+            src_inside(sx, sy, r.x, r.y, r.w, r.h, &r.radius)
+        }
+        Clip::Poly(p) => {
+            let Some(inv) = &p.inv else { return false };
+            let (sx, sy) = inv.apply(px, py);
+            poly_inside(sx, sy, &p.pts, p.nonzero)
+        }
+    }
+}
+
+fn clips_ok(clips: &[Clip], px: f32, py: f32) -> bool {
     clips.iter().all(|c| clip_ok(px, py, c))
 }
 
@@ -631,7 +766,7 @@ fn blend(dst: &mut [u8], src: [f32; 4]) {
 #[allow(clippy::too_many_arguments)]
 fn fill_rect(
     canvas: &mut SoftCanvas,
-    clips: &[ClipRect],
+    clips: &[Clip],
     mat: Mat,
     x: f32,
     y: f32,
@@ -705,7 +840,7 @@ fn fill_rect(
 /// 字形折线扫描线填充（设备空间折线 + 4×4 子行 16 级覆盖；非零环绕）。
 fn fill_polygons(
     canvas: &mut SoftCanvas,
-    clips: &[ClipRect],
+    clips: &[Clip],
     polys: &[Vec<(f32, f32)>],
     color: [f32; 4],
 ) {
@@ -814,10 +949,13 @@ fn add_span(cov: &mut [f32], base_x: f32, xa: f32, xb: f32) {
 /// Text op 光栅化：家族命中 [`FontBank`] → 最小 TrueType → 折线 → 扫描线。
 /// 基线与 Chromium 同法：hhea asc/desc 取整，行盒内半行距居中；
 /// normal（None）= round(asc)+round(desc)（与引擎 ㉔ 同式）。
+/// F3d（ADR-0026 D5）：font-stretch 伪合成（字形轮廓与步进同比 x 向
+/// 缩放 fw=stretch/100——DejaVu 无 width 轴，B 级在案）；
+/// word-spacing = 每空格字形后追加像素；features/variations 无消费点。
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
     canvas: &mut SoftCanvas,
-    clips: &[ClipRect],
+    clips: &[Clip],
     mat: Mat,
     x: f32,
     y: f32,
@@ -827,7 +965,10 @@ fn draw_text(
     family: &FontFamilyList,
     letter_spacing: f32,
     line_height: Option<f32>,
+    font_stretch: f32,
+    word_spacing: Option<f32>,
     bank: &FontBank,
+    decorations: &[style_engine::paint::TextDecorationPaint],
 ) {
     let Some(data) = family.0.iter().find_map(|f| match f {
         FamilyName::Named(name) => bank.get(name),
@@ -844,6 +985,9 @@ fn draw_text(
     let (asc_i, desc_i) = (asc.round(), desc.round());
     let lh = line_height.unwrap_or(asc_i + desc_i);
     let baseline = y + (lh - (asc_i + desc_i)) * 0.5 + asc_i;
+    // F3d：伪 font-stretch（x 向同比；100 = 恒等）+ word-spacing 空格追加。
+    let fw = (font_stretch / 100.0).max(0.01);
+    let ws = word_spacing.unwrap_or(0.0);
     let mut pen = x;
     for ch in text.chars() {
         // 未映射码点 → notdef（gid 0，DejaVu 为盒形——与 Chromium 同语义）
@@ -854,14 +998,44 @@ fn draw_text(
             for cont in &polys_font {
                 let mut dp = Vec::with_capacity(cont.len());
                 for &(fx, fy) in cont {
-                    let (sx, sy) = (pen + fx * scale, baseline - fy * scale);
+                    let (sx, sy) = (pen + fx * scale * fw, baseline - fy * scale);
                     dp.push(mat.apply(sx, sy));
                 }
                 polys.push(dp);
             }
             fill_polygons(canvas, clips, &polys, color);
         }
-        pen += font.advance(gid, scale) + letter_spacing;
+        pen += font.advance(gid, scale) * fw + letter_spacing;
+        if ch == ' ' {
+            pen += ws;
+        }
+    }
+    // F2（ADR-0022 D4）：装饰线（软栅格=矩形多边形填充；单行语义——
+    // 软 sink 不折行（记录边界），行几何=asc/desc 基线系；线位与 vello
+    // 同式：underline=baseline+desc*0.5、overline=baseline−asc*0.9、
+    // line-through=baseline−asc*0.5，B 级近似在案）。
+    if !decorations.is_empty() {
+        let end_x = pen; // 字形循环后 pen=总 advance 终点
+        for d in decorations {
+            let t = d.thickness_px.max(0.5);
+            let lines = [
+                (d.line & 1 != 0, baseline + desc * 0.5),
+                (d.line & 2 != 0, baseline - asc * 0.9),
+                (d.line & 4 != 0, baseline - asc * 0.5),
+            ];
+            for (on, cy) in lines {
+                if !on {
+                    continue;
+                }
+                let rect = vec![
+                    mat.apply(x, cy - t * 0.5),
+                    mat.apply(end_x, cy - t * 0.5),
+                    mat.apply(end_x, cy + t * 0.5),
+                    mat.apply(x, cy + t * 0.5),
+                ];
+                fill_polygons(canvas, clips, &[rect], d.color.components);
+            }
+        }
     }
 }
 
@@ -971,6 +1145,14 @@ mod tests {
             line_height: Some(19.0),
             letter_spacing: 0.0,
             text_align: style_engine::css::property::TextAlign::Start,
+            word_break: style_engine::css::property::WordBreakKind::Normal,
+            overflow_wrap: style_engine::css::property::OverflowWrapKind::Normal,
+            decorations: Vec::new(),
+            shadows: Vec::new(),
+            font_stretch: 100.0,
+            word_spacing: None,
+            font_features: Vec::new(),
+            font_variations: Vec::new(),
         }
     }
 
@@ -1036,6 +1218,82 @@ mod tests {
     }
 
     #[test]
+    fn conic_quadrant_colors() {
+        // C3（ADR-0017 D5）：0deg（12 点）起、四象限硬停点——扫角几何像素锁。
+        use style_engine::css::property::ConicSpec;
+        use style_engine::paint::ConicGeom;
+        let red = ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0]));
+        let blue = ColorValue::Absolute(rgba([0.0, 0.0, 1.0, 1.0]));
+        let p = |v: f32| Some(LengthPercentage::Percent(v));
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::Gradient {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 8.0,
+            radius: [0.0; 8],
+            gradient: Gradient {
+                kind: GradientKind::Conic(ConicSpec {
+                    from: Angle(0.0),
+                    position: (
+                        LengthPercentage::Percent(0.5),
+                        LengthPercentage::Percent(0.5),
+                    ),
+                }),
+                stops: vec![
+                    ColorStop {
+                        color: red.clone(),
+                        position: p(0.0),
+                    },
+                    ColorStop {
+                        color: red.clone(),
+                        position: p(0.25),
+                    },
+                    ColorStop {
+                        color: blue.clone(),
+                        position: p(0.25),
+                    },
+                    ColorStop {
+                        color: blue.clone(),
+                        position: p(0.5),
+                    },
+                    ColorStop {
+                        color: red.clone(),
+                        position: p(0.5),
+                    },
+                    ColorStop {
+                        color: red.clone(),
+                        position: p(0.75),
+                    },
+                    ColorStop {
+                        color: blue.clone(),
+                        position: p(0.75),
+                    },
+                    ColorStop {
+                        color: blue.clone(),
+                        position: p(1.0),
+                    },
+                ],
+            },
+            radial: None,
+            conic: Some(ConicGeom {
+                cx: 4.0,
+                cy: 4.0,
+                start: -(std::f32::consts::FRAC_PI_2),
+            }),
+            linear: None,
+        });
+        let c = render(&list, 8, 8, [0, 0, 0, 255]);
+        let px = |x: usize, y: usize| &c.pixels[(y * 8 + x) * 4..(y * 8 + x) * 4 + 3];
+        // 盒心 (4,4)、start=−π/2：45°→t=0.125 红；135°→0.375 蓝；
+        // 225°→0.625 红；315°→0.875 蓝（Y-down 顺时针 = CSS 同向）。
+        assert_eq!(px(5, 2), &[255, 0, 0], "右上 45° 应为红");
+        assert_eq!(px(5, 5), &[0, 0, 255], "右下 135° 应为蓝");
+        assert_eq!(px(2, 5), &[255, 0, 0], "左下 225° 应为红");
+        assert_eq!(px(2, 2), &[0, 0, 255], "左上 315° 应为蓝");
+    }
+
+    #[test]
     fn linear_gradient_endpoints() {
         // 90deg（向右）黑→白：左缘黑、右缘近白
         let mut list = DisplayList::default();
@@ -1059,6 +1317,8 @@ mod tests {
                 ],
             },
             radial: None,
+            conic: None,
+            linear: None,
         });
         let c = render(&list, 8, 2, [0, 0, 0, 255]);
         // 像素中心采样：左缘 t=0.5/8 → 255×0.0625=15.9→16；右缘 t=7.5/8 → 239
@@ -1306,5 +1566,86 @@ mod tests {
         list.ops.push(op_text(8.0, 12.0, "\u{e000}"));
         let c = render_with_fonts(&list, 48, 40, [255, 255, 255, 255], &bank);
         assert!(ink_bbox(&c).is_some(), "notdef 应绘制盒形墨迹");
+    }
+
+    #[test]
+    fn clip_path_polygon_pixels() {
+        // F3c（ADR-0025）：多边形裁剪逐像素内含——三角内红/外白
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushClipPath {
+            points: vec![[10.0, 10.0], [50.0, 10.0], [30.0, 50.0]],
+            nonzero: true,
+        });
+        list.ops.push(op_fill(
+            0.0,
+            0.0,
+            60.0,
+            60.0,
+            [0.0; 8],
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+        list.ops.push(PaintOp::PopClip);
+        let c = render(&list, 60, 60, [255, 255, 255, 255]);
+        let px = |x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 60 + x) * 4;
+            [
+                c.pixels[i],
+                c.pixels[i + 1],
+                c.pixels[i + 2],
+                c.pixels[i + 3],
+            ]
+        };
+        assert_eq!(px(30, 15), [255, 0, 0, 255], "三角内");
+        assert_eq!(px(29, 45), [255, 0, 0, 255], "近下顶点内");
+        assert_eq!(px(2, 2), [255, 255, 255, 255], "三角外(上)");
+        assert_eq!(px(55, 55), [255, 255, 255, 255], "三角外(右下)");
+        assert_eq!(px(2, 55), [255, 255, 255, 255], "三角外(左下)");
+    }
+
+    #[test]
+    fn clip_path_fill_rule_pixels() {
+        // F3c：{5/2} 五芒星序（0→2→4→1→3，真自交）——中心缠绕 2 → nonzero
+        // 填充 / evenodd 镂空；角尖缠绕 1 → 两规则均填
+        let pentagram = || {
+            let mut pts = Vec::new();
+            for k in 0..5usize {
+                let v = (k * 2) % 5;
+                let a = (v as f32) * std::f32::consts::TAU / 5.0 - std::f32::consts::FRAC_PI_2;
+                pts.push([30.0 + 25.0 * a.cos(), 30.0 + 25.0 * a.sin()]);
+            }
+            pts
+        };
+        let render_with = |nonzero: bool| {
+            let mut list = DisplayList::default();
+            list.ops.push(PaintOp::PushClipPath {
+                points: pentagram(),
+                nonzero,
+            });
+            list.ops.push(op_fill(
+                0.0,
+                0.0,
+                60.0,
+                60.0,
+                [0.0; 8],
+                [1.0, 0.0, 0.0, 1.0],
+            ));
+            list.ops.push(PaintOp::PopClip);
+            render(&list, 60, 60, [255, 255, 255, 255])
+        };
+        let px = |c: &SoftCanvas, x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 60 + x) * 4;
+            [
+                c.pixels[i],
+                c.pixels[i + 1],
+                c.pixels[i + 2],
+                c.pixels[i + 3],
+            ]
+        };
+        let nz = render_with(true);
+        assert_eq!(px(&nz, 30, 30), [255, 0, 0, 255], "nonzero 中心填充");
+        assert_eq!(px(&nz, 30, 10), [255, 0, 0, 255], "角臂两规则均填");
+        let eo = render_with(false);
+        assert_eq!(px(&eo, 30, 30), [255, 255, 255, 255], "evenodd 中心镂空");
+        assert_eq!(px(&eo, 30, 10), [255, 0, 0, 255], "角臂两规则均填");
     }
 }

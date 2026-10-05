@@ -13,3 +13,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 image = { workspace = true }
+
+[dev-dependencies]
+# vello 像素回归（Phase 0 前置⑤）：GPU sink 从未有过像素级保护，先于
+# 一切绘制特性建立；仅测试面消费（wgpu 不进主依赖树）。
+style-engine-vello = { path = "../style-engine-vello" }

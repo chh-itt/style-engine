@@ -4,7 +4,7 @@
 //! （ADR-0005/0006）。`frame()` 单调推进 sync→style→layout，返回
 //! 生成号戳记的布局帧（T4 起叠加 DisplayList）。
 
-use crate::computed::{ComputedStyle, compute_node_in};
+use crate::computed::{ComputedStyle, compute_node_from_cascade, compute_node_in};
 use crate::css::decl::parse_inline_declarations;
 use crate::css::stylesheet::{MediaEnv, Stylesheet};
 use crate::error::ParseReport;
@@ -12,6 +12,29 @@ use crate::layout::map_style;
 use crate::tree::{NodeId, StyleNode, StyleTree};
 use std::collections::HashMap;
 use std::hash::Hash;
+
+/// B2：宿主 @import 加载器（url → CSS 文本；Send+Sync 引擎契约）。
+pub type ImportLoader = Box<dyn Fn(&str) -> Option<String> + Send + Sync + 'static>;
+
+/// B4 absolute 重挂扫描栈项：(节点, 样式父, 最近 cb 候选（None=尚无）,
+/// 豁免子树, 豁免标记)。
+type AbsCbStackItem = (NodeId, Option<NodeId>, Option<NodeId>, Option<NodeId>, bool);
+
+/// E5 grid 语境线名表：模板顶层线名槽 → 线名列表（1 基线号 = 序+1）。
+type GridLineMap = std::collections::BTreeMap<String, Vec<i16>>;
+/// E5 grid 语境区域表：区域名 → (row0, col0, row1, col1) 0 基格界。
+type GridAreaMap = std::collections::BTreeMap<String, (usize, usize, usize, usize)>;
+
+/// C2 文本截断候选：(节点, 容器可用宽, 原文, 计算样式, span 表,
+/// 行数上限 None=ellipsis)。
+type TruncCandidate = (
+    NodeId,
+    f32,
+    String,
+    ComputedStyle,
+    Vec<(u32, u32, ComputedStyle)>,
+    Option<f32>,
+);
 
 /// 布局帧条目（border-box；坐标相对视口、滚动前）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,6 +71,24 @@ impl<K: Copy + PartialEq> Frame<K> {
     /// 按 key 查找布局盒。
     pub fn find(&self, key: K) -> Option<&LayoutEntry<K>> {
         self.boxes.iter().find(|b| b.key == key)
+    }
+
+    /// 布局几何人读视图（F3e，ADR-0027 D1）：本帧全部布局盒按树序一行
+    /// 一个（`key x y w h`）。与 [`StyleEngine::layout_tree_dump`](crate::StyleEngine::layout_tree_dump)
+    /// 的结构树视图分离——Frame 有几何无树、引擎有树无帧几何，宿主按需
+    /// 取用（键格式化要求 `K: Debug`）。
+    pub fn boxes_dump(&self) -> String
+    where
+        K: std::fmt::Debug,
+    {
+        let mut out = format!("boxes={}\n", self.boxes.len());
+        for b in &self.boxes {
+            out.push_str(&format!(
+                "key={:?} x={:.2} y={:.2} w={:.2} h={:.2}\n",
+                b.key, b.x, b.y, b.width, b.height
+            ));
+        }
+        out
     }
 }
 
@@ -158,14 +199,110 @@ unsafe impl Send for SendSyncTaffy {}
 #[allow(unsafe_code)]
 unsafe impl Sync for SendSyncTaffy {}
 
+/// F2（ADR-0022 D1）：结算 pass 种类——依赖声明 + 拓扑调度（替换 frame
+/// 硬编码序 calc→tables→columns→floats→lines）。pass 内脏区跳过（增量
+/// 布局）=F3 范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettlePassKind {
+    /// 延迟 calc 求值（三期①）——几何结算源头。
+    Calc,
+    /// 表格列模板结算。
+    Tables,
+    /// 多列结算。
+    Columns,
+    /// 浮动结算（E4）。
+    Floats,
+    /// IFC 行打包结算（F1）。
+    Lines,
+}
+
+impl SettlePassKind {
+    /// 声明依赖（被依赖者须先运行）。
+    fn deps(self) -> &'static [SettlePassKind] {
+        match self {
+            SettlePassKind::Calc => &[],
+            SettlePassKind::Tables => &[SettlePassKind::Calc],
+            SettlePassKind::Columns => &[SettlePassKind::Calc],
+            SettlePassKind::Floats => &[SettlePassKind::Columns],
+            SettlePassKind::Lines => &[SettlePassKind::Floats],
+        }
+    }
+
+    /// 拓扑调度序（稳定插入序；依赖为静态无环表——环即 bug，
+    /// debug_assert 防回归）。
+    fn schedule() -> Vec<SettlePassKind> {
+        let all = [
+            SettlePassKind::Calc,
+            SettlePassKind::Tables,
+            SettlePassKind::Columns,
+            SettlePassKind::Floats,
+            SettlePassKind::Lines,
+        ];
+        let mut order: Vec<SettlePassKind> = Vec::with_capacity(all.len());
+        let mut remaining: Vec<SettlePassKind> = all.to_vec();
+        while !remaining.is_empty() {
+            let mut progressed = false;
+            let mut i = 0;
+            while i < remaining.len() {
+                if remaining[i].deps().iter().all(|d| order.contains(d)) {
+                    let p = remaining.remove(i);
+                    order.push(p);
+                    progressed = true;
+                } else {
+                    i += 1;
+                }
+            }
+            debug_assert!(progressed, "settle pass dependency cycle");
+            if !progressed {
+                break;
+            }
+        }
+        order
+    }
+}
+
 /// 样式引擎实例。K 为宿主节点键（Copy + Eq + Hash）。
 pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     tree: StyleTree,
     sheet: Stylesheet,
+    /// B1：用户起源样式表（css-cascade-5 User 层；set_user_stylesheet 注入）。
+    user_sheet: Option<Stylesheet>,
+    /// B3：当前焦点链锚点（set_focus 管理 FOCUS/FOCUS_VISIBLE/FOCUS_WITHIN
+    /// 三态迁移；None = 无焦点）。
+    focused_node: Option<NodeId>,
+    /// B4：文档级 @property 注册表（name → 规则；sheet 变更点统一重建）。
+    registered_props: std::collections::BTreeMap<String, crate::css::property_rule::PropertyRule>,
+    /// F3d（ADR-0026 D4）：文档级 @font-face 登记表（合并序 = user → 主表
+    /// → 附加表；同族后规则胜；sheet 变更点统一重建）。字体字节仍由宿主
+    /// add_font 推送——登记表仅描述映射与筛选元数据。
+    font_faces: Vec<crate::css::stylesheet::FontFaceRule>,
+    /// C1（ADR-0015）：伪元素注册表 (origin NodeId, which) → 伪节点 NodeId
+    ///（引擎 materialize_pseudos 持有；宿主镜像通道不含伪键）。
+    pseudo_ids: std::collections::BTreeMap<(NodeId, u8), NodeId>,
+    /// B2：主表源文本留存（rebuild_sheets 重解析用——嵌套 @import 的
+    /// 未决指令只在整表重解析时存活）。
+    primary_source: String,
+    /// B2：附加 author 表（登记序级联，句柄化移除；源文本留存供层树
+    /// 重建与导入重拼接）。
+    extra_sheets: Vec<(u64, String, Stylesheet)>,
+    next_sheet_id: u64,
+    /// B2：文档全局层树（跨表层序唯一基准；附着序 = 先现序）。
+    doc_layers: crate::css::stylesheet::LayerRegistry,
+    /// B2：内存导入源（@import url → CSS 文本）。
+    imports: std::collections::BTreeMap<String, String>,
+    /// B2：宿主导入加载器（优先于内存源；Send+Sync 引擎契约）。
+    import_loader: Option<ImportLoader>,
     media: MediaEnv,
     key_to_node: HashMap<K, NodeId>,
     node_to_key: HashMap<NodeId, K>,
     root_key: Option<K>,
+    /// ADR-0010 多根：overlay 根（插入序）。首个 `insert(None)` 为文档根
+    ///（`root_key`），后续 `insert(None)` 依次入列——弹窗/浮层载体。
+    overlay_roots: Vec<K>,
+    /// ADR-0010：top-layer 名单（进层序），绘制于全部普通根之后。
+    top_layer: Vec<K>,
+    /// ADR-0010：上次 sync_root_order 已应用的根序（稳态帧零操作）。
+    root_order_applied: Vec<K>,
     /// 宿主推送的叶测量（文本叶，T5 前由宿主提供）。
     measures: HashMap<NodeId, (f32, f32)>,
     /// 节点滚动偏移（绘制层用；布局不消费）。
@@ -208,10 +345,29 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     /// 三期⑤c：列规条带（相对容器 border-box 原点）——settle_column_rules
     /// 逐帧全量重建（几何随列平衡/文本换行漂移，无稳态签名可复用）。
     column_rules: HashMap<NodeId, Vec<crate::paint::ColumnRuleSeg>>,
+    /// 命中几何表（F3a，ADR-0023）：最近一帧 paint 期收集；hit_test 逆序查询。
+    hit_rects: Vec<crate::paint::HitRect>,
     /// 阶段2③：容器内容盒尺寸快照（上一布局 pass 的 record_container_sizes
     /// 记录；restyle 期 @container 求值消费；缺席 = unknown → 特性不命中）。
     container_sizes: HashMap<NodeId, [f32; 2]>,
     styles: HashMap<NodeId, ComputedStyle>,
+    /// C4（ADR-0018）：::selection 通道样式（origin 直配；宿主读取）。
+    selection_styles: HashMap<NodeId, ComputedStyle>,
+    /// C4（ADR-0018）：::placeholder 通道样式（origin 直配；宿主读取）。
+    placeholder_styles: HashMap<NodeId, ComputedStyle>,
+    /// E4（ADR-0019）：浮动覆写触点集（还原清单——还原=map_style 重放
+    /// pristine 样式，不缓存 taffy::Style 值（含 !Send/!Sync 的
+    /// CheapCloneStr，会炸 assert_send_sync）。
+    float_touched: std::collections::HashSet<NodeId>,
+    /// F1（ADR-0021）：行内运行参与者集——settle_lines 按运行上下文宽度
+    /// 测置的文本叶/盒；文本 remeasure 全宽重测豁免（否则破坏打包结果）。
+    inline_run_participants: std::collections::HashSet<NodeId>,
+    /// F2（ADR-0022 D2）：文本截断 override（ellipsis/line-clamp）——
+    /// apply_text_truncation 生成，paint Text op 文本替换消费。
+    text_overrides: std::collections::HashMap<NodeId, String>,
+    /// A9：注册字体度量（add_font 时探测：族名表 → ch/ex/ic 每 em 值；
+    /// 未注册族回落近似缺省 ch/ex=0.5em、ic=1em，B 级在案）。
+    font_metrics: Vec<(Vec<String>, crate::css::value::FontMetrics)>,
     /// span 级样式（T5c）：NodeId → (字节起点, 字节终点, 覆盖后的 ComputedStyle)。
     span_styles: HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
     /// 文本叶父指针（T5c-2）：换行重测量需读包含块宽度。
@@ -245,10 +401,24 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Self {
             tree: StyleTree::new(),
             sheet: Stylesheet::default(),
+            user_sheet: None,
+            focused_node: None,
+            registered_props: std::collections::BTreeMap::new(),
+            font_faces: Vec::new(),
+            pseudo_ids: std::collections::BTreeMap::new(),
+            primary_source: String::new(),
+            extra_sheets: Vec::new(),
+            next_sheet_id: 0,
+            doc_layers: crate::css::stylesheet::LayerRegistry::default(),
+            imports: std::collections::BTreeMap::new(),
+            import_loader: None,
             media: MediaEnv::default(),
             key_to_node: HashMap::new(),
             node_to_key: HashMap::new(),
             root_key: None,
+            overlay_roots: Vec::new(),
+            top_layer: Vec::new(),
+            root_order_applied: Vec::new(),
             measures: HashMap::new(),
             scroll_offsets: HashMap::new(),
             epoch: 0,
@@ -274,8 +444,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             multicols: Vec::new(),
             multicol_state: HashMap::new(),
             column_rules: HashMap::new(),
+            hit_rects: Vec::new(),
             container_sizes: HashMap::new(),
             styles: HashMap::new(),
+            selection_styles: HashMap::new(),
+            placeholder_styles: HashMap::new(),
+            float_touched: std::collections::HashSet::new(),
+            inline_run_participants: std::collections::HashSet::new(),
+            text_overrides: std::collections::HashMap::new(),
+            font_metrics: Vec::new(),
             span_styles: HashMap::new(),
             parents: HashMap::new(),
             #[cfg(feature = "text")]
@@ -290,15 +467,301 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
 
     // ---------- 推送协议 ----------
 
-    /// 全量替换样式表（容错：坏规则跳过并记录）。
+    /// 全量替换样式表（容错：坏规则跳过并记录）。B2：替换主表并全量重建
+    /// 文档层树与导入拼接（附加表保留、按登记序重附着——层序数跨表不可比，
+    /// 以源文本重解析获得干净表内序数再映射文档序）。
     pub fn set_stylesheet(&mut self, source: &str) -> ParseReport {
         let sheet = crate::css::stylesheet::parse_stylesheet(source);
+        self.primary_source = source.to_string();
         self.sheet = sheet;
+        self.rebuild_sheets();
         // 阶段2③：新规则集的容器集合可变，旧尺寸快照可能误导新规则求值。
         self.container_sizes.clear();
         self.epoch += 1;
         self.dirty_style = true;
         self.sheet.report.clone()
+    }
+
+    /// B2：附加 author 样式表（返回句柄供 remove_stylesheet；级联序 =
+    /// 主表之后按登记序，后表胜平手）。@import 在附着期经导入源拼接。
+    pub fn add_stylesheet(&mut self, source: &str) -> u64 {
+        self.next_sheet_id += 1;
+        let handle = self.next_sheet_id;
+        let sheet = crate::css::stylesheet::parse_stylesheet(source);
+        self.extra_sheets.push((handle, source.to_string(), sheet));
+        self.rebuild_sheets();
+        self.container_sizes.clear();
+        self.epoch += 1;
+        self.dirty_style = true;
+        handle
+    }
+
+    /// B2：移除附加样式表（句柄无效返回 false）。
+    pub fn remove_stylesheet(&mut self, handle: u64) -> bool {
+        let before = self.extra_sheets.len();
+        self.extra_sheets.retain(|(id, _, _)| *id != handle);
+        let removed = self.extra_sheets.len() != before;
+        if removed {
+            self.rebuild_sheets();
+            self.container_sizes.clear();
+            self.epoch += 1;
+            self.dirty_style = true;
+        }
+        removed
+    }
+
+    /// B2：内存导入源（@import url → CSS 文本；未命中再试宿主 loader）。
+    /// 变更后重建已附着表（未解析的导入可补齐）。
+    pub fn set_import_source(&mut self, url: &str, css: &str) {
+        self.imports.insert(url.to_string(), css.to_string());
+        self.rebuild_sheets();
+        self.dirty_style = true;
+    }
+
+    /// B2：宿主导入加载器（优先于内存源；None = 移除）。
+    pub fn set_import_loader(&mut self, loader: Option<ImportLoader>) {
+        self.import_loader = loader;
+        self.rebuild_sheets();
+        self.dirty_style = true;
+    }
+
+    /// B2：导入解析器（宿主 loader 优先，回退内存源）。
+    fn import_resolver(&self) -> impl FnMut(&str) -> Option<String> + '_ {
+        move |url: &str| {
+            if let Some(loader) = &self.import_loader
+                && let Some(css) = loader(url)
+            {
+                return Some(css);
+            }
+            self.imports.get(url).cloned()
+        }
+    }
+
+    /// B2：附着单表（@import 拼接 + 层树并入文档树重映射 rank）。
+    fn attach_sheet(&mut self, sheet: &mut Stylesheet) {
+        {
+            let mut seen = Vec::new();
+            let mut resolver = self.import_resolver();
+            crate::css::stylesheet::resolve_imports(sheet, &mut resolver, &[], 0, &mut seen);
+        }
+        sheet.remap_layers_to_doc(&mut self.doc_layers);
+    }
+
+    /// B2：文档级全量重建（主表 → 附加表按登记序）：重解析附加表（干净
+    /// 表内层序数）→ 附着（导入拼接 + 文档层树重映射）。
+    fn rebuild_sheets(&mut self) {
+        self.doc_layers = crate::css::stylesheet::LayerRegistry::default();
+        // B2 修订：主表从源文本重解析（而非复用既有解析产物）——嵌套
+        // @import 的未决指令（子表待源）只在整表重解析时存活；最终一次
+        // rebuild（全部导入源就位后）完成完整拼接。
+        let mut primary = crate::css::stylesheet::parse_stylesheet(&self.primary_source);
+        self.attach_sheet(&mut primary);
+        self.sheet = primary;
+        for i in 0..self.extra_sheets.len() {
+            let source = self.extra_sheets[i].1.clone();
+            let mut sheet = crate::css::stylesheet::parse_stylesheet(&source);
+            self.attach_sheet(&mut sheet);
+            self.extra_sheets[i].2 = sheet;
+        }
+        // B4：注册表随全量重建刷新（add/remove/import 路由皆经此）。
+        self.rebuild_registered_props();
+        // F3d：@font-face 登记表同点刷新。
+        self.rebuild_font_faces();
+    }
+
+    /// B2：author 表组快照（主表在前、附加表按登记序 = 文档序）。
+    fn author_sheets(&self) -> Vec<&Stylesheet> {
+        std::iter::once(&self.sheet)
+            .chain(self.extra_sheets.iter().map(|(_, _, s)| s))
+            .collect()
+    }
+
+    /// B2：全表集合是否含 @container 规则（收敛环 pass 判据）。
+    fn any_container_rules(&self) -> bool {
+        self.sheet.has_container_rules
+            || self
+                .extra_sheets
+                .iter()
+                .any(|(_, _, s)| s.has_container_rules)
+    }
+
+    /// B4：重建文档级 @property 注册表（sheet 变更点统一调用）。合并序 =
+    /// user_sheet → 主表 → 附加表登记序（author 覆 user，与起源优先级
+    /// 同构）；同名后规则覆盖（spec：@property 全部层叠前按文档序处理）。
+    fn rebuild_registered_props(&mut self) {
+        self.registered_props.clear();
+        if let Some(u) = &self.user_sheet {
+            for r in &u.property_rules {
+                self.registered_props.insert(r.name.clone(), r.clone());
+            }
+        }
+        for r in &self.sheet.property_rules {
+            self.registered_props.insert(r.name.clone(), r.clone());
+        }
+        for (_, _, s) in &self.extra_sheets {
+            for r in &s.property_rules {
+                self.registered_props.insert(r.name.clone(), r.clone());
+            }
+        }
+    }
+
+    /// F3d（ADR-0026 D4）：重建文档级 @font-face 登记表（与 @property 同
+    /// 变更点）。合并序 = user_sheet → 主表 → 附加表登记序；同族后规则
+    /// 胜（css-fonts-4：同族多条 @font-face 按文档序后者覆盖）。字体字节
+    /// 仍由宿主 add_font 推送——登记表仅描述映射与筛选元数据。
+    fn rebuild_font_faces(&mut self) {
+        self.font_faces.clear();
+        if let Some(u) = &self.user_sheet {
+            self.font_faces.extend(u.font_faces.iter().cloned());
+        }
+        self.font_faces
+            .extend(self.sheet.font_faces.iter().cloned());
+        for (_, _, s) in &self.extra_sheets {
+            self.font_faces.extend(s.font_faces.iter().cloned());
+        }
+    }
+
+    /// C1（ADR-0015）：伪元素实体化 pass（frame 内 sync_root_order 之后、
+    /// rebuild_taffy 之前）。全表无伪元素规则 → 清除全部（零成本快路径）；
+    /// 有 → 为每个宿主节点确保 ::before 首子 / ::after 末子存在并归位。
+    /// 伪节点裸 StyleNode（无身份——selectors 经 originating_element 回
+    /// origin 匹配左复合）；文本由 sync_pseudo_text 按 content 计算值供给。
+    fn materialize_pseudos(&mut self) {
+        let any_pseudo = self.sheet.has_pseudo_rules
+            || self.user_sheet.as_ref().is_some_and(|s| s.has_pseudo_rules)
+            || self.extra_sheets.iter().any(|(_, _, s)| s.has_pseudo_rules);
+        if !any_pseudo {
+            if self.pseudo_ids.is_empty() {
+                return;
+            }
+            let ids: Vec<NodeId> = self.pseudo_ids.values().copied().collect();
+            for pid in ids {
+                self.tree.remove(pid);
+            }
+            self.pseudo_ids.clear();
+            self.dirty_struct = true;
+            return;
+        }
+        // DFS 全树（超根起，覆盖文档根与 overlay 根）。
+        let mut stack = vec![self.tree.root()];
+        let mut changed = false;
+        while let Some(cur) = stack.pop() {
+            if !self.tree.is_pseudo(cur) {
+                let host = cur;
+                // ::before 首子
+                let b = match self.pseudo_ids.get(&(host, 0)).copied() {
+                    Some(e) => e,
+                    None => {
+                        let nid = self.tree.insert_child(
+                            host,
+                            crate::tree::StyleNode {
+                                pseudo: Some(crate::tree::PseudoWhich::Before),
+                                ..Default::default()
+                            },
+                        );
+                        self.pseudo_ids.insert((host, 0), nid);
+                        changed = true;
+                        nid
+                    }
+                };
+                // ::after 末子
+                let a = match self.pseudo_ids.get(&(host, 1)).copied() {
+                    Some(e) => e,
+                    None => {
+                        let nid = self.tree.insert_child(
+                            host,
+                            crate::tree::StyleNode {
+                                pseudo: Some(crate::tree::PseudoWhich::After),
+                                ..Default::default()
+                            },
+                        );
+                        self.pseudo_ids.insert((host, 1), nid);
+                        changed = true;
+                        nid
+                    }
+                };
+                // 归位：before + 宿主子序 + after（伪节点不参与宿主结构序）
+                let host_kids: Vec<NodeId> = self
+                    .tree
+                    .children(host)
+                    .iter()
+                    .copied()
+                    .filter(|c| *c != b && *c != a && !self.tree.is_pseudo(*c))
+                    .collect();
+                let mut want = Vec::with_capacity(host_kids.len() + 2);
+                want.push(b);
+                want.extend(host_kids);
+                want.push(a);
+                if self.tree.children(host) != want.as_slice() {
+                    self.tree.set_children(host, &want);
+                    changed = true;
+                }
+            }
+            stack.extend(self.tree.children(cur).iter().copied());
+        }
+        if changed {
+            self.dirty_struct = true;
+        }
+    }
+
+    /// C1（ADR-0015）：伪元素文本供给（frame 内 restyle 之后、布局之前）。
+    /// 按 content 计算值写 tree.node.text 并登记测量（remeasure pass 同式；
+    /// 折行由 T5c-2 收敛）。content none/normal → text 清空 + 撤测量
+    ///（盒经 map_style display:none 移除）。
+    #[cfg(feature = "text")]
+    fn sync_pseudo_text(&mut self) {
+        if self.pseudo_ids.is_empty() {
+            return;
+        }
+        let entries: Vec<NodeId> = self.pseudo_ids.values().copied().collect();
+        for pid in entries {
+            let Some(cs) = self.styles.get(&pid).cloned() else {
+                continue;
+            };
+            let text = match cs.content() {
+                crate::css::property::ContentValue::Str(s) => Some(s),
+                _ => None,
+            };
+            if self.tree.node(pid).text == text {
+                continue;
+            }
+            self.tree.node_mut(pid).text = text.clone();
+            match text {
+                Some(t) => {
+                    let (w, h) = self.text.measure(&t, &cs, &self.map_env());
+                    self.measures.insert(pid, (w, h));
+                    self.auto_text.insert(pid);
+                    if let Some(&tid) = self.taffy_node.get(&pid) {
+                        let mut ts = map_style(&cs, &self.map_env());
+                        ts.size = taffy::prelude::Size {
+                            width: taffy::prelude::Dimension::auto(),
+                            height: taffy::prelude::Dimension::length(h),
+                        };
+                        let _ = self.taffy.set_style(tid, ts);
+                    }
+                }
+                None => {
+                    self.measures.remove(&pid);
+                    self.auto_text.remove(&pid);
+                }
+            }
+        }
+    }
+
+    /// B3：全表集合是否含 `:has()` 相对选择器规则（变更类失效升级全量
+    /// 重样式判据——相对选择器命中依赖后代/兄弟结构，增量子树 restyle
+    /// 不感知远端变化）。user_sheet 变更本身即全量重样式，但后续增量
+    /// 变更需此判据感知。
+    fn any_has_rules(&self) -> bool {
+        self.sheet.has_relative_selectors
+            || self
+                .user_sheet
+                .as_ref()
+                .is_some_and(|s| s.has_relative_selectors)
+            || self
+                .extra_sheets
+                .iter()
+                .any(|(_, _, s)| s.has_relative_selectors)
     }
 
     /// 更新媒体环境（视口外因素：配色/动效偏好）。
@@ -307,6 +770,64 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.media = env;
             self.dirty_style = true;
         }
+    }
+
+    /// B3：焦点族管理（:focus / :focus-visible / :focus-within）。整体迁移
+    /// 语义：清旧焦点链（焦点节点 FOCUS|FOCUS_VISIBLE + 祖先链
+    /// FOCUS_WITHIN）→ 施加新链（焦点节点 FOCUS（focus_visible 时加
+    /// FOCUS_VISIBLE）+ 祖先链 FOCUS_WITHIN）。focus_visible 的启发判定
+    /// （键盘 vs 指针）归宿主——引擎无输入设备知识。
+    pub fn set_focus(
+        &mut self,
+        key: Option<K>,
+        focus_visible: bool,
+    ) -> Result<(), crate::error::ContractError> {
+        let new_id = match &key {
+            Some(k) => Some(
+                *self
+                    .key_to_node
+                    .get(k)
+                    .ok_or(crate::error::ContractError::UnknownNode)?,
+            ),
+            None => None,
+        };
+        // 无 early-return：同节点重设（focus_visible 标记翻转）也要走
+        // 全链清旧/施新——否则 :focus-visible 切换不生效。
+        // 清旧链：焦点节点三态 + 祖先链 FOCUS_WITHIN。
+        if let Some(old) = self.focused_node {
+            let node = self.tree.node_mut(old);
+            node.state
+                .remove(crate::tree::NodeState::FOCUS | crate::tree::NodeState::FOCUS_VISIBLE);
+            let mut cur = self.tree.parent(old);
+            while let Some(p) = cur {
+                self.tree
+                    .node_mut(p)
+                    .state
+                    .remove(crate::tree::NodeState::FOCUS_WITHIN);
+                cur = self.tree.parent(p);
+            }
+        }
+        // 施加新链。
+        if let Some(new) = new_id {
+            {
+                let node = self.tree.node_mut(new);
+                node.state.insert(crate::tree::NodeState::FOCUS);
+                if focus_visible {
+                    node.state.insert(crate::tree::NodeState::FOCUS_VISIBLE);
+                }
+            }
+            let mut cur = self.tree.parent(new);
+            while let Some(p) = cur {
+                self.tree
+                    .node_mut(p)
+                    .state
+                    .insert(crate::tree::NodeState::FOCUS_WITHIN);
+                cur = self.tree.parent(p);
+            }
+        }
+        self.focused_node = new_id;
+        self.dirty_style = true;
+        Ok(())
     }
 
     /// 插入节点。`parent=None` 声明根（至多一次）。
@@ -338,14 +859,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
         match parent {
             None => {
-                if self.root_key.is_some() {
-                    return Err(crate::error::ContractError::RootExists);
+                // ADR-0010 多根：用户根 = 合成超根之子。首个 = 文档根
+                //（单根语义逐位保留），后续 = overlay 根（弹窗/浮层）。
+                let id = self.tree.insert_child(self.tree.root(), node);
+                self.key_to_node.insert(key, id);
+                self.node_to_key.insert(id, key);
+                if self.root_key.is_none() {
+                    self.root_key = Some(key);
+                } else {
+                    self.overlay_roots.push(key);
                 }
-                let root = self.tree.root();
-                *self.tree.node_mut(root) = node;
-                self.key_to_node.insert(key, root);
-                self.node_to_key.insert(root, key);
-                self.root_key = Some(key);
                 self.dirty_struct = true;
                 Ok(())
             }
@@ -383,9 +906,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.auto_text.clear();
             self.scroll_offsets.clear();
             self.root_key = None;
+            self.overlay_roots.clear();
+            self.top_layer.clear();
+            self.root_order_applied.clear();
             self.taffy_root = None;
             self.taffy_node.clear();
             self.styles.clear();
+            self.focused_node = None;
+            self.pseudo_ids.clear();
             self.dirty_struct = true;
             self.dirty_style = true;
             return Ok(());
@@ -397,6 +925,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             doomed.push(cur);
             stack.extend(self.tree.children(cur).iter().copied());
         }
+        // B3：焦点链锚点落在本子树 → 清除（防 NodeId 槽位复用悬垂）。
+        if let Some(f) = self.focused_node
+            && doomed.contains(&f)
+        {
+            self.focused_node = None;
+        }
+        // C1：伪元素注册表按 doomed origin 清理（伪节点为 origin 子节点，
+        // 已随子树 doomed 消亡；防 NodeId 槽位复用悬垂）。
+        self.pseudo_ids
+            .retain(|(origin, _), _| !doomed.contains(origin));
         for d in doomed {
             if let Some(k) = self.node_to_key.remove(&d) {
                 self.key_to_node.remove(&k);
@@ -415,7 +953,32 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.taffy_node.remove(&d);
         }
         self.tree.remove(id);
+        self.overlay_roots.retain(|&k| k != key);
+        self.top_layer.retain(|&k| k != key);
         self.dirty_struct = true;
+        Ok(())
+    }
+
+    /// ADR-0010：把 overlay 根移入/移出 top-layer（弹窗层）。有效绘制序 =
+    /// 文档根 → 非 top overlay（插入序）→ top 层根（进层序）。文档根不可
+    /// 进层（报 [`ContractError::NotOverlayRoot`]）；未知 key 报
+    /// [`ContractError::UnknownNode`]。重复移入幂等。
+    pub fn set_top_layer(&mut self, key: K, on: bool) -> Result<(), crate::error::ContractError> {
+        if Some(key) == self.root_key {
+            return Err(crate::error::ContractError::NotOverlayRoot);
+        }
+        if !self.key_to_node.contains_key(&key) {
+            return Err(crate::error::ContractError::UnknownNode);
+        }
+        if on {
+            if !self.top_layer.contains(&key) {
+                self.overlay_roots.retain(|&k| k != key);
+                self.top_layer.push(key);
+            }
+        } else if self.top_layer.contains(&key) {
+            self.top_layer.retain(|&k| k != key);
+            self.overlay_roots.push(key);
+        }
         Ok(())
     }
 
@@ -438,7 +1001,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
             ids.push(cid);
         }
-        self.tree.set_children(pid, &ids);
+        // C1（ADR-0015）：宿主镜像不含伪键——合并 [::before] + 宿主序 +
+        // [::after]（伪节点由 materialize_pseudos 持有）。
+        let mut merged = Vec::with_capacity(ids.len() + 2);
+        if let Some(&b) = self.pseudo_ids.get(&(pid, 0)) {
+            merged.push(b);
+        }
+        merged.extend(ids);
+        if let Some(&a) = self.pseudo_ids.get(&(pid, 1)) {
+            merged.push(a);
+        }
+        self.tree.set_children(pid, &merged);
         self.dirty_struct = true;
         Ok(())
     }
@@ -552,17 +1125,43 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 
     /// 节点是否定位元素（position != static，absolute 叶的包含块判定）。
+    /// A4：fixed 亦为定位元素（其 absolute 后代的包含块）。
     fn is_positioned(&self, id: NodeId) -> bool {
         matches!(
             self.styles
                 .get(&id)
                 .and_then(|cs| cs.get(crate::css::property::PropertyId::Position)),
             Some(crate::css::property::DeclValue::Position(
-                crate::css::property::Position::Relative | crate::css::property::Position::Absolute
+                crate::css::property::Position::Relative
+                    | crate::css::property::Position::Absolute
+                    | crate::css::property::Position::Fixed
             ))
         )
     }
 
+    /// 节点是否 fixed 定位（A4：包含块=transformed 祖先或 ICB 视口；
+    /// positioned 祖先不构成 fixed 的包含块）。
+    fn is_fixed(&self, id: NodeId) -> bool {
+        matches!(
+            self.styles
+                .get(&id)
+                .and_then(|cs| cs.get(crate::css::property::PropertyId::Position)),
+            Some(crate::css::property::DeclValue::Position(
+                crate::css::property::Position::Fixed
+            ))
+        )
+    }
+
+    /// 映射期环境（CSS 语义：vw/vh 与 calc 视口单位 = 初始包含块 = 帧视口；
+    /// map_style 不评估媒体条件——@media 命中在级联期按宿主推送的 media
+    /// 判定，故此处以帧视口覆盖 media 视口字段，A6 min/max/clamp 与
+    /// calc 同路径受益）。
+    fn map_env(&self) -> MediaEnv {
+        let mut env = self.media;
+        env.viewport_w = self.viewport.0;
+        env.viewport_h = self.viewport.1;
+        env
+    }
     /// transform ≠ none 的元素成为 absolute/fixed 后代的包含块
     /// （ADR-0009 双时机之 L2：restyle 期谓词，cb walk 消费）。
     fn is_transform_cb(&self, id: NodeId) -> bool {
@@ -592,8 +1191,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let rctx = crate::css::value::ResolveCtx {
                     em: cbcs.font_size_px(),
                     rem: 16.0,
-                    viewport_w: self.media.viewport_w,
-                    viewport_h: self.media.viewport_h,
+                    viewport_w: self.map_env().viewport_w,
+                    viewport_h: self.map_env().viewport_h,
+                    ..crate::css::value::ResolveCtx::base(
+                        cbcs.font_size_px(),
+                        16.0,
+                        self.map_env().viewport_w,
+                        self.map_env().viewport_h,
+                    )
                 };
                 let inset: f32 = [
                     (crate::css::property::PropertyId::PaddingLeft, None),
@@ -636,25 +1241,37 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let mut abs_cb: HashMap<NodeId, Option<NodeId>> = HashMap::new();
         let mut abs_in: HashMap<Option<NodeId>, Vec<NodeId>> = HashMap::new();
         // 栈项：(节点, 样式父, 最近 cb 候选（None=尚无）, 豁免子树)
-        let mut stack: Vec<(NodeId, Option<NodeId>, Option<NodeId>, bool)> =
-            vec![(self.tree.root(), None, None, false)];
-        while let Some((id, parent, cb, exempt)) = stack.pop() {
+        let mut stack: Vec<AbsCbStackItem> = vec![(self.tree.root(), None, None, None, false)];
+        while let Some((id, parent, cb, tcb, exempt)) = stack.pop() {
             let cb_next = if self.is_positioned(id) || self.is_transform_cb(id) {
                 Some(id)
             } else {
                 cb
             };
+            // A4：fixed 的包含块候选只认 transformed 祖先（positioned 但
+            // 未 transform 的祖先对 fixed 仍是「透明」的——CSS 2.1/3）。
+            let tcb_next = if self.is_transform_cb(id) {
+                Some(id)
+            } else {
+                tcb
+            };
             // v1 契约豁免：table/multicol 容器及其子树——子件列表由
             // settle_tables/settle_columns 管理，此处不触碰。
             let exempt_next = exempt || self.tables.contains(&id) || self.multicols.contains(&id);
-            if !exempt_next && parent.is_some() && self.is_absolute(id) && cb != parent {
-                // 注意用继承的 cb（严格祖先候选），不得用 cb_next——
-                // absolute 节点自身 positioned 会把自己选成自己的 cb。
-                abs_cb.insert(id, cb);
-                abs_in.entry(cb).or_default().push(id);
+            if !exempt_next && parent.is_some() {
+                if self.is_absolute(id) && cb != parent {
+                    // 注意用继承的 cb（严格祖先候选），不得用 cb_next——
+                    // absolute 节点自身 positioned 会把自己选成自己的 cb。
+                    abs_cb.insert(id, cb);
+                    abs_in.entry(cb).or_default().push(id);
+                } else if self.is_fixed(id) && tcb != parent {
+                    // A4 fixed：重挂到 transformed 祖先（None=ICB 视口）。
+                    abs_cb.insert(id, tcb);
+                    abs_in.entry(tcb).or_default().push(id);
+                }
             }
             for c in self.tree.children(id) {
-                stack.push((*c, Some(id), cb_next, exempt_next));
+                stack.push((*c, Some(id), cb_next, tcb_next, exempt_next));
             }
         }
         self.abs_cb = abs_cb;
@@ -747,6 +1364,111 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.epoch
     }
 
+    /// C4（ADR-0018）：::selection / ::placeholder 通道样式解析——origin
+    /// 直配（match_pseudo_element：pseudo == None 即命中），继承基 = origin
+    /// 主样式（css-pseudo-4）；级联经 cascade_channel（主级联防泄漏由
+    /// collect_sheet 过滤承担）。通道样式不进 taffy/不参与布局——纯宿主
+    /// 读取通道；合并表组全无对应规则时整 map 清除（零成本模式）。
+    fn style_channels(
+        &mut self,
+        id: NodeId,
+        main: &ComputedStyle,
+        cctx: &mut [crate::cascade::ContainerCtx],
+    ) {
+        if self.tree.node(id).pseudo.is_some() {
+            return; // 通道规则对实体化伪节点恒不命中（D2），不产通道样式
+        }
+        let author = self.author_sheets();
+        let has_sel = author.iter().any(|s| s.has_selection_rules)
+            || self
+                .user_sheet
+                .as_ref()
+                .is_some_and(|s| s.has_selection_rules);
+        let has_ph = author.iter().any(|s| s.has_placeholder_rules)
+            || self
+                .user_sheet
+                .as_ref()
+                .is_some_and(|s| s.has_placeholder_rules);
+        // 级联与计算 confined 在不可变阶段（author/CascadeOutput 对 self
+        // 的共享借用随块终结），其后进入可变阶段写 map（NLL 借用纪律）。
+        let sel = if has_sel {
+            let cascaded = crate::cascade::cascade_channel(
+                &self.tree,
+                id,
+                author.clone(),
+                self.user_sheet.as_ref(),
+                &self.map_env(),
+                cctx,
+                crate::selector::PseudoElement::Selection,
+            );
+            // 通道契约：无任何规则命中（winners 双空）→ None（宿主回退
+            // 系统缺省；@media 门控外 / 选择器不命中皆此形）。
+            if cascaded.winners.is_empty() && cascaded.custom_winners.is_empty() {
+                None
+            } else {
+                let mut style = compute_node_from_cascade(
+                    &self.tree,
+                    id,
+                    cascaded,
+                    &self.registered_props,
+                    &self.map_env(),
+                    Some(main),
+                );
+                let fm = self.metrics_for(&style);
+                style.set_font_metrics(fm);
+                Some(style)
+            }
+        } else {
+            None
+        };
+        let ph = if has_ph {
+            let cascaded = crate::cascade::cascade_channel(
+                &self.tree,
+                id,
+                author.clone(),
+                self.user_sheet.as_ref(),
+                &self.map_env(),
+                cctx,
+                crate::selector::PseudoElement::Placeholder,
+            );
+            if cascaded.winners.is_empty() && cascaded.custom_winners.is_empty() {
+                None
+            } else {
+                let mut style = compute_node_from_cascade(
+                    &self.tree,
+                    id,
+                    cascaded,
+                    &self.registered_props,
+                    &self.map_env(),
+                    Some(main),
+                );
+                let fm = self.metrics_for(&style);
+                style.set_font_metrics(fm);
+                Some(style)
+            }
+        } else {
+            None
+        };
+        // 清除语义二分：has_sel=false（全表无规则）→ 整 map 清（零成本）；
+        // 单节点空级联（@media 外 / 选择器不命中）→ 仅移除本节点陈旧
+        // 条目——不得整 map clear（restyle DFS 后段未命中节点会抹掉
+        // 前段命中条目，探针实证）。
+        if !has_sel {
+            self.selection_styles.clear();
+        } else if let Some(style) = sel {
+            self.selection_styles.insert(id, style);
+        } else {
+            self.selection_styles.remove(&id);
+        }
+        if !has_ph {
+            self.placeholder_styles.clear();
+        } else if let Some(style) = ph {
+            self.placeholder_styles.insert(id, style);
+        } else {
+            self.placeholder_styles.remove(&id);
+        }
+    }
+
     /// 诊断 API（C6 可观测性）：读取节点最近一次 restyle 的计算样式。
     /// 帧前调用返回上一帧样式；未知 key 返回 None——诊断路径不上浮
     /// [`ContractError`](crate::error::ContractError)。
@@ -754,6 +1476,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     pub fn computed_style(&self, key: K) -> Option<&ComputedStyle> {
         let id = *self.key_to_node.get(&key)?;
         self.styles.get(&id)
+    }
+
+    /// C4（ADR-0018）：节点 ::selection 通道样式（origin 直配 + 主样式
+    /// 继承基；选区在场与否归宿主——引擎零副作用）。表组无对应规则 /
+    /// 未知 key = None。
+    #[must_use]
+    pub fn selection_style(&self, key: K) -> Option<&ComputedStyle> {
+        let id = *self.key_to_node.get(&key)?;
+        self.selection_styles.get(&id)
+    }
+
+    /// C4（ADR-0018）：节点 ::placeholder 通道样式（语义同
+    /// [`Self::selection_style`]；占位文本存在性归宿主）。
+    #[must_use]
+    pub fn placeholder_style(&self, key: K) -> Option<&ComputedStyle> {
+        let id = *self.key_to_node.get(&key)?;
+        self.placeholder_styles.get(&id)
     }
 
     // ---------- 帧驱动 ----------
@@ -767,13 +1506,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.viewport = viewport;
         self.scale = scale;
         self.now = now;
+        // ADR-0010：根序同步先于 taffy 重建——重建镜像树序（天然含多根）；
+        // 结构未脏时走 taffy set_children 局部重排（稳态零操作）。
+        self.sync_root_order();
+        // C1（ADR-0015）：伪元素实体化先于 taffy 重建（新增伪节点进结构
+        // 镜像；sheet 变更后 has_pseudo_rules 翻转在此收敛）。
+        self.materialize_pseudos();
         if self.dirty_struct {
             self.rebuild_taffy();
         }
         // 阶段2③ 收敛环：@container 尺寸快照来自上一 pass 布局，规则命中
         // 可改变布局 → 有变即重算样式再布局，定点收敛（上限 3 pass；无
         // @container 规则单 pass，与拆分前逐位等价）。
-        let cap = if self.sheet.has_container_rules { 3 } else { 1 };
+        let cap = if self.any_container_rules() { 3 } else { 1 };
         for pass in 0..cap {
             frame_span.record("pass", pass);
             if self.dirty_style {
@@ -781,13 +1526,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             } else if !self.style_dirty_roots.is_empty() {
                 // 增量重样式（阶段5）：无容器规则 → 脏根子树局部重算；
                 // 有容器规则 → 保守全量（容器快照收敛环自会处理）。
-                if self.sheet.has_container_rules {
+                if self.any_container_rules() || self.any_has_rules() {
                     self.restyle();
                 } else {
                     let roots = std::mem::take(&mut self.style_dirty_roots);
                     self.restyle_subtrees(roots);
                 }
             }
+            // C1（ADR-0015）：伪元素文本按 content 计算值供给（restyle 后、
+            // 布局前；同帧布局正确）。
+            #[cfg(feature = "text")]
+            self.sync_pseudo_text();
             // 第五批⑰：@keyframes 动画采样——每帧级联后、布局前覆写（布局与
             // 绘制消费动画值；布局每帧全量重算，动画值变更无需独立失效标）
             self.apply_animations();
@@ -795,6 +1544,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             // → cb 集合逐帧变化）后、布局前，把 absolute 子件重挂到 CSS 包含块
             //（taffy 0.14 只按直父 padding box 锚定绝对子件）。
             self.settle_absolute_anchors();
+            // ADR-0010：超根全视口化 + overlay 根默认视口锚定（显式定位不动）
+            self.apply_root_anchor_styles();
+            // C3（ADR-0017 D4）：替换内容叶固有尺寸种子——须在首次
+            // compute_layout 前（盒=自然/声明/单边比例；静态量幂等）。
+            self.seed_image_leaves();
+            // ④E5（ADR-0020）：grid 放置解析——纯样式派生（容器线名/
+            // 区域矩形 → 子放置数字线号），无布局依赖 → compute_layout
+            // 之前一遍即可（无额外重排）。
+            self.apply_grid_placements();
             if let Some(root) = self.taffy_root {
                 let _ = self.taffy.compute_layout(
                     root,
@@ -803,15 +1561,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         height: taffy::prelude::AvailableSpace::Definite(viewport.1),
                     },
                 );
-                // ①calc 直通：百分比 calc 结算（父尺寸就绪后回写固定值，收敛
-                // 上限 3 遍；须在文本换行重排之前——文本折行宽度依赖结算值）。
-                self.settle_calc(viewport);
-                // ②table：行级 Grid 列模板结算（表内容宽就绪后回写；同样须在
-                // 文本换行重排之前——单元格内折行宽依赖列宽）。
-                self.settle_tables(viewport);
-                // ③multi-column：幻影列创建/列宽/平衡分配结算（同样须在文本
-                // 换行重排之前——列内折行约束 = 列宽）。
-                self.settle_columns(viewport);
+                // ③F2（ADR-0022 D1）：结算 pass DAG 调度（拓扑序+运行门，
+                // 替换硬编码序）。依赖声明=Tables/Columns→Calc、Floats→
+                // Columns、Lines→Floats（文本折行宽依赖全部结算值——下游
+                // 一致先于 remeasure）；pass 内脏区跳过=增量布局（F3）范围。
+                for pass in SettlePassKind::schedule() {
+                    if self.settle_should_run(pass) {
+                        self.settle_run_pass(pass, viewport);
+                    }
+                }
             }
             // T5c-2：文本叶换行——pass1 布局给出包含块宽后，white-space: normal 的
             // 自动测量文本叶按 max_advance 重测量并按需二次布局。包含块内容宽 =
@@ -824,6 +1582,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     if !self.auto_text.contains(&id) {
                         continue;
                     }
+                    // F1（ADR-0021）：行内运行参与者已由 settle_lines 按运行
+                    // 上下文宽度测置；全宽重测会破坏打包结果。
+                    if self.inline_run_participants.contains(&id) {
+                        continue;
+                    }
                     // absolute 叶不按父流宽换行——shrink-to-fit 由第三 pass 夹紧（T5d）
                     if self.is_absolute(id) {
                         continue;
@@ -834,62 +1597,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     let wraps = matches!(
                         cs.get(crate::css::property::PropertyId::WhiteSpace),
                         None | Some(crate::css::property::DeclValue::WhiteSpace(
+                            // A5：pre-wrap/pre-line/break-spaces 亦按包含块宽换行
                             crate::css::property::WhiteSpace::Normal
+                                | crate::css::property::WhiteSpace::PreWrap
+                                | crate::css::property::WhiteSpace::PreLine
+                                | crate::css::property::WhiteSpace::BreakSpaces
                         ))
                     );
                     if !wraps {
                         continue;
                     }
-                    let Some(&parent_id) = self.parents.get(&id) else {
-                        continue;
-                    };
-                    let Some(&ptid) = self.taffy_node.get(&parent_id) else {
-                        continue;
-                    };
-                    let Some(&ctid) = self.taffy_node.get(&id) else {
-                        continue;
-                    };
-                    // ③multi-column：子节点重挂幻影列后，换行包含块 = 幻影列
-                    //（无 padding/border，内缩为 0）。
-                    let rehomed = self.taffy_parent.get(&ctid).is_some_and(|&p| p != ptid);
-                    let (pw, inset) = if rehomed {
-                        let Some(&effp) = self.taffy_parent.get(&ctid) else {
-                            continue;
-                        };
-                        let Ok(pl) = self.taffy.layout(effp) else {
-                            continue;
-                        };
-                        (pl.size.width, 0.0)
-                    } else {
-                        let (Ok(pline), Some(pcs)) =
-                            (self.taffy.layout(ptid), self.styles.get(&parent_id))
-                        else {
-                            continue;
-                        };
-                        let rctx = crate::css::value::ResolveCtx {
-                            em: pcs.font_size_px(),
-                            rem: 16.0,
-                            viewport_w: self.media.viewport_w,
-                            viewport_h: self.media.viewport_h,
-                        };
-                        let inset: f32 = [
-                            (crate::css::property::PropertyId::PaddingLeft, None),
-                            (crate::css::property::PropertyId::PaddingRight, None),
-                            (
-                                crate::css::property::PropertyId::BorderLeftWidth,
-                                Some(crate::css::property::PropertyId::BorderLeftStyle),
-                            ),
-                            (
-                                crate::css::property::PropertyId::BorderRightWidth,
-                                Some(crate::css::property::PropertyId::BorderRightStyle),
-                            ),
-                        ]
-                        .iter()
-                        .filter_map(|(pid, style_pid)| used_h_inset(pcs, *pid, *style_pid, &rctx))
-                        .sum();
-                        (pline.size.width, inset)
-                    };
-                    remeasure.push((id, (pw - inset).max(0.0)));
+                    if let Some(avail) = self.leaf_wrap_width(id) {
+                        remeasure.push((id, avail));
+                    }
                 }
                 let mut reflow = false;
                 for (id, avail) in remeasure {
@@ -902,9 +1622,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
                     let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                         owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
-                    let (w, h) =
-                        self.text
-                            .measure_rich(&text, &cs, &span_refs, Some(avail), &self.media);
+                    let (w, h) = self.text.measure_rich(
+                        &text,
+                        &cs,
+                        &span_refs,
+                        Some(avail),
+                        &self.map_env(),
+                    );
                     if let Some(old) = self.measures.get(&id) {
                         reflow |=
                             (old.0 - w).abs() > f32::EPSILON || (old.1 - h).abs() > f32::EPSILON;
@@ -912,7 +1636,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     self.measures.insert(id, (w, h));
                     self.wrap_widths.insert(id, Some(avail));
                     if let Some(&tid) = self.taffy_node.get(&id) {
-                        let mut ts = map_style(&cs, &self.media);
+                        let mut ts = map_style(&cs, &self.map_env());
                         // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点。
                         for raw in crate::layout::take_calc_deferred() {
                             self.calc_deferred
@@ -973,8 +1697,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             let rctx = crate::css::value::ResolveCtx {
                                 em: cs.font_size_px(),
                                 rem: 16.0,
-                                viewport_w: self.media.viewport_w,
-                                viewport_h: self.media.viewport_h,
+                                viewport_w: self.map_env().viewport_w,
+                                viewport_h: self.map_env().viewport_h,
+                                ..crate::css::value::ResolveCtx::base(
+                                    cs.font_size_px(),
+                                    16.0,
+                                    self.map_env().viewport_w,
+                                    self.map_env().viewport_h,
+                                )
                             };
                             let inset: f32 = [
                                 (crate::css::property::PropertyId::PaddingLeft, None),
@@ -1013,8 +1743,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         let rctx = crate::css::value::ResolveCtx {
                             em: cs.font_size_px(),
                             rem: 16.0,
-                            viewport_w: self.media.viewport_w,
-                            viewport_h: self.media.viewport_h,
+                            viewport_w: self.map_env().viewport_w,
+                            viewport_h: self.map_env().viewport_h,
+                            ..crate::css::value::ResolveCtx::base(
+                                cs.font_size_px(),
+                                16.0,
+                                self.map_env().viewport_w,
+                                self.map_env().viewport_h,
+                            )
                         };
                         let wrap = match cs.get(crate::css::property::PropertyId::Width) {
                             Some(crate::css::property::DeclValue::LenAuto(Some(lp))) => {
@@ -1027,9 +1763,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
                         let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                             owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
-                        let (w, h) =
-                            self.text
-                                .measure_rich(&text, &cs, &span_refs, Some(wrap), &self.media);
+                        let (w, h) = self.text.measure_rich(
+                            &text,
+                            &cs,
+                            &span_refs,
+                            Some(wrap),
+                            &self.map_env(),
+                        );
                         if let Some(old) = self.measures.get(&id) {
                             reflow |= (old.0 - w).abs() > f32::EPSILON
                                 || (old.1 - h).abs() > f32::EPSILON;
@@ -1046,7 +1786,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     if let Some(&tid) = self.taffy_node.get(&id)
                         && let Some(cs) = self.styles.get(&id)
                     {
-                        let mut ts = map_style(cs, &self.media);
+                        let mut ts = map_style(cs, &self.map_env());
                         // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点。
                         for raw in crate::layout::take_calc_deferred() {
                             self.calc_deferred
@@ -1136,8 +1876,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             &crate::css::value::ResolveCtx {
                                 em: cs.font_size_px(),
                                 rem: 16.0,
-                                viewport_w: self.media.viewport_w,
-                                viewport_h: self.media.viewport_h,
+                                viewport_w: self.map_env().viewport_w,
+                                viewport_h: self.map_env().viewport_h,
+                                ..crate::css::value::ResolveCtx::base(
+                                    cs.font_size_px(),
+                                    16.0,
+                                    self.map_env().viewport_w,
+                                    self.map_env().viewport_h,
+                                )
                             },
                             0.0,
                         )
@@ -1200,7 +1946,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             ly,
                             lw,
                             lh,
-                            &self.media,
+                            &self.map_env(),
                         );
                         eff = Some(match acc {
                             Some(a) => crate::paint::mul_affine(&a, &own),
@@ -1234,23 +1980,47 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 }
             }
         }
-        let mut paint = crate::paint::DisplayList::default();
-        crate::paint::build_display_list(
-            &crate::paint::PaintCtx {
+        // ⑤F2（ADR-0022 D2）：文本截断结算（ellipsis；line-clamp=D3）——
+        // 测量宽就绪后生成 text_overrides（绘制替换）。
+        #[cfg(feature = "text")]
+        self.apply_text_truncation();
+        // F3a（ADR-0023）：命中几何收集（paint 期透传，帧末入库供
+        // hit_test 逆序查询）。
+        let hit_cell = std::cell::RefCell::new(crate::paint::HitCollector::default());
+        let mut paint = crate::paint::DisplayList {
+            generation: self.generation,
+            ..Default::default()
+        };
+        // ADR-0010：按有效根序逐根追加绘制基元（超根无样式条目，不可作
+        // paint 走查起点；用户根的样式/布局条目齐备——单根视觉输出与
+        // 旧「自 tree.root() 走查」逐位一致，超根本身不产生基元）。
+        {
+            let ctx = crate::paint::PaintCtx {
                 tree: &self.tree,
                 styles: &self.styles,
                 layout: &layout_by_node,
                 scroll: &self.scroll_offsets,
-                env: &self.media,
+                env: &self.map_env(),
                 spans: &self.span_styles,
                 wrap_widths: &self.wrap_widths,
+                text_overrides: &self.text_overrides,
+                hit: Some(&hit_cell),
                 images: &self.images,
                 column_rules: &self.column_rules,
-            },
-            self.tree.root(),
-            self.generation,
-            &mut paint,
-        );
+            };
+            let mut root_ids: Vec<NodeId> = self
+                .root_order_applied
+                .iter()
+                .filter_map(|k| self.key_to_node.get(k).copied())
+                .collect();
+            if root_ids.is_empty() {
+                root_ids.push(self.tree.root());
+            }
+            for id in root_ids {
+                crate::paint::append_display_list(&ctx, id, &mut paint);
+            }
+        }
+        self.hit_rects = hit_cell.into_inner().rects;
         Frame {
             generation: self.generation,
             boxes,
@@ -1259,12 +2029,62 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// 命中测试（F3a，ADR-0023）：点 → 最顶可命中节点（绘制序逆序；
+    /// 祖先 clip 链全含判定；visibility/display:none 与 pointer-events:
+    /// none 天然排除）。无帧数据或未命中 → None。
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<crate::paint::HitTestHit> {
+        for r in self.hit_rects.iter().rev() {
+            if x < r.x || y < r.y || x > r.x + r.w || y > r.y + r.h {
+                continue;
+            }
+            if r.clips
+                .iter()
+                .any(|c| x < c[0] || y < c[1] || x > c[0] + c[2] || y > c[1] + c[3])
+            {
+                continue;
+            }
+            return Some(crate::paint::HitTestHit { node_id: r.node_id });
+        }
+        None
+    }
+
+    /// 用户键 → 节点 id（F3a，ADR-0023：hit_test 返回 NodeId 的宿主解释
+    /// 通道；未注册键 → None）。
+    pub fn node_id(&self, key: &K) -> Option<NodeId> {
+        self.key_to_node.get(key).copied()
+    }
+
+    /// 样式树结构人读视图（F3e，ADR-0027 D1）：显示序（root_order_applied
+    /// = paint 同序；空则文档根）逐节点一行，深度缩进；标签 = 元素名/`#id`
+    /// /`.class`/宿主键/伪元素标记/文本截断。几何视图见
+    /// [`Frame::boxes_dump`]——本方法只有树，无帧几何（Frame 才有盒）。
+    /// 纯投影零新状态，不参与 restyle/paint 任何路径。
+    pub fn layout_tree_dump(&self) -> String
+    where
+        K: std::fmt::Debug,
+    {
+        let mut rev: HashMap<NodeId, K> = self.key_to_node.iter().map(|(k, &n)| (n, *k)).collect();
+        let mut out = String::new();
+        let mut roots: Vec<NodeId> = self
+            .root_order_applied
+            .iter()
+            .filter_map(|k| self.key_to_node.get(k).copied())
+            .collect();
+        if roots.is_empty() {
+            roots.push(self.tree.root());
+        }
+        for r in roots {
+            dump_tree_node(&self.tree, &mut rev, r, 0, &mut out);
+        }
+        out
+    }
+
     /// 阶段2③：记录容器内容盒尺寸快照（container-type ≠ normal 的节点；
     /// 内容盒 = taffy border box − 解析后 padding/border，负值夹 0）。返回
     /// 快照是否相对上帧变化（首帧从无到有亦算变 → 驱动一次收敛 pass）。
     /// 无 @container 规则零成本跳过（快照保持空表）。
     fn record_container_sizes(&mut self) -> bool {
-        if !self.sheet.has_container_rules {
+        if !self.any_container_rules() {
             return false;
         }
         let mut next: HashMap<NodeId, [f32; 2]> = HashMap::new();
@@ -1291,6 +2111,98 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let changed = next != self.container_sizes;
         self.container_sizes = next;
         changed
+    }
+
+    /// ADR-0010：超根子序 = 有效绘制序（文档根 → 非 top overlay（插入序）
+    /// → top 层根（进层序））。树子序与 taffy 子序同步重排，此后所有既有
+    /// 走查（绘制/命中/量程/文本/级联）零改动地遵序。序未变时零操作
+    ///（稳态帧无 taffy 结构失效）。
+    fn sync_root_order(&mut self) {
+        let doc = match self.root_key {
+            Some(k) => k,
+            None => {
+                self.root_order_applied.clear();
+                return;
+            }
+        };
+        let mut order = Vec::with_capacity(1 + self.overlay_roots.len() + self.top_layer.len());
+        order.push(doc);
+        order.extend(self.overlay_roots.iter().copied());
+        order.extend(self.top_layer.iter().copied());
+        if self.root_order_applied == order {
+            return;
+        }
+        let ids: Vec<NodeId> = order
+            .iter()
+            .filter_map(|k| self.key_to_node.get(k).copied())
+            .collect();
+        let dirty = self.dirty_struct;
+        if !dirty {
+            let tids: Vec<taffy::NodeId> = ids
+                .iter()
+                .filter_map(|id| self.taffy_node.get(id).copied())
+                .collect();
+            if let Some(super_tid) = self.taffy_node.get(&self.tree.root()).copied() {
+                let _ = self.taffy.set_children(super_tid, &tids);
+            }
+        }
+        self.tree.set_children(self.tree.root(), &ids);
+        self.root_order_applied = order;
+    }
+
+    /// ADR-0010：超根全视口化（block、宽高 100%——overlay 的绝对定位锚定
+    /// 盒 = 视口）与 overlay 根默认视口锚定（映射样式仍为 relative/static
+    /// 时强制 absolute + top/left 0；作者显式 absolute/fixed 不动）。样式
+    /// pass 会以默认样式覆写超根 → 每帧幂等重贴（计算布局前）。
+    fn apply_root_anchor_styles(&mut self) {
+        use taffy::prelude::{
+            Dimension, Display, LengthPercentageAuto as LPA, Position as TPos, Rect, Size,
+            Style as TStyle,
+        };
+        if self.root_key.is_none() {
+            return;
+        }
+        let mut overrides: Vec<(taffy::NodeId, TStyle)> = Vec::new();
+        if let Some(&super_tid) = self.taffy_node.get(&self.tree.root()) {
+            overrides.push((
+                super_tid,
+                TStyle {
+                    display: Display::Block,
+                    size: Size {
+                        width: Dimension::percent(1.0),
+                        height: Dimension::percent(1.0),
+                    },
+                    ..Default::default()
+                },
+            ));
+        }
+        let media = self.map_env();
+        for k in self.overlay_roots.iter().chain(self.top_layer.iter()) {
+            let Some(&id) = self.key_to_node.get(k) else {
+                continue;
+            };
+            let Some(cs) = self.styles.get(&id) else {
+                continue;
+            };
+            let Some(tid) = self.taffy_node.get(&id).copied() else {
+                continue;
+            };
+            let mut ts = crate::layout::map_style(cs, &media);
+            if ts.position != TPos::Relative {
+                continue; // 作者显式定位（absolute/fixed）：不动
+            }
+            ts.position = TPos::Absolute;
+            ts.inset = Rect {
+                top: LPA::length(0.0),
+                right: LPA::auto(),
+                bottom: LPA::auto(),
+                left: LPA::length(0.0),
+            };
+            overrides.push((tid, ts));
+        }
+        for (tid, style) in overrides {
+            let _ = self.taffy.set_style(tid, style);
+        }
     }
 
     fn rebuild_taffy(&mut self) {
@@ -1370,14 +2282,22 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         use std::collections::BTreeMap;
         let dark = self.media.dark;
         let now = self.now as f32;
+        // B2：跨表 @keyframes 查找（后表同名覆盖前表——文档级最后声明胜；
+        // 字段级不相交借用：sheet/extras 不可变 + styles 可变）
         let sheet = &self.sheet;
+        let extras = &self.extra_sheets;
         let styles = &mut self.styles;
         for cs in styles.values_mut() {
             let name = match cs.get(PropertyId::AnimationName) {
                 Some(DeclValue::AnimationName(Some(n))) => n.clone(),
                 _ => continue,
             };
-            let Some(rule) = sheet.keyframes.iter().find(|r| r.name == name) else {
+            let Some(rule) = extras
+                .iter()
+                .rev()
+                .find_map(|(_, _, s)| s.keyframes.iter().find(|r| r.name == name))
+                .or_else(|| sheet.keyframes.iter().find(|r| r.name == name))
+            else {
                 continue;
             };
             let duration = match cs.get(PropertyId::AnimationDuration) {
@@ -1492,6 +2412,306 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// 回写固定值并重算；循环至无变更（上限 3 遍——百分比基准恒为祖先
     /// 派生（DAG），逐遍稳定一层；3 层内链路与浏览器单遍语义一致，
     /// 更深链路记偏差待重估）。
+    /// A9：延迟 cq 条目的容器查询基值——沿 taffy 父链上溯找最近
+    /// container-type≠Normal 祖先，取其本帧布局内容盒（settle 在
+    /// compute_layout 之后=本帧新值）；InlineSize 容器块轴回落视口高
+    ///（small viewport 语义）；无容器祖先=视口（规范回落）。
+    fn cq_basis(&self, node: taffy::NodeId, viewport: (f32, f32)) -> (f32, f32) {
+        let rev: HashMap<taffy::NodeId, NodeId> =
+            self.taffy_node.iter().map(|(k, v)| (*v, *k)).collect();
+        let mut cur = self.taffy_parent.get(&node).copied();
+        while let Some(tid) = cur {
+            if let Some(&eid) = rev.get(&tid)
+                && let Some(cs) = self.styles.get(&eid)
+            {
+                let ct = cs.container_type();
+                if ct != crate::css::property::ContainerType::Normal
+                    && let Ok(pl) = self.taffy.layout(tid)
+                {
+                    let w = pl.size.width
+                        - pl.border.left
+                        - pl.border.right
+                        - pl.padding.left
+                        - pl.padding.right;
+                    let h = pl.size.height
+                        - pl.border.top
+                        - pl.border.bottom
+                        - pl.padding.top
+                        - pl.padding.bottom;
+                    let hh = if ct == crate::css::property::ContainerType::Size {
+                        h
+                    } else {
+                        viewport.1
+                    };
+                    return (w.max(0.0), hh.max(0.0));
+                }
+            }
+            cur = self.taffy_parent.get(&tid).copied();
+        }
+        viewport
+    }
+
+    /// A9：节点字体相对单位度量——font-family 首个具名族匹配注册字体
+    ///（add_font 时探测；大小写不敏感），未命中=近似缺省。
+    fn metrics_for(&self, cs: &ComputedStyle) -> crate::css::value::FontMetrics {
+        for fam in cs.font_family().0.iter() {
+            if let crate::css::property::FamilyName::Named(n) = fam {
+                for (names, m) in &self.font_metrics {
+                    if names.iter().any(|f| f.eq_ignore_ascii_case(n)) {
+                        return *m;
+                    }
+                }
+            }
+        }
+        crate::css::value::FontMetrics::default()
+    }
+
+    /// 叶换行约束宽=包含块内容宽（父 border-box − padding − 有效 border；
+    /// multicol 重挂叶=幻影列宽无内缩）。T5c-2 remeasure 与 F2 截断结算
+    /// 共用（ADR-0022 D2）。
+    #[cfg(feature = "text")]
+    fn leaf_wrap_width(&self, id: NodeId) -> Option<f32> {
+        let parent_id = *self.parents.get(&id)?;
+        let ptid = *self.taffy_node.get(&parent_id)?;
+        let ctid = *self.taffy_node.get(&id)?;
+        // ③multi-column：子节点重挂幻影列后，换行包含块 = 幻影列
+        //（无 padding/border，内缩为 0）。
+        let rehomed = self.taffy_parent.get(&ctid).is_some_and(|&p| p != ptid);
+        if rehomed {
+            let effp = *self.taffy_parent.get(&ctid)?;
+            let pl = self.taffy.layout(effp).ok()?;
+            return Some(pl.size.width.max(0.0));
+        }
+        let pl = self.taffy.layout(ptid).ok()?;
+        let pcs = self.styles.get(&parent_id)?;
+        let rctx = crate::css::value::ResolveCtx {
+            em: pcs.font_size_px(),
+            rem: 16.0,
+            viewport_w: self.map_env().viewport_w,
+            viewport_h: self.map_env().viewport_h,
+            ..crate::css::value::ResolveCtx::base(
+                pcs.font_size_px(),
+                16.0,
+                self.map_env().viewport_w,
+                self.map_env().viewport_h,
+            )
+        };
+        let inset: f32 = [
+            (crate::css::property::PropertyId::PaddingLeft, None),
+            (crate::css::property::PropertyId::PaddingRight, None),
+            (
+                crate::css::property::PropertyId::BorderLeftWidth,
+                Some(crate::css::property::PropertyId::BorderLeftStyle),
+            ),
+            (
+                crate::css::property::PropertyId::BorderRightWidth,
+                Some(crate::css::property::PropertyId::BorderRightStyle),
+            ),
+        ]
+        .iter()
+        .filter_map(|(pid, style_pid)| used_h_inset(pcs, *pid, *style_pid, &rctx))
+        .sum();
+        Some((pl.size.width - inset).max(0.0))
+    }
+
+    /// F2（ADR-0022 D2）：ellipsis 截断文本——二分最长字符前缀使
+    /// width(prefix)+"…" ≤ avail；"…" 本身超宽 → 空串（超窄容器）。
+    /// 字节安全=chars().take（span 字节区间仍为原文本前缀，绘制端
+    /// map_start/map_end 截断语义不变）。
+    #[cfg(feature = "text")]
+    fn make_ellipsis_text(
+        &mut self,
+        text: &str,
+        cs: &ComputedStyle,
+        span_refs: &[(u32, u32, &ComputedStyle)],
+        avail: f32,
+    ) -> Option<String> {
+        const ELLIPSIS: &str = "\u{2026}";
+        let env = self.map_env();
+        let (ew, _eh) = self.text.measure_rich(ELLIPSIS, cs, span_refs, None, &env);
+        if ew > avail {
+            return Some(String::new());
+        }
+        let budget = avail - ew;
+        let total_chars = text.chars().count();
+        let mut lo = 0usize;
+        let mut hi = total_chars;
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            let prefix: String = text.chars().take(mid).collect();
+            let (pw, _ph) = self.text.measure_rich(&prefix, cs, span_refs, None, &env);
+            if pw <= budget {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        let mut out: String = text.chars().take(lo).collect();
+        out.push_str(ELLIPSIS);
+        Some(out)
+    }
+
+    /// F2（ADR-0022 D3）：line-clamp 截断文本——二分最长字符前缀使
+    /// measure(prefix+"…", avail).1 ≤ max_h=N*行高（折行测量）；全文本
+    /// 不超行 → None（不截）。空解=仅"…"。
+    #[cfg(feature = "text")]
+    fn make_clamp_text(
+        &mut self,
+        text: &str,
+        cs: &ComputedStyle,
+        span_refs: &[(u32, u32, &ComputedStyle)],
+        avail: f32,
+        max_h: f32,
+    ) -> Option<String> {
+        const ELLIPSIS: &str = "\u{2026}";
+        let with_ell = |s: &str| {
+            let mut owned = String::with_capacity(s.len() + 3);
+            owned.push_str(s);
+            owned.push_str(ELLIPSIS);
+            owned
+        };
+        let env = self.map_env();
+        let (_w, fh) = self
+            .text
+            .measure_rich(&with_ell(text), cs, span_refs, Some(avail), &env);
+        if fh <= max_h {
+            return None;
+        }
+        let total_chars = text.chars().count();
+        let mut lo = 0usize;
+        let mut hi = total_chars;
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            let prefix: String = text.chars().take(mid).collect();
+            let full = with_ell(&prefix);
+            let (_w2, h2) = self
+                .text
+                .measure_rich(&full, cs, span_refs, Some(avail), &env);
+            if h2 <= max_h {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Some(with_ell(&text.chars().take(lo).collect::<String>()))
+    }
+
+    /// F2（ADR-0022 D2）：text-overflow:ellipsis 截断结算——测量宽就绪
+    /// 后逐 auto_text 叶检查：父（包含块）overflow 非 visible ∧ 父
+    /// text-overflow=ellipsis ∧ 叶 nowrap ∧ 测量宽>包含块内容宽 →
+    /// make_ellipsis_text 生成 text_overrides（绘制替换；盒几何不变）。
+    /// overflow visible 不截（spec：仅裁剪语境生效）；多行溢出=line-clamp
+    /// （D3）范围。每帧全量重算（幂等）。
+    #[cfg(feature = "text")]
+    fn apply_text_truncation(&mut self) {
+        self.text_overrides.clear();
+        // 两段化：phase1 不可变扫描收候选（measure_rich 需 &mut self.text，
+        // 不能持 self.measures 迭代借用跨调用——remeasure 先例同构）。
+        // mode=None=ellipsis（avail 宽预算）、Some(max_h)=line-clamp（行高
+        // 预算）。
+        let mut cands: Vec<TruncCandidate> = Vec::new();
+        for (&id, &(mw, mh)) in self.measures.iter() {
+            // 注：不设 auto_text 门——measures 本就只含文本叶测量；折行叶
+            //（white-space normal）走 remeasure 路径、nowrap 叶走 restyle
+            // 登记，两者都须可截断（D2 nowrap 语义由 want_ellipsis 门治）。
+            let Some(&parent_id) = self.parents.get(&id) else {
+                continue;
+            };
+            let Some(pcs) = self.styles.get(&parent_id) else {
+                continue;
+            };
+            let clipped = matches!(
+                pcs.overflow_x(),
+                crate::css::property::Overflow::Hidden
+                    | crate::css::property::Overflow::Clip
+                    | crate::css::property::Overflow::Scroll
+            );
+            if !clipped {
+                continue;
+            }
+            let Some(cs) = self.styles.get(&id).cloned() else {
+                continue;
+            };
+            let Some(avail) = self.leaf_wrap_width(id) else {
+                continue;
+            };
+            // D2 ellipsis 条件：叶 nowrap ∧ 测量宽>包含块内容宽。
+            let leaf_nowrap = matches!(
+                cs.white_space(),
+                crate::css::property::WhiteSpace::NoWrap | crate::css::property::WhiteSpace::Pre
+            );
+            let want_ellipsis = pcs.text_overflow()
+                == crate::css::property::TextOverflowKind::Ellipsis
+                && leaf_nowrap
+                && mw > avail;
+            // D3 line-clamp 条件：clamp N≥1 ∧ 测量高>N*行高（折行叶，
+            // 无 white-space 前置——单行 nowrap 叶 1 行永不超 N≥1）。
+            let clamp_n = pcs.webkit_line_clamp();
+            let env = self.map_env();
+            // 行高缺省（normal）≈1.2em 近似（clamp 预算基准）。
+            let lh = cs
+                .resolved_line_height_px(&env)
+                .unwrap_or_else(|| 1.2 * cs.font_size_px());
+            let want_clamp = !want_ellipsis && clamp_n > 0 && mh > clamp_n as f32 * lh;
+            if !want_ellipsis && !want_clamp {
+                continue;
+            }
+            let Some(text) = self.tree.node(id).text.clone() else {
+                continue;
+            };
+            if text.is_empty() {
+                continue;
+            }
+            let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
+            let mode = if want_ellipsis {
+                None
+            } else {
+                Some(clamp_n as f32 * lh)
+            };
+            cands.push((id, avail, text, cs, owned, mode));
+        }
+        for (id, avail, text, cs, owned, mode) in cands {
+            let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
+            let t = match mode {
+                None => self.make_ellipsis_text(&text, &cs, &span_refs, avail),
+                Some(max_h) => self.make_clamp_text(&text, &cs, &span_refs, avail, max_h),
+            };
+            if let Some(t) = t {
+                self.text_overrides.insert(id, t);
+            }
+        }
+    }
+
+    /// F2（ADR-0022 D1）：pass 运行门——空输入跳过（廉价谓词；无输入
+    /// 索引的 pass（浮盒/行内）默认 true，内部早退治理）。
+    fn settle_should_run(&self, pass: SettlePassKind) -> bool {
+        match pass {
+            SettlePassKind::Calc => !self.calc_deferred.is_empty(),
+            SettlePassKind::Tables => !self.tables.is_empty(),
+            SettlePassKind::Columns => !self.multicols.is_empty(),
+            SettlePassKind::Floats | SettlePassKind::Lines => true,
+        }
+    }
+
+    /// F2（ADR-0022 D1）：pass 分发（原 frame 硬编码序的函数体不动）。
+    fn settle_run_pass(&mut self, pass: SettlePassKind, viewport: (f32, f32)) {
+        match pass {
+            SettlePassKind::Calc => self.settle_calc(viewport),
+            SettlePassKind::Tables => self.settle_tables(viewport),
+            SettlePassKind::Columns => self.settle_columns(viewport),
+            SettlePassKind::Floats => self.settle_floats(viewport),
+            SettlePassKind::Lines => {
+                #[cfg(feature = "text")]
+                self.settle_lines(viewport);
+                #[cfg(not(feature = "text"))]
+                {
+                    let _ = viewport;
+                }
+            }
+        }
+    }
+
     fn settle_calc(&mut self, viewport: (f32, f32)) {
         use crate::css::value::ResolveCtx;
         const MAX_SETTLE_PASSES: usize = 3;
@@ -1536,11 +2756,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         _ => ch,
                     },
                 };
+                // A9：容器查询基值结算期现查（本帧新布局）；字体度量取快照
+                let cq = self.cq_basis(d.node, viewport);
                 let ctx = ResolveCtx {
                     em: d.raw.em,
                     rem: d.raw.rem,
                     viewport_w: d.raw.vw,
                     viewport_h: d.raw.vh,
+                    cq_w: cq.0,
+                    cq_h: cq.1,
+                    ch_per_em: d.raw.ch_per_em,
+                    ex_per_em: d.raw.ex_per_em,
+                    ic_per_em: d.raw.ic_per_em,
                 };
                 let Some(px) = d.raw.expr.resolve(&ctx, basis) else {
                     continue;
@@ -1692,12 +2919,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     let Some(cs) = self.styles.get(cell) else {
                         continue;
                     };
-                    let d = map_style(cs, &self.media).size.width;
+                    let d = map_style(cs, &self.map_env()).size.width;
                     let rctx = crate::css::value::ResolveCtx {
                         em: cs.font_size_px(),
                         rem: 16.0,
-                        viewport_w: self.media.viewport_w,
-                        viewport_h: self.media.viewport_h,
+                        viewport_w: self.map_env().viewport_w,
+                        viewport_h: self.map_env().viewport_h,
+                        ..crate::css::value::ResolveCtx::base(
+                            cs.font_size_px(),
+                            16.0,
+                            self.map_env().viewport_w,
+                            self.map_env().viewport_h,
+                        )
                     };
                     let inset: f32 = [
                         (crate::css::property::PropertyId::PaddingLeft, None),
@@ -1784,7 +3017,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         if let Some(row_h) = self
                             .styles
                             .get(r)
-                            .and_then(|cs| map_style(cs, &self.media).size.height.into_option())
+                            .and_then(|cs| map_style(cs, &self.map_env()).size.height.into_option())
                         {
                             rs.grid_template_rows =
                                 vec![taffy::style::GridTemplateComponent::Single(
@@ -1830,7 +3063,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                                 .iter()
                                 .map(|r| {
                                     self.styles.get(r).map(|cs| {
-                                        map_style(cs, &self.media).size.height.into_option()
+                                        map_style(cs, &self.map_env()).size.height.into_option()
                                     })
                                 })
                                 .map(|o| o.flatten())
@@ -1897,8 +3130,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let rctx = crate::css::value::ResolveCtx {
                 em: cs.font_size_px(),
                 rem: 16.0,
-                viewport_w: self.media.viewport_w,
-                viewport_h: self.media.viewport_h,
+                viewport_w: self.map_env().viewport_w,
+                viewport_h: self.map_env().viewport_h,
+                ..crate::css::value::ResolveCtx::base(
+                    cs.font_size_px(),
+                    16.0,
+                    self.map_env().viewport_w,
+                    self.map_env().viewport_h,
+                )
             };
             // gap：声明值优先；缺席 → multicol 语义 normal = 1em。
             let gap = match cs
@@ -1960,7 +3199,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 if let Ok(ts) = self.taffy.style(ctid).cloned()
                     && ts.display == taffy::prelude::Display::Flex
                 {
-                    let mut ms = crate::layout::map_style(&cs, &self.media);
+                    let mut ms = crate::layout::map_style(&cs, &self.map_env());
                     ms.display = taffy::prelude::Display::Block;
                     let _ = self.taffy.set_style(ctid, ms);
                     changed = true;
@@ -2040,7 +3279,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             if has_span {
                 // 容器样式每帧重断言——restyle 会以 map_style 重写回
                 // Row + gap（多列请求的默认映射）。
-                let mut ms = crate::layout::map_style(&cs, &self.media);
+                let mut ms = crate::layout::map_style(&cs, &self.map_env());
                 ms.display = taffy::prelude::Display::Flex;
                 ms.flex_direction = taffy::prelude::FlexDirection::Column;
                 ms.gap = taffy::prelude::Size {
@@ -2050,9 +3289,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let _ = self.taffy.set_style(ctid, ms);
             } else if structure_changed {
                 // 切回行模式：容器还原 map_style 的 Flex Row + gap。
-                let _ = self
-                    .taffy
-                    .set_style(ctid, crate::layout::map_style(&cs, &self.media));
+                let ts = crate::layout::map_style(&cs, &self.map_env());
+                let _ = self.taffy.set_style(ctid, ts);
             }
             // 行与幻影：数量不符 → 重建节点并临时均分（单元高与分配无关，
             // 仅供测量）；仅列宽变化 → 原节点回写宽度。
@@ -2249,8 +3487,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             let rctx = crate::css::value::ResolveCtx {
                                 em: ccs.font_size_px(),
                                 rem: 16.0,
-                                viewport_w: self.media.viewport_w,
-                                viewport_h: self.media.viewport_h,
+                                viewport_w: self.map_env().viewport_w,
+                                viewport_h: self.map_env().viewport_h,
+                                ..crate::css::value::ResolveCtx::base(
+                                    ccs.font_size_px(),
+                                    16.0,
+                                    self.map_env().viewport_w,
+                                    self.map_env().viewport_h,
+                                )
                             };
                             let m = ccs.margin();
                             let res = |lp: Option<&crate::css::value::LengthPercentage>| {
@@ -2411,6 +3655,643 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// 3px，显式负值钳 0（0 宽不画）；color 走 currentcolor 终结。
     /// 行模式条带 y/高 = 幻影列盒（Flex 拉伸全等 = 容器内容高）；span
     /// 模式逐段独立。空列照画（CSS 未设内容存在性条件；用例规避）。
+    /// F1（ADR-0021）：IFC 行内流 v1——行打包结算（浮盒先例）。块容器
+    /// 直子分类行内参与者（文本叶 / inline-block 原子盒 / inline 组盒）
+    /// → 贪心行打包 → Position::Absolute+inset 锚定（父 padding box
+    /// 相对）。挂点=settle_floats 之后、文本 remeasure 之前（参与者经
+    /// inline_run_participants 豁免全宽重测）；每帧幂等=map_style 重置
+    /// +重施（无 taffy Style 缓存——E4 E0277 教训）。
+    /// v1 偏差（ADR-0021 D4）：行高=max(参与者测量高)、vertical-align=
+    /// TOP 对齐、inline 组内子叶纵向堆叠（单叶 span 精确）、跨叶强制
+    /// 断行（br）不支持、原子/组盒自然宽=taffy MaxContent 探针、仅
+    /// Block 容器直子运行（inline-flex/grid/table 原子化=偏差在案）。
+    #[cfg(feature = "text")]
+    fn settle_lines(&mut self, viewport: (f32, f32)) {
+        use crate::css::property::{DeclValue, Display, PropertyId, WhiteSpace};
+        /// 行内参与者：文本叶（容器直子）或盒（inline-block 原子 / inline
+        /// 组——其子叶保持组内块流，remeasure 继续管）。
+        #[derive(Debug, Clone, Copy)]
+        enum InlinePart {
+            Leaf { id: NodeId },
+            Box { id: NodeId },
+        }
+        self.inline_run_participants.clear();
+        // frame-2 幂等：上帧参与者（settle_lines 覆写为 Absolute）在本帧
+        // 运行收集中不得被 is_absolute 豁免误跳——快照后再收集。
+        let prev_participants = std::mem::take(&mut self.inline_run_participants);
+        // ① DFS 收集运行（Block 容器直子；连续行内参与者 ≥2 或含盒）。
+        let mut runs: Vec<(NodeId, Vec<InlinePart>)> = Vec::new();
+        let mut stack: Vec<NodeId> = vec![self.tree.root()];
+        while let Some(id) = stack.pop() {
+            if self.tables.contains(&id) || self.multicols.contains(&id) {
+                continue;
+            }
+            if self.is_absolute(id) || self.is_fixed(id) {
+                continue;
+            }
+            for c in self.tree.children(id).iter().rev() {
+                stack.push(*c);
+            }
+            let is_block = self.styles.get(&id).is_some_and(|cs| {
+                matches!(
+                    cs.get(PropertyId::Display),
+                    Some(DeclValue::Display(Display::Block))
+                )
+            });
+            if !is_block {
+                continue;
+            }
+            let mut parts: Vec<InlinePart> = Vec::new();
+            for c in self.tree.children(id).iter().copied() {
+                if self.tables.contains(&c)
+                    || (self.is_absolute(c) && !prev_participants.contains(&c))
+                    || self.is_fixed(c)
+                {
+                    if parts.len() >= 2 || parts.iter().any(|p| matches!(p, InlinePart::Box { .. }))
+                    {
+                        runs.push((id, std::mem::take(&mut parts)));
+                    } else {
+                        parts.clear();
+                    }
+                    continue;
+                }
+                if self
+                    .tree
+                    .node(c)
+                    .text
+                    .as_deref()
+                    .is_some_and(|t| !t.is_empty())
+                {
+                    parts.push(InlinePart::Leaf { id: c });
+                    continue;
+                }
+                let disp = self
+                    .styles
+                    .get(&c)
+                    .and_then(|cs| match cs.get(PropertyId::Display) {
+                        Some(DeclValue::Display(d)) => Some(*d),
+                        _ => None,
+                    });
+                match disp {
+                    Some(Display::InlineBlock) | Some(Display::Inline) => {
+                        parts.push(InlinePart::Box { id: c });
+                    }
+                    // display:none 兄弟不终止行内流（spec：不生成盒）。
+                    Some(Display::None) => {}
+                    _ => {
+                        if parts.len() >= 2
+                            || parts.iter().any(|p| matches!(p, InlinePart::Box { .. }))
+                        {
+                            runs.push((id, std::mem::take(&mut parts)));
+                        } else {
+                            parts.clear();
+                        }
+                    }
+                }
+            }
+            if parts.len() >= 2 || parts.iter().any(|p| matches!(p, InlinePart::Box { .. })) {
+                runs.push((id, parts));
+            }
+        }
+        if runs.is_empty() {
+            return;
+        }
+        // ② 逐运行打包+置样式。
+        let mut changed = false;
+        for (pid, parts) in &runs {
+            let Some(&ptid) = self.taffy_node.get(pid) else {
+                continue;
+            };
+            // pl 是 &Layout（借用 self.taffy）——立即拷出标量并结束借用，
+            // 否则 set_style/compute_layout 的可变借用冲突（E0502）。
+            let (pad_top, pad_left, content_left, content_right, content_top) =
+                match self.taffy.layout(ptid) {
+                    Ok(pl) => (
+                        pl.location.y + pl.border.top,
+                        pl.location.x + pl.border.left,
+                        pl.location.x + pl.border.left + pl.padding.left,
+                        pl.location.x + pl.size.width - pl.border.right - pl.padding.right,
+                        pl.location.y + pl.border.top + pl.padding.top,
+                    ),
+                    Err(_) => continue,
+                };
+            let mut y = content_top;
+            let mut x = content_left;
+            let mut line_h = 0.0f32;
+            for part in parts {
+                match *part {
+                    InlinePart::Leaf { id } => {
+                        let Some(text) = self.tree.node(id).text.clone() else {
+                            continue;
+                        };
+                        let Some(cs) = self.styles.get(&id).cloned() else {
+                            continue;
+                        };
+                        let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
+                        let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                            owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
+                        // nowrap/pre = 不折行（剩余宽约束解除）。
+                        let nowrap = matches!(
+                            cs.get(PropertyId::WhiteSpace),
+                            Some(DeclValue::WhiteSpace(WhiteSpace::NoWrap | WhiteSpace::Pre))
+                        );
+                        let remaining = (content_right - x).max(0.0);
+                        let avail = if nowrap { None } else { Some(remaining) };
+                        // 声明宽/高叶=原子式参与（第五批⑥声明优先 + F1 行内
+                        // 参与合成）：按声明宽折行测量高、盒用声明尺寸。
+                        let ts0 = map_style(&cs, &self.map_env());
+                        let decl_w = if has_declared_len(&cs, PropertyId::Width) {
+                            ts0.size.width.into_option()
+                        } else {
+                            None
+                        };
+                        let decl_h = if has_declared_len(&cs, PropertyId::Height) {
+                            ts0.size.height.into_option()
+                        } else {
+                            None
+                        };
+                        let (w, h) = match decl_w {
+                            Some(dw) => {
+                                let m = self.text.measure_rich(
+                                    &text,
+                                    &cs,
+                                    &span_refs,
+                                    Some(dw),
+                                    &self.map_env(),
+                                );
+                                (dw, m.1)
+                            }
+                            None => self.text.measure_rich(
+                                &text,
+                                &cs,
+                                &span_refs,
+                                avail,
+                                &self.map_env(),
+                            ),
+                        };
+                        let h = decl_h.unwrap_or(h);
+                        let Some(&tid) = self.taffy_node.get(&id) else {
+                            continue;
+                        };
+                        let Ok(mut st) = self.taffy.style(tid).cloned() else {
+                            continue;
+                        };
+                        st.position = taffy::prelude::Position::Absolute;
+                        st.inset = taffy::geometry::Rect {
+                            top: taffy::style_helpers::length(y - pad_top),
+                            bottom: taffy::style_helpers::auto(),
+                            left: taffy::style_helpers::length(x - pad_left),
+                            right: taffy::style_helpers::auto(),
+                        };
+                        st.size = taffy::prelude::Size {
+                            width: taffy::style_helpers::length(w),
+                            height: taffy::style_helpers::length(h),
+                        };
+                        let _ = self.taffy.set_style(tid, st);
+                        self.inline_run_participants.insert(id);
+                        changed = true;
+                        // 满行判定：折行发生（宽触及剩余）→ 占满本行，
+                        // 后续参与者下行。
+                        if avail.is_some() && w > 0.0 && w >= remaining - 0.5 {
+                            x = content_right;
+                        } else {
+                            x += w;
+                        }
+                        line_h = line_h.max(h);
+                    }
+                    InlinePart::Box { id } => {
+                        let Some(&tid) = self.taffy_node.get(&id) else {
+                            continue;
+                        };
+                        // 自然尺寸探针：MaxContent 可用宽下的布局尺寸
+                        //（块布局 auto 宽=拉伸 → MaxContent = 收缩适配）。
+                        let _ = self.taffy.compute_layout(
+                            tid,
+                            taffy::prelude::Size {
+                                width: taffy::prelude::AvailableSpace::MaxContent,
+                                height: taffy::prelude::AvailableSpace::MaxContent,
+                            },
+                        );
+                        let (bw, bh) = match self.taffy.layout(tid) {
+                            Ok(l) => (l.size.width, l.size.height),
+                            Err(_) => continue,
+                        };
+                        // MaxContent 探针对文本叶子树=0 宽（taffy 无文本内在
+                        // 尺寸——叶宽只在 remeasure 注入）→ 盒自然宽取
+                        // max(探针, 子树文本叶 nowrap 测量宽)。单叶组/盒精确；
+                        // 多叶组 max（非流宽和）=v1 B 级偏差在案 ADR-0021。
+                        let mut bw = bw;
+                        let mut sub: Vec<NodeId> = vec![id];
+                        while let Some(s) = sub.pop() {
+                            if let Some(text) = self.tree.node(s).text.clone()
+                                && !text.is_empty()
+                                && let Some(cs) = self.styles.get(&s).cloned()
+                            {
+                                let owned = self.span_styles.get(&s).cloned().unwrap_or_default();
+                                let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                                    owned.iter().map(|(a, b, sc)| (*a, *b, sc)).collect();
+                                let (lw, _lh) = self.text.measure_rich(
+                                    &text,
+                                    &cs,
+                                    &span_refs,
+                                    None,
+                                    &self.map_env(),
+                                );
+                                if lw > bw {
+                                    bw = lw;
+                                }
+                            }
+                            for g in self.tree.children(s).iter().rev() {
+                                sub.push(*g);
+                            }
+                        }
+                        // 换行判定（行首盒不换；行已溢出（nowrap 叶等）→
+                        // 后续盒继续同行——CSS 行盒溢出续排真行为）。
+                        if x > content_left && x <= content_right && x + bw > content_right {
+                            y += line_h;
+                            x = content_left;
+                            line_h = 0.0;
+                        }
+                        let declared_w = self
+                            .styles
+                            .get(&id)
+                            .is_some_and(|cs| has_declared_len(cs, PropertyId::Width));
+                        let declared_h = self
+                            .styles
+                            .get(&id)
+                            .is_some_and(|cs| has_declared_len(cs, PropertyId::Height));
+                        let Ok(mut st) = self.taffy.style(tid).cloned() else {
+                            continue;
+                        };
+                        st.position = taffy::prelude::Position::Absolute;
+                        st.inset = taffy::geometry::Rect {
+                            top: taffy::style_helpers::length(y - pad_top),
+                            bottom: taffy::style_helpers::auto(),
+                            left: taffy::style_helpers::length(x - pad_left),
+                            right: taffy::style_helpers::auto(),
+                        };
+                        if !declared_w {
+                            st.size.width = taffy::style_helpers::length(bw);
+                        }
+                        if !declared_h {
+                            st.size.height = taffy::style_helpers::length(bh);
+                        }
+                        let _ = self.taffy.set_style(tid, st);
+                        self.inline_run_participants.insert(id);
+                        changed = true;
+                        x += bw;
+                        line_h = line_h.max(bh);
+                    }
+                }
+            }
+            // 容器高度保持：行内内容出流（Absolute）会使 auto 高容器塌陷
+            //（spec：行内内容贡献行盒高；浮盒本就不贡献父高故 floats 无此
+            // 步）。min_height=打包行底（内容盒高）；taffy 取 max(auto 内容
+            // 高, min_height)——多 run 容器与残余块级子高天然合成。
+            let declared_ch = self
+                .styles
+                .get(pid)
+                .is_some_and(|cs| has_declared_len(cs, PropertyId::Height));
+            let declared_mh = self
+                .styles
+                .get(pid)
+                .is_some_and(|cs| has_declared_len(cs, PropertyId::MinHeight));
+            if !declared_ch
+                && !declared_mh
+                && let Ok(mut pst) = self.taffy.style(ptid).cloned()
+            {
+                let lines_h = (y + line_h) - content_top;
+                if lines_h > 0.0 {
+                    pst.min_size.height = taffy::style_helpers::length(lines_h);
+                    let _ = self.taffy.set_style(ptid, pst);
+                }
+            }
+        }
+        // ③ 终布局：锚定生效（浮盒同式；文本 remeasure 读运行终宽）。
+        if changed && let Some(root) = self.taffy_root {
+            let _ = self.taffy.compute_layout(
+                root,
+                taffy::prelude::Size {
+                    width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                    height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                },
+            );
+        }
+    }
+
+    /// E4（ADR-0019）：浮动结算——出流/堆叠/环绕/clear 钳位（CSS 2 §9.5）。
+    /// 诚实边界（0.x）：兄弟级环绕（顶缘落在浮盒带内=带内同侧浮盒宽和）
+    /// +同父浮栈贪心放置+clear 钳位（margin-top 增量）；table/multicol/
+    /// 定位子树豁免（v1 浮动不进表格/定位上下文）。挂点=settle_columns
+    /// 之后、文本 remeasure 之前（折行宽依赖结算值）。幂等=每帧先还原
+    /// 上帧覆写（map_style 重放 pristine）→ pristine 布局→几何计算→覆写→终布局
+    /// （浮盒在场=两次布局，同 settle_tables 多遍先例）。
+    fn settle_floats(&mut self, viewport: (f32, f32)) {
+        let Some(root) = self.taffy_root else {
+            return;
+        };
+        // 0) 还原上帧覆写（重放式幂等——原样式缓存；taffy 重建后新 tid
+        //    上缓存的原样式仍=该样式树节点的 pristine 形，还原安全）。
+        let mut restored = false;
+        for id in std::mem::take(&mut self.float_touched) {
+            if let (Some(&tid), Some(cs)) = (self.taffy_node.get(&id), self.styles.get(&id)) {
+                // 还原=从 ComputedStyle 重放 pristine 样式（map_style 纯
+                // 函数；不缓存 taffy::Style 值——Send/Sync 与陈旧缓存双防）。
+                // 拆语句：参数不可变借用止于 map_style 返回（E0502）。
+                let pristine = crate::layout::map_style(cs, &self.map_env());
+                let _ = self.taffy.set_style(tid, pristine);
+                restored = true;
+            }
+        }
+        // 1) DFS 收集（文档序）：按父分组浮盒 + clear 盒。豁免 table/
+        //    multicol 子树（settle_tables/columns 自治）与定位盒
+        //    （CSS：float 对 absolute/fixed 无效）。
+        let mut floats_by_parent: HashMap<NodeId, Vec<(NodeId, crate::css::property::FloatKind)>> =
+            HashMap::new();
+        let mut clears: Vec<(NodeId, crate::css::property::ClearKind)> = Vec::new();
+        let mut stack: Vec<NodeId> = vec![self.tree.root()];
+        while let Some(id) = stack.pop() {
+            if self.tables.contains(&id) || self.multicols.contains(&id) {
+                continue;
+            }
+            if self.is_absolute(id) || self.is_fixed(id) {
+                continue;
+            }
+            if let Some(cs) = self.styles.get(&id) {
+                let f = cs.float();
+                let cl = cs.clear();
+                if f != crate::css::property::FloatKind::None {
+                    if let Some(p) = self.tree.parent(id) {
+                        floats_by_parent.entry(p).or_default().push((id, f));
+                    }
+                } else if cl != crate::css::property::ClearKind::None {
+                    clears.push((id, cl));
+                }
+            }
+            for c in self.tree.children(id).iter().rev() {
+                stack.push(*c);
+            }
+        }
+        if floats_by_parent.is_empty() && clears.is_empty() {
+            if restored {
+                let _ = self.taffy.compute_layout(
+                    root,
+                    taffy::prelude::Size {
+                        width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                        height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                    },
+                );
+            }
+            return;
+        }
+        // 2) pristine 布局：还原后（或本帧首现浮盒）重排一遍——浮盒仍
+        //    在流内，首遍几何即流内位置（未还原时 :1389 布局已是 pristine）。
+        if restored {
+            let _ = self.taffy.compute_layout(
+                root,
+                taffy::prelude::Size {
+                    width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                    height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+                },
+            );
+        }
+        // 3) 逐父：3a 浮盒放置（文档序贪心带放置）→ 3b 单遍 children
+        //    扫描（浮盒覆写 + 兄弟环绕 + clear 钳位）。
+        for (pid, floats) in &floats_by_parent {
+            let Some(&ptid) = self.taffy_node.get(pid) else {
+                continue;
+            };
+            let Ok(pl) = self.taffy.layout(ptid) else {
+                continue;
+            };
+            // 父盒几何（视口坐标）——precompute 局部量（pl 借用不得跨
+            // set_style 可变借用，E0502）。
+            let content_left = pl.location.x + pl.border.left + pl.padding.left;
+            let content_right = pl.location.x + pl.size.width - pl.border.right - pl.padding.right;
+            let content_top = pl.location.y + pl.border.top + pl.padding.top;
+            let pad_right_x = pl.location.x + pl.size.width - pl.border.right;
+            /// 单个浮盒放置记录（本 pass 局部）。
+            struct Place {
+                id: NodeId,
+                is_left: bool,
+                x: f32,
+                y: f32,
+                w: f32,
+                h: f32,
+                idx: usize,
+            }
+            // 3a) 放置：同侧栈 (带顶, 前缘, 底缘) 水平适配贪心（同带继续
+            //     直至容器缘溢出才下移，CSS §9.5.1）；浮盒自身 clear 钳位
+            //     查已放置记录。
+            let mut placements: Vec<Place> = Vec::new();
+            let mut left_stack: Option<(f32, f32, f32)> = None;
+            let mut right_stack: Option<(f32, f32, f32)> = None;
+            for (idx, (fid, kind)) in floats.iter().enumerate() {
+                let Some(&ftid) = self.taffy_node.get(fid) else {
+                    continue;
+                };
+                let Ok(fl) = self.taffy.layout(ftid) else {
+                    continue;
+                };
+                let (fw, fh) = (fl.size.width, fl.size.height);
+                if fw <= 0.0 || fh <= 0.0 {
+                    continue;
+                }
+                let own_clear = self
+                    .styles
+                    .get(fid)
+                    .map(|cs| cs.clear())
+                    .unwrap_or(crate::css::property::ClearKind::None);
+                let clamp_y = |ps: &[Place], k: crate::css::property::ClearKind| -> f32 {
+                    match k {
+                        crate::css::property::ClearKind::None => 0.0,
+                        crate::css::property::ClearKind::Left => ps
+                            .iter()
+                            .filter(|p| p.is_left)
+                            .map(|p| p.y + p.h)
+                            .fold(0.0, f32::max),
+                        crate::css::property::ClearKind::Right => ps
+                            .iter()
+                            .filter(|p| !p.is_left)
+                            .map(|p| p.y + p.h)
+                            .fold(0.0, f32::max),
+                        crate::css::property::ClearKind::Both => {
+                            ps.iter().map(|p| p.y + p.h).fold(0.0, f32::max)
+                        }
+                    }
+                };
+                match kind {
+                    crate::css::property::FloatKind::Left => {
+                        let (band_top, next_x, max_bottom) =
+                            left_stack.unwrap_or((content_top, content_left, content_top));
+                        let (x, mut y) = if next_x + fw <= content_right {
+                            (next_x, band_top)
+                        } else {
+                            (content_left, max_bottom)
+                        };
+                        y = y.max(content_top + clamp_y(&placements, own_clear));
+                        left_stack = Some((y, x + fw, (y + fh).max(max_bottom)));
+                        placements.push(Place {
+                            id: *fid,
+                            is_left: true,
+                            x,
+                            y,
+                            w: fw,
+                            h: fh,
+                            idx,
+                        });
+                    }
+                    crate::css::property::FloatKind::Right => {
+                        let (band_top, next_right, max_bottom) =
+                            right_stack.unwrap_or((content_top, content_right, content_top));
+                        let (x, mut y) = if next_right - fw >= content_left {
+                            (next_right - fw, band_top)
+                        } else {
+                            (content_right - fw, max_bottom)
+                        };
+                        y = y.max(content_top + clamp_y(&placements, own_clear));
+                        right_stack = Some((y, x, (y + fh).max(max_bottom)));
+                        placements.push(Place {
+                            id: *fid,
+                            is_left: false,
+                            x,
+                            y,
+                            w: fw,
+                            h: fh,
+                            idx,
+                        });
+                    }
+                    crate::css::property::FloatKind::None => {}
+                }
+            }
+            if placements.is_empty() {
+                continue;
+            }
+            let float_ids: std::collections::HashSet<NodeId> =
+                floats.iter().map(|(f, _)| *f).collect();
+            let children: Vec<NodeId> = self.tree.children(*pid).to_vec();
+            // 3b) 单遍 children：浮盒覆写（Absolute+inset）+ 兄弟处理。
+            for (idx, sid) in children.iter().enumerate() {
+                if let Some(p) = placements.iter().find(|q| q.id == *sid) {
+                    // 浮盒：出流 + inset 锚定（taffy absolute 基准=直父
+                    // padding box；x/y 视口坐标 → 减 border 得相对量）。
+                    let (is_left, fx, fy, fw) = (p.is_left, p.x, p.y, p.w);
+                    let Some(&ftid) = self.taffy_node.get(sid) else {
+                        continue;
+                    };
+                    let Ok(mut st) = self.taffy.style(ftid).cloned() else {
+                        continue;
+                    };
+                    st.position = taffy::prelude::Position::Absolute;
+                    st.inset = taffy::prelude::Rect {
+                        top: taffy::style_helpers::length(fy - content_top),
+                        bottom: taffy::style_helpers::auto(),
+                        left: if is_left {
+                            taffy::style_helpers::length(fx - content_left)
+                        } else {
+                            taffy::style_helpers::auto()
+                        },
+                        right: if is_left {
+                            taffy::style_helpers::auto()
+                        } else {
+                            taffy::style_helpers::length(pad_right_x - (fx + fw))
+                        },
+                    };
+                    let _ = self.taffy.set_style(ftid, st);
+                    self.float_touched.insert(*sid);
+                    continue;
+                }
+                if float_ids.contains(sid)
+                    || self.tables.contains(sid)
+                    || self.multicols.contains(sid)
+                    || self.is_absolute(*sid)
+                    || self.is_fixed(*sid)
+                {
+                    continue;
+                }
+                let Some(&stid) = self.taffy_node.get(sid) else {
+                    continue;
+                };
+                let Ok(sl) = self.taffy.layout(stid) else {
+                    continue;
+                };
+                // 布局读值 precompute（sl 借用不得跨 set_style，E0502）。
+                let pristine_y = sl.location.y;
+                let sml = sl.margin.left;
+                let smr = sl.margin.right;
+                let smt = sl.margin.top;
+                // 出流补偿：本文档序之前的同父浮盒高和（原在流内推挤）。
+                let removed: f32 = placements.iter().filter(|p| p.idx < idx).map(|p| p.h).sum();
+                let post_y = pristine_y - removed;
+                let sib_clear = self
+                    .styles
+                    .get(sid)
+                    .map(|cs| cs.clear())
+                    .unwrap_or(crate::css::property::ClearKind::None);
+                // 横向环绕：顶缘落在浮盒带内（post_y ∈ [y, y+h)）的同侧
+                // 浮盒宽和；clear 盒跳过（钳位后全宽，CSS 语义）。
+                if sib_clear == crate::css::property::ClearKind::None {
+                    let left_w: f32 = placements
+                        .iter()
+                        .filter(|p| p.is_left && post_y >= p.y && post_y < p.y + p.h)
+                        .map(|p| p.w)
+                        .sum();
+                    let right_w: f32 = placements
+                        .iter()
+                        .filter(|p| !p.is_left && post_y >= p.y && post_y < p.y + p.h)
+                        .map(|p| p.w)
+                        .sum();
+                    if left_w > 0.0 || right_w > 0.0 {
+                        let Ok(mut sst) = self.taffy.style(stid).cloned() else {
+                            continue;
+                        };
+                        if left_w > 0.0 {
+                            sst.margin.left = taffy::style_helpers::length(sml + left_w);
+                        }
+                        if right_w > 0.0 {
+                            sst.margin.right = taffy::style_helpers::length(smr + right_w);
+                        }
+                        let _ = self.taffy.set_style(stid, sst);
+                        self.float_touched.insert(*sid);
+                    }
+                }
+                // clear 钳位：margin-top 增量 = 相关向最后浮盒底 − post_y。
+                let need = match sib_clear {
+                    crate::css::property::ClearKind::None => 0.0,
+                    crate::css::property::ClearKind::Left => placements
+                        .iter()
+                        .filter(|p| p.is_left)
+                        .map(|p| p.y + p.h)
+                        .fold(0.0, f32::max),
+                    crate::css::property::ClearKind::Right => placements
+                        .iter()
+                        .filter(|p| !p.is_left)
+                        .map(|p| p.y + p.h)
+                        .fold(0.0, f32::max),
+                    crate::css::property::ClearKind::Both => {
+                        placements.iter().map(|p| p.y + p.h).fold(0.0, f32::max)
+                    }
+                };
+                if need > post_y {
+                    let Ok(mut cst) = self.taffy.style(stid).cloned() else {
+                        continue;
+                    };
+                    cst.margin.top = taffy::style_helpers::length(smt + (need - post_y));
+                    let _ = self.taffy.set_style(stid, cst);
+                    self.float_touched.insert(*sid);
+                }
+            }
+        }
+        // 4) 终布局：覆写生效（浮盒 Absolute 出流+兄弟 margin 环绕+clear
+        //    下移）；文本 remeasure（frame 内 settle_floats 之后）读终宽。
+        let _ = self.taffy.compute_layout(
+            root,
+            taffy::prelude::Size {
+                width: taffy::prelude::AvailableSpace::Definite(viewport.0),
+                height: taffy::prelude::AvailableSpace::Definite(viewport.1),
+            },
+        );
+    }
     fn settle_column_rules(&mut self, layout_by_node: &HashMap<NodeId, (f32, f32, f32, f32)>) {
         self.column_rules.clear();
         for &mc in &self.multicols {
@@ -2445,8 +4326,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let rctx = crate::css::value::ResolveCtx {
             em: cs.font_size_px(),
             rem: 16.0,
-            viewport_w: self.media.viewport_w,
-            viewport_h: self.media.viewport_h,
+            viewport_w: self.map_env().viewport_w,
+            viewport_h: self.map_env().viewport_h,
+            ..crate::css::value::ResolveCtx::base(
+                cs.font_size_px(),
+                16.0,
+                self.map_env().viewport_w,
+                self.map_env().viewport_h,
+            )
         };
         let rule_w = match cs.get(PropertyId::ColumnRuleWidth) {
             Some(DeclValue::ColumnRuleWidth(Some(lp))) => {
@@ -2458,11 +4345,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             return None;
         }
         let rule_color = match cs.get(PropertyId::ColumnRuleColor) {
-            Some(DeclValue::Color(cv)) => crate::paint::resolve_color(cv, cs, &self.media),
+            Some(DeclValue::Color(cv)) => crate::paint::resolve_color(cv, cs, &self.map_env()),
             _ => crate::paint::resolve_color(
                 &crate::css::value::ColorValue::CurrentColor,
                 cs,
-                &self.media,
+                &self.map_env(),
             ),
         };
         let (bx, by) = layout_by_node.get(&mc).map(|&(x, y, _, _)| (x, y))?;
@@ -2607,13 +4494,424 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// B1：设置用户起源样式表（css-cascade-5 User 层：介于 UA 与 author
+    /// 之间；层树独立于 author 表）。样式变化触发全树重样式。
+    pub fn set_user_stylesheet(&mut self, css: &str) {
+        self.user_sheet = Some(crate::css::stylesheet::parse_stylesheet(css));
+        // B4：user 表可携带 @property（合并序最前 = author 覆 user）。
+        self.rebuild_registered_props();
+        // F3d：user 表可携带 @font-face（合并序最前）。
+        self.rebuild_font_faces();
+        self.dirty_style = true;
+        self.dirty_struct = true;
+    }
+
+    /// B1：清除用户起源样式表。
+    pub fn clear_user_stylesheet(&mut self) {
+        self.user_sheet = None;
+        self.rebuild_registered_props();
+        self.rebuild_font_faces();
+        self.dirty_style = true;
+        self.dirty_struct = true;
+    }
+
     /// 宿主推入字体数据（feature = "text"）；字体变化影响文本测量，
     /// 触发全树样式/布局失效。
     #[cfg(feature = "text")]
     pub fn add_font(&mut self, data: Vec<u8>) {
+        // A9：注册即探测 ch/ex/ic 度量与族名（失败=不落表→近似缺省）
+        if let Some(p) = crate::css::fontprobe::probe_metrics(&data) {
+            self.font_metrics.push((
+                p.names,
+                crate::css::value::FontMetrics {
+                    ch_per_em: p.metrics.ch_per_em,
+                    ex_per_em: p.metrics.ex_per_em,
+                    ic_per_em: p.metrics.ic_per_em,
+                },
+            ));
+        }
         self.text.add_font(data);
         self.dirty_style = true;
         self.dirty_struct = true;
+    }
+
+    /// F3d（ADR-0026 D4）：@font-face 登记表只读视图（合并序 = user → 主表
+    /// → 附加表；同族后规则胜）。宿主据此映射 local()/url() 键到 add_font
+    /// 推送的字节、按 unicode-range/style/weight/stretch 筛选匹配；引擎仅
+    /// 供给元数据，不做字体匹配决策（匹配与回退属宿主/后续阶段契约）。
+    pub fn font_faces(&self) -> &[crate::css::stylesheet::FontFaceRule] {
+        &self.font_faces
+    }
+
+    /// C3（ADR-0017 D4）：替换内容叶测量（CSS 10.3.4 简化契约）：
+    /// 双边声明=盒取声明值；单边声明=另一边按源宽高比缩放；全 auto=自然
+    /// 尺寸（块级替换元素不拉伸）。% 宽以 `avail`（容器可用宽近似）为基。
+    /// 返回 None = 非图像叶 / 引用未注册 / 宿主已手动 set_leaf_intrinsic
+    ///（此时引擎不接管尺寸；absolute 叶的手动区间经 T5d shrink 通道消费）。
+    fn image_leaf_measure(&mut self, id: &NodeId, avail: f32) -> Option<(f32, f32)> {
+        let reference = self.tree.node(*id).image.as_ref()?.clone();
+        let img = self.images.get(&reference)?;
+        // 宿主手动 set_leaf_intrinsic 优先（零侵入契约）。
+        if self.intrinsics.contains_key(id) {
+            return None;
+        }
+        let (nw, nh) = (img.width as f32, img.height as f32);
+        if nw <= 0.0 || nh <= 0.0 {
+            return None;
+        }
+        let cs = self.styles.get(id)?;
+        let env = self.map_env();
+        let rc = crate::css::value::ResolveCtx {
+            em: cs.font_size_px(),
+            rem: 16.0,
+            viewport_w: env.viewport_w,
+            viewport_h: env.viewport_h,
+            ..crate::css::value::ResolveCtx::base(
+                cs.font_size_px(),
+                16.0,
+                env.viewport_w,
+                env.viewport_h,
+            )
+        };
+        let declared = |pid: crate::css::property::PropertyId| -> Option<f32> {
+            // width/height 声明可落 Len(Lp) 或 LenAuto(Some(Lp)) 两形。
+            match cs.get(pid) {
+                Some(crate::css::property::DeclValue::Len(lp)) => lp.resolve(&rc, avail),
+                Some(crate::css::property::DeclValue::LenAuto(Some(lp))) => lp.resolve(&rc, avail),
+                _ => None,
+            }
+        };
+        let dw = declared(crate::css::property::PropertyId::Width);
+        let dh = declared(crate::css::property::PropertyId::Height);
+        let (mw, mh) = match (dw, dh) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, nh * (w / nw)),
+            (None, Some(h)) => (nw * (h / nh), h),
+            (None, None) => (nw, nh),
+        };
+        // 固有区间注入（absolute 叶经 T5d shrink 通道消费）。
+        self.intrinsics.insert(*id, ((nw, nh), (nw, nh)));
+        Some((mw, mh.max(0.0)))
+    }
+
+    /// C3（ADR-0017 D4）：替换内容叶布局前种子——measures + taffy 尺寸回写。
+    /// 静态量（样式不变则幂等跳过，无需 reflow 收敛环）；absolute 叶仅注入
+    /// 固有区间，不写 taffy 尺寸（位置/夹紧由 T5d 第三 pass 处理）。
+    /// E5（ADR-0020）：grid 放置解析——纯样式派生（容器模板线名+区域
+    /// 矩形 → 子放置数字线号），挂点 = seed_image_leaves 之后、
+    /// compute_layout 之前（无布局依赖 → 无额外重排；每帧幂等 =
+    /// restyle 的 map_style 重置放置 + 本 pass 重施）。
+    /// 解析序（<custom-ident>）：区域名 → 全名线 → strip `-start`/`-end`
+    /// 裸名线 → 未知名 = Auto（spec：不存在的名视作 auto）。
+    /// v1 边界：线名仅支持模板顶层（repeat 内括号 = 解析失败声明无效）。
+    fn apply_grid_placements(&mut self) {
+        let mut stack: Vec<NodeId> = vec![self.tree.root()];
+        while let Some(id) = stack.pop() {
+            if self.tables.contains(&id) || self.multicols.contains(&id) {
+                continue;
+            }
+            if self.is_absolute(id) || self.is_fixed(id) {
+                continue;
+            }
+            let is_grid = self.styles.get(&id).is_some_and(|cs| {
+                matches!(
+                    cs.get(crate::css::property::PropertyId::Display),
+                    Some(crate::css::property::DeclValue::Display(
+                        crate::css::property::Display::Grid
+                    ))
+                )
+            });
+            for c in self.tree.children(id).iter().rev() {
+                stack.push(*c);
+            }
+            if !is_grid {
+                continue;
+            }
+            let (col_lines, row_lines, areas) = self.grid_context(&id);
+            let children: Vec<NodeId> = self.tree.children(id).to_vec();
+            for sid in children {
+                if self.tables.contains(&sid) || self.is_absolute(sid) || self.is_fixed(sid) {
+                    continue;
+                }
+                let Some(&stid) = self.taffy_node.get(&sid) else {
+                    continue;
+                };
+                let Some(cs) = self.styles.get(&sid) else {
+                    continue;
+                };
+                let col_start = cs.get(crate::css::property::PropertyId::GridColumnStart);
+                let col_end = cs.get(crate::css::property::PropertyId::GridColumnEnd);
+                let row_start = cs.get(crate::css::property::PropertyId::GridRowStart);
+                let row_end = cs.get(crate::css::property::PropertyId::GridRowEnd);
+                let any = [col_start, col_end, row_start, row_end]
+                    .iter()
+                    .any(|v| matches!(v, Some(crate::css::property::DeclValue::GridLine(_))));
+                if !any {
+                    continue;
+                }
+                let (gs, ge) = Self::resolve_axis(&col_lines, &areas, col_start, col_end, true);
+                let (rs, re) = Self::resolve_axis(&row_lines, &areas, row_start, row_end, false);
+                let Ok(mut st) = self.taffy.style(stid).cloned() else {
+                    continue;
+                };
+                st.grid_column = taffy::geometry::Line { start: gs, end: ge };
+                st.grid_row = taffy::geometry::Line { start: rs, end: re };
+                let _ = self.taffy.set_style(stid, st);
+            }
+        }
+    }
+
+    /// E5：容器语境——列/行线名注册表（1 基线号；模板顶层线名槽，
+    /// line_names[i] = 第 i+1 号线）+ 区域矩形表（0 基格界）。
+    fn grid_context(&self, gid: &NodeId) -> (GridLineMap, GridLineMap, GridAreaMap) {
+        let mut col_lines: GridLineMap = std::collections::BTreeMap::new();
+        let mut row_lines: GridLineMap = std::collections::BTreeMap::new();
+        let mut areas: GridAreaMap = std::collections::BTreeMap::new();
+        let Some(cs) = self.styles.get(gid) else {
+            return (col_lines, row_lines, areas);
+        };
+        let reg = |t: Option<&crate::css::property::DeclValue>, out: &mut GridLineMap| {
+            if let Some(crate::css::property::DeclValue::GridTracks(t)) = t {
+                for (i, names) in t.line_names.iter().enumerate() {
+                    for n in names {
+                        out.entry(n.clone()).or_default().push(i as i16 + 1);
+                    }
+                }
+            }
+        };
+        reg(
+            cs.get(crate::css::property::PropertyId::GridTemplateColumns),
+            &mut col_lines,
+        );
+        reg(
+            cs.get(crate::css::property::PropertyId::GridTemplateRows),
+            &mut row_lines,
+        );
+        if let Some(crate::css::property::DeclValue::GridAreas(a)) =
+            cs.get(crate::css::property::PropertyId::GridTemplateAreas)
+        {
+            let mut spans: std::collections::BTreeMap<&str, (usize, usize, usize, usize)> =
+                std::collections::BTreeMap::new();
+            for (r, row) in a.rows.iter().enumerate() {
+                for (c, name) in row.iter().enumerate() {
+                    if name == "." {
+                        continue;
+                    }
+                    let e = spans.entry(name.as_str()).or_insert((r, r, c, c));
+                    e.0 = e.0.min(r);
+                    e.1 = e.1.max(r);
+                    e.2 = e.2.min(c);
+                    e.3 = e.3.max(c);
+                }
+            }
+            for (k, v) in spans {
+                areas.insert(k.to_string(), v);
+            }
+        }
+        (col_lines, row_lines, areas)
+    }
+
+    /// E5：单轴放置对解析（start/end 长手 → taffy 数字放置对）。
+    /// SpanName 终界 = start 线后第 k 次名线（候选 = 全名+strip 后缀裸名，
+    /// 排序去重；不足 = 末候选+1 钳——隐式线按 spec 计入）；两侧正线号
+    /// start ≥ end → end = start+1 钳（跨度至少 1）。
+    fn resolve_axis(
+        lines: &GridLineMap,
+        areas: &GridAreaMap,
+        start_spec: Option<&crate::css::property::DeclValue>,
+        end_spec: Option<&crate::css::property::DeclValue>,
+        is_col: bool,
+    ) -> (taffy::style::GridPlacement, taffy::style::GridPlacement) {
+        use crate::css::property::GridLineSpec;
+        use taffy::style::GridPlacement;
+        // 内部放置形（数值先行——taffy GridLine→i16 无 Into 反向转换，
+        // 钳位/比较全程 i16 域，末端 conv 一次性转 GridPlacement）。
+        enum P {
+            Num(i16),
+            Span(u16),
+            Auto,
+        }
+        let to_p = |g: &GridLineSpec,
+                    lines: &GridLineMap,
+                    areas: &GridAreaMap,
+                    is_col: bool,
+                    is_start: bool|
+         -> P {
+            match g {
+                GridLineSpec::Number(n) => P::Num(*n),
+                GridLineSpec::Span(k) => P::Span(*k),
+                GridLineSpec::Name(s) => {
+                    let v = if is_start {
+                        Self::resolve_named_start(s, lines, areas, is_col)
+                    } else {
+                        Self::resolve_named_end(s, lines, areas, is_col)
+                    };
+                    v.map(P::Num).unwrap_or(P::Auto)
+                }
+                GridLineSpec::SpanName(_) | GridLineSpec::Auto => P::Auto,
+            }
+        };
+        let start_p = match start_spec {
+            Some(crate::css::property::DeclValue::GridLine(g)) => {
+                to_p(g, lines, areas, is_col, true)
+            }
+            _ => P::Auto,
+        };
+        let start_num = match &start_p {
+            P::Num(v) if *v >= 1 => Some(*v),
+            _ => None,
+        };
+        // SpanName 终界：start 线后第 1 次名线（spec `span <ident>` 隐含
+        // k=1；候选 = 全名+strip 后缀裸名，排序去重；不足 = 末候选+1 钳
+        // ——隐式线按 spec 计入）。混合形 `span <int> <ident>` v1 偏差在案。
+        let end_p = match end_spec {
+            Some(crate::css::property::DeclValue::GridLine(GridLineSpec::SpanName(s))) => {
+                let from = start_num.unwrap_or(1);
+                let base = s
+                    .strip_suffix("-start")
+                    .or_else(|| s.strip_suffix("-end"))
+                    .unwrap_or(s.as_str());
+                let mut cands: Vec<i16> = Vec::new();
+                if let Some(v) = lines.get(s.as_str()) {
+                    cands.extend_from_slice(v);
+                }
+                if base != s.as_str()
+                    && let Some(v) = lines.get(base)
+                {
+                    cands.extend_from_slice(v);
+                }
+                cands.sort_unstable();
+                cands.dedup();
+                match cands.iter().find(|&&l| l > from) {
+                    Some(&l) => P::Num(l),
+                    None => {
+                        let last = cands.last().copied().unwrap_or(from);
+                        P::Num(last.max(from) + 1)
+                    }
+                }
+            }
+            Some(crate::css::property::DeclValue::GridLine(g)) => {
+                to_p(g, lines, areas, is_col, false)
+            }
+            _ => P::Auto,
+        };
+        // 两侧正线号 start ≥ end → end = start+1 钳（跨度至少 1）；
+        // 借用止于闭包调用（scrutinee 借用不得跨 move）。
+        let clamp_pair = |a: &P, b: &P| -> Option<i16> {
+            match (a, b) {
+                (P::Num(x), P::Num(y)) if *x >= 1 && *y >= 1 && x >= y => Some(x + 1),
+                _ => None,
+            }
+        };
+        let end_p = if let Some(nx) = clamp_pair(&start_p, &end_p) {
+            P::Num(nx)
+        } else {
+            end_p
+        };
+        let conv = |p: P| -> GridPlacement {
+            match p {
+                P::Num(v) => GridPlacement::Line(v.into()),
+                P::Span(k) => GridPlacement::Span(k),
+                P::Auto => GridPlacement::Auto,
+            }
+        };
+        (conv(start_p), conv(end_p))
+    }
+
+    /// E5：命名起点解析（区域起边 → 全名线首现 → strip 后缀裸名首现）。
+    fn resolve_named_start(
+        s: &str,
+        lines: &GridLineMap,
+        areas: &GridAreaMap,
+        is_col: bool,
+    ) -> Option<i16> {
+        if let Some(&(r0, _r1, c0, _c1)) = areas.get(s) {
+            return Some(if is_col { c0 as i16 + 1 } else { r0 as i16 + 1 });
+        }
+        if let Some(v) = lines.get(s) {
+            return v.first().copied();
+        }
+        let base = s
+            .strip_suffix("-start")
+            .or_else(|| s.strip_suffix("-end"))
+            .unwrap_or(s);
+        if base != s
+            && let Some(v) = lines.get(base)
+        {
+            return v.first().copied();
+        }
+        None
+    }
+
+    /// E5：命名终点解析（区域止边 = 界+2 → 全名线末现 → strip 后缀裸名末现）。
+    fn resolve_named_end(
+        s: &str,
+        lines: &GridLineMap,
+        areas: &GridAreaMap,
+        is_col: bool,
+    ) -> Option<i16> {
+        if let Some(&(_r0, r1, _c0, c1)) = areas.get(s) {
+            return Some(if is_col { c1 as i16 + 2 } else { r1 as i16 + 2 });
+        }
+        if let Some(v) = lines.get(s) {
+            return v.last().copied();
+        }
+        let base = s
+            .strip_suffix("-start")
+            .or_else(|| s.strip_suffix("-end"))
+            .unwrap_or(s);
+        if base != s
+            && let Some(v) = lines.get(base)
+        {
+            return v.last().copied();
+        }
+        None
+    }
+
+    fn seed_image_leaves(&mut self) {
+        let ids: Vec<NodeId> = self
+            .taffy_node
+            .keys()
+            .copied()
+            .filter(|&id| self.tree.children(id).is_empty() && self.tree.node(id).image.is_some())
+            .collect();
+        for id in ids {
+            let absolute = self.is_absolute(id);
+            let avail = self.map_env().viewport_w;
+            let Some((mw, mh)) = self.image_leaf_measure(&id, avail) else {
+                continue;
+            };
+            if let Some(old) = self.measures.get(&id)
+                && (old.0 - mw).abs() <= f32::EPSILON
+                && (old.1 - mh).abs() <= f32::EPSILON
+            {
+                continue;
+            }
+            self.measures.insert(id, (mw, mh));
+            if absolute {
+                continue;
+            }
+            if let Some(&tid) = self.taffy_node.get(&id) {
+                let Some(cs) = self.styles.get(&id).cloned() else {
+                    continue;
+                };
+                let mut ts = map_style(&cs, &self.map_env());
+                // 声明边保留 map_style 结果，其余边落测量值（自然/比例）。
+                ts.size = taffy::prelude::Size {
+                    width: if has_declared_len(&cs, crate::css::property::PropertyId::Width) {
+                        ts.size.width
+                    } else {
+                        taffy::prelude::Dimension::length(mw)
+                    },
+                    height: if has_declared_len(&cs, crate::css::property::PropertyId::Height) {
+                        ts.size.height
+                    } else {
+                        taffy::prelude::Dimension::length(mh)
+                    },
+                };
+                let _ = self.taffy.set_style(tid, ts);
+            }
+        }
     }
 
     /// 注册背景图（第五批⑨）：background-image: url(ref) 引用 → 宿主
@@ -2655,7 +4953,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // 性能（阶段5）：父样式借引用传入（compute_node_in 仅需共享借用），
         // 不再整份克隆 ComputedStyle（全集物化 BTreeMap ~110 项/节点）。
         let parent_style = parent_id.and_then(|p| self.styles.get(&p));
-        let cs = compute_node_in(&self.tree, id, &self.sheet, &self.media, parent_style, cctx);
+        let author = self.author_sheets();
+        let mut cs = compute_node_in(
+            &self.tree,
+            id,
+            author,
+            self.user_sheet.as_ref(),
+            &self.registered_props,
+            &self.map_env(),
+            parent_style,
+            cctx,
+        );
+        // A9：字体相对单位度量（ch/ex/ic）按注册族名补写（未注册=近似缺省）
+        let fm = self.metrics_for(&cs);
+        cs.set_font_metrics(fm);
         // 阶段2③：自身是容器 → 入栈（后代 @container 求值用；自身样式已
         // 按祖先快照求值完毕——查询容器不含自身）。快照缺席 = 尺寸 unknown
         //（首帧/收敛中：特性不命中，B 级偏差——未强制 size containment）。
@@ -2697,7 +5008,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         ..Default::default()
                     },
                 );
-                let scs = compute_node_in(&tmp, tmp_id, &self.sheet, &self.media, Some(&cs), cctx);
+                let author = self.author_sheets();
+                let mut scs = compute_node_in(
+                    &tmp,
+                    tmp_id,
+                    author,
+                    self.user_sheet.as_ref(),
+                    &self.registered_props,
+                    &self.map_env(),
+                    Some(&cs),
+                    cctx,
+                );
+                let sfm = self.metrics_for(&scs);
+                scs.set_font_metrics(sfm);
                 resolved.push((sp.range.0.min(text_len), sp.range.1.min(text_len), scs));
             }
             self.span_styles.insert(id, resolved);
@@ -2718,17 +5041,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
             let (w, h) = self
                 .text
-                .measure_rich(&text, &cs, &span_refs, None, &self.media);
+                .measure_rich(&text, &cs, &span_refs, None, &self.map_env());
             if w > 0.0 || h > 0.0 {
                 self.measures.insert(id, (w, h));
                 let min = self
                     .text
-                    .measure_min_content(&text, &cs, &span_refs, &self.media);
+                    .measure_min_content(&text, &cs, &span_refs, &self.map_env());
                 self.min_measures.insert(id, min);
                 self.auto_text.insert(id);
             }
         }
-        let mut ts = map_style(&cs, &self.media);
+        let mut ts = map_style(&cs, &self.map_env());
         // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点（结算基准 =
         // 父内容尺寸；无 taffy 节点则弃置——下次 restyle 重新捕获）。
         if let Some(&tid) = self.taffy_node.get(&id) {
@@ -2782,6 +5105,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if let Some(&tid) = self.taffy_node.get(&id) {
             let _ = self.taffy.set_style(tid, ts);
         }
+        // C4（ADR-0018）：::selection / ::placeholder 通道（须在 cs 移入
+        // styles 前取 &cs 作继承基）。
+        self.style_channels(id, &cs, cctx);
         self.styles.insert(id, cs);
         guard.mark(id);
         let children: Vec<NodeId> = self.tree.children(id).to_vec();
@@ -2867,6 +5193,44 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             }
             self.collect(*c, cx, cy, out, layout_by_node);
         }
+    }
+}
+
+/// 样式树结构递归投影（F3e，ADR-0027 D1）：`layout_tree_dump` 的行生产器。
+/// 标签 = 元素名（匿名 `anon`）/`#id`/`.class` 连串/`key=K`（宿主映射时）
+/// /`[::before|::after]`（伪实体）/`text="…"`（截断 24 字节）。深度缩进
+/// 两空格一级。
+fn dump_tree_node<K: Copy + std::fmt::Debug>(
+    tree: &StyleTree,
+    keys: &mut HashMap<NodeId, K>,
+    id: NodeId,
+    depth: usize,
+    out: &mut String,
+) {
+    let node = tree.node(id);
+    out.push_str(&"  ".repeat(depth));
+    out.push('<');
+    out.push_str(node.name.as_deref().unwrap_or("anon"));
+    if let Some(i) = &node.id {
+        out.push_str(&format!(" #{i}"));
+    }
+    for c in &node.classes {
+        out.push_str(&format!(".{c}"));
+    }
+    out.push('>');
+    if let Some(k) = keys.remove(&id) {
+        out.push_str(&format!(" key={k:?}"));
+    }
+    if let Some(p) = node.pseudo {
+        out.push_str(&format!(" [pseudo={p:?}]"));
+    }
+    if let Some(t) = &node.text {
+        let head: String = t.chars().take(24).collect();
+        out.push_str(&format!(" text={head:?}"));
+    }
+    out.push('\n');
+    for &c in tree.children(id) {
+        dump_tree_node(tree, keys, c, depth + 1, out);
     }
 }
 
@@ -5112,7 +7476,9 @@ mod tests {
     #[test]
     fn filter_clip_path_trigger_stacking_context_order() {
         // 第四批④：非定位 filter/clip-path ≠ none → SC（Pos 带键 0），后画
-        // 覆盖树序控制组；且 op 总数与控制组一致（仅触发、不产生效果 PaintOp）
+        // 覆盖树序控制组；效果触发组（filter/will-change/isolation/mix-blend）
+        // 不产生效果 PaintOp。F3c（ADR-0025）：clip-path 升级为真实裁剪
+        // 语义——inset(0) 恰产生 PushClip+PopClip 对（包住自身与子树）。
         let node = |classes: &str| StyleNode {
             name: Some("div".into()),
             classes: std::iter::once(classes.to_string()).collect(),
@@ -5143,15 +7509,66 @@ mod tests {
         assert!(blue < red, "控制组应树序绘制（blue={blue:?} red={red:?}）");
         for (label, ops) in [
             ("filter", build(" filter: blur(0px);")),
-            ("clip-path", build(" clip-path: inset(0);")),
             ("will-change", build(" will-change: transform;")),
             ("isolation", build(" isolation: isolate;")),
             ("mix-blend-mode", build(" mix-blend-mode: multiply;")),
+            ("backdrop-filter", build(" backdrop-filter: blur(2px);")),
         ] {
             let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
             assert!(blue > red, "{label} SC 应后画（blue={blue:?} red={red:?}）");
             assert_eq!(ops.len(), plain.len(), "{label} 不应产生额外 PaintOp");
         }
+        // F3c：clip-path = SC 后画 + 恰一对 PushClip/PopClip（无其它效果 op）。
+        let clip_ops = build(" clip-path: inset(0);");
+        let (blue, red) = (
+            find(&clip_ops, [0.0, 0.0, 1.0]),
+            find(&clip_ops, [1.0, 0.0, 0.0]),
+        );
+        assert!(
+            blue > red,
+            "clip-path SC 应后画（blue={blue:?} red={red:?}）"
+        );
+        assert_eq!(
+            clip_ops.len(),
+            plain.len() + 2,
+            "clip-path 应恰产生 PushClip+PopClip 对"
+        );
+        assert!(
+            clip_ops
+                .iter()
+                .any(|op| matches!(op, crate::paint::PaintOp::PushClip { .. }))
+        );
+    }
+
+    #[test]
+    fn clip_path_computed_initial_and_non_inherited() {
+        // F3c（ADR-0025）：初始值 none；clip-path 非继承（css-masking-1）——
+        // 父形状不落入子节点
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    "div.p { width: 40px; height: 40px; clip-path: circle(10px); } \
+                 div.c { width: 40px; height: 40px; }"
+                )
+                .is_clean()
+        );
+        assert!(engine.insert(None, Key(1), node("p")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("c")).is_ok());
+        let _ = engine.frame((200.0, 200.0), 1.0, 0.0);
+        let parent = engine.computed_style(Key(1)).expect("父快照");
+        let child = engine.computed_style(Key(2)).expect("子快照");
+        assert!(parent.has_clip_path(), "父触发");
+        assert!(
+            matches!(child.clip_path(), crate::css::property::ClipShape::None),
+            "子节点非继承 → 缺省 none"
+        );
+        assert!(!child.has_clip_path());
     }
 
     #[test]
@@ -5362,7 +7779,10 @@ mod tests {
         assert!(engine.insert(Some(Key(1)), Key(2), stretch).is_ok());
         let mut fixed = node("fix");
         fixed.text = Some("shrink wrap candidate".into());
-        assert!(engine.insert(Some(Key(1)), Key(3), fixed).is_ok());
+        // F1（ADR-0021）：声明宽叶独占容器（wrapper 隔离）——单叶不构成
+        // 运行（判据=≥2 参与者或含盒）→ 第五批⑥块流拉伸/声明宽契约保全。
+        assert!(engine.insert(Some(Key(1)), Key(4), node("wrap")).is_ok());
+        assert!(engine.insert(Some(Key(4)), Key(3), fixed).is_ok());
         let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
         let st = frame.find(Key(2)).unwrap();
         // 自然宽 < 220：叶盒应 = 220（拉伸），而非测量自然宽
@@ -5416,30 +7836,68 @@ mod tests {
     }
 
     #[test]
-    fn display_inline_contractual_block_participation() {
-        // 第五批⑧契约：display:inline* 解析接受并归一（无 IFC）——inline
-        // / inline-block 元素按 block 参与布局（纵向堆叠，无行盒并排），
-        // 声明不丢弃（is_clean 保持 true，归一化走 tracing 告警非报告失败）。
-        let node = |classes: &str| StyleNode {
+    fn display_inline_line_participation_f1() {
+        // F1（ADR-0021）取代第五批⑧契约：display:inline/inline-block 参与
+        // IFC 行打包（同行并排、收缩适配），不再纵向块化堆叠；解析仍接受
+        //（is_clean 保持 true，归一化告警仅余 inline-flex/grid/table）。
+        let node = |classes: &str, text: &str| StyleNode {
             name: Some("div".into()),
             classes: std::iter::once(classes.to_string()).collect(),
+            text: Some(text.to_string()),
             ..Default::default()
         };
         let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
         assert!(engine
             .set_stylesheet(
-                "div.p { width: 300px; } div.a { display: inline; height: 40px; background-color: #ff0000; } div.b { display: inline-block; height: 40px; background-color: #0000ff; }"
+                "div.p { width: 300px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; background-color: #ff0000; } div.b { display: inline-block; height: 40px; font-family: \"DejaVu Sans\"; font-size: 16px; background-color: #0000ff; }"
             )
             .is_clean());
-        assert!(engine.insert(None, Key(1), node("p")).is_ok());
-        assert!(engine.insert(Some(Key(1)), Key(2), node("a")).is_ok());
-        assert!(engine.insert(Some(Key(1)), Key(3), node("b")).is_ok());
+        assert!(engine.insert(None, Key(1), node("p", "")).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("a", "aaa"))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(3), node("b", "bbb"))
+                .is_ok()
+        );
         let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
         let a = frame.find(Key(2)).unwrap();
         let b = frame.find(Key(3)).unwrap();
-        // 纵向堆叠：b 顶 = a 底（block 参与），而非行盒并排
-        assert!((b.y - (a.y + a.height)).abs() < 0.5, "inline 应块化堆叠");
+        // F1 行盒并排：双叶参与者同行（y 相等），b.x = a 宽（advance 接排）。
+        assert_eq!(a.y, 0.0);
+        assert_eq!(b.y, 0.0, "F1：同行并排（取代第五批⑧块化堆叠契约）");
+        assert!((b.x - a.width).abs() < 0.5, "b.x=a 宽（接排）");
         assert!(a.width > 0.0 && b.width > 0.0);
+    }
+
+    #[test]
+    fn settle_pass_schedule_topological_order() {
+        // F2（ADR-0022 D1）：调度序=依赖全在前（Tables/Columns→Calc、
+        // Floats→Columns、Lines→Floats）。
+        let order = SettlePassKind::schedule();
+        assert_eq!(order.len(), 5);
+        for (i, p) in order.iter().enumerate() {
+            for d in p.deps() {
+                let di = order.iter().position(|x| x == d).unwrap();
+                assert!(di < i, "依赖 {d:?} 须先于 {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn settle_should_run_gates_empty_inputs() {
+        // F2（ADR-0022 D1）：空输入 pass 被运行门跳过（廉价谓词面）。
+        let engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(!engine.settle_should_run(SettlePassKind::Calc));
+        assert!(!engine.settle_should_run(SettlePassKind::Tables));
+        assert!(!engine.settle_should_run(SettlePassKind::Columns));
+        // 浮盒/行内无廉价输入索引——默认 true（内部早退治理）。
+        assert!(engine.settle_should_run(SettlePassKind::Floats));
+        assert!(engine.settle_should_run(SettlePassKind::Lines));
     }
 
     #[test]
@@ -5496,21 +7954,29 @@ mod tests {
     fn contract_errors() {
         let mut engine: StyleEngine<Key> = StyleEngine::new();
         assert!(engine.insert(None, Key(1), StyleNode::default()).is_ok());
+        // ADR-0010：第二个 insert(None) = overlay 根（RootExists 不再发生）
+        assert!(engine.insert(None, Key(2), StyleNode::default()).is_ok());
+        // top-layer 契约：文档根不可进层；未知 key 报 UnknownNode；overlay 可进
         assert_eq!(
-            engine.insert(None, Key(2), StyleNode::default()),
-            Err(crate::error::ContractError::RootExists)
+            engine.set_top_layer(Key(1), true),
+            Err(crate::error::ContractError::NotOverlayRoot)
         );
         assert_eq!(
-            engine.insert(Some(Key(9)), Key(2), StyleNode::default()),
+            engine.set_top_layer(Key(9), true),
+            Err(crate::error::ContractError::UnknownNode)
+        );
+        assert!(engine.set_top_layer(Key(2), true).is_ok());
+        assert_eq!(
+            engine.insert(Some(Key(9)), Key(4), StyleNode::default()),
             Err(crate::error::ContractError::UnknownNode)
         );
         assert!(
             engine
-                .insert(Some(Key(1)), Key(2), StyleNode::default())
+                .insert(Some(Key(1)), Key(3), StyleNode::default())
                 .is_ok()
         );
         assert_eq!(
-            engine.insert(Some(Key(1)), Key(2), StyleNode::default()),
+            engine.insert(Some(Key(1)), Key(3), StyleNode::default()),
             Err(crate::error::ContractError::DuplicateNode)
         );
         assert_eq!(
@@ -5800,7 +8266,7 @@ mod tests {
                 .set_declarations(Key(3), "width: 100px; height: 50px")
                 .is_ok()
         );
-        engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
         assert!(engine.remove(Key(2)).is_ok());
         let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
         assert_eq!(frame.boxes.len(), 2);

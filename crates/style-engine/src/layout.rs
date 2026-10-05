@@ -7,17 +7,47 @@
 use crate::computed::ComputedStyle;
 use crate::css::property::{Align, DeclValue, PropertyId};
 use crate::css::stylesheet::MediaEnv;
-use crate::css::value::{CalcNode, LengthPercentage, ResolveCtx};
+use crate::css::value::{CalcNode, CalcUnit, LengthPercentage, ResolveCtx};
 
 /// em 以节点自身字号为基准，rem 以根 16px 为基准。
 fn resolve_px(lp: &LengthPercentage, cs: &ComputedStyle, env: &MediaEnv) -> Option<f32> {
-    let ctx = ResolveCtx {
-        em: cs.font_size_px(),
-        rem: 16.0,
-        viewport_w: env.viewport_w,
-        viewport_h: env.viewport_h,
-    };
+    let ctx = map_ctx(cs, env);
     lp.resolve(&ctx, 0.0)
+}
+
+/// A9：映射期统一 ResolveCtx——容器查询单位按 small viewport 回落
+///（无容器祖先的规范缺省），字体度量取节点 ComputedStyle（restyle 期
+/// 由引擎按 font-family 补写真实值；未注册族=近似缺省，B 级在案）。
+fn map_ctx(cs: &ComputedStyle, env: &MediaEnv) -> ResolveCtx {
+    let m = cs.font_metrics();
+    ResolveCtx {
+        cq_w: env.viewport_w,
+        cq_h: env.viewport_h,
+        ch_per_em: m.ch_per_em,
+        ex_per_em: m.ex_per_em,
+        ic_per_em: m.ic_per_em,
+        ..ResolveCtx::base(cs.font_size_px(), 16.0, env.viewport_w, env.viewport_h)
+    }
+}
+
+/// A9：直变体 → calc 表达式（延迟结算队列统一以 CalcNode 承载）。
+fn lp_to_calc(lp: &LengthPercentage) -> CalcNode {
+    match lp {
+        LengthPercentage::Px(v) => CalcNode::Value(*v, CalcUnit::Px),
+        LengthPercentage::Em(v) => CalcNode::Value(*v, CalcUnit::Em),
+        LengthPercentage::Rem(v) => CalcNode::Value(*v, CalcUnit::Rem),
+        LengthPercentage::Percent(v) => CalcNode::Value(*v, CalcUnit::Percent),
+        LengthPercentage::Vw(v) => CalcNode::Value(*v, CalcUnit::Vw),
+        LengthPercentage::Vh(v) => CalcNode::Value(*v, CalcUnit::Vh),
+        LengthPercentage::Cqw(v) => CalcNode::Value(*v, CalcUnit::Cqw),
+        LengthPercentage::Cqh(v) => CalcNode::Value(*v, CalcUnit::Cqh),
+        LengthPercentage::Cqi(v) => CalcNode::Value(*v, CalcUnit::Cqi),
+        LengthPercentage::Cqb(v) => CalcNode::Value(*v, CalcUnit::Cqb),
+        LengthPercentage::Ch(v) => CalcNode::Value(*v, CalcUnit::Ch),
+        LengthPercentage::Ex(v) => CalcNode::Value(*v, CalcUnit::Ex),
+        LengthPercentage::Ic(v) => CalcNode::Value(*v, CalcUnit::Ic),
+        LengthPercentage::Calc(e) => (**e).clone(),
+    }
 }
 
 // —— ①calc 直通：延迟结算 ——
@@ -99,7 +129,8 @@ impl CalcAxis {
     }
 }
 
-/// 映射期捕获的延迟 calc（expr + 解析上下文快照）。
+/// 映射期捕获的延迟 calc（expr + 解析上下文快照；A9 + 字体度量与容器
+/// 基值——cq 基值结算期现查 cq_basis，度量快照自节点 ComputedStyle）。
 pub(crate) struct DeferredRaw {
     pub axis: CalcAxis,
     pub expr: CalcNode,
@@ -107,6 +138,12 @@ pub(crate) struct DeferredRaw {
     pub rem: f32,
     pub vw: f32,
     pub vh: f32,
+    /// A9：ch 基准（每 em；defer 时自 cs 捕获）。
+    pub ch_per_em: f32,
+    /// A9：ex 基准（每 em）。
+    pub ex_per_em: f32,
+    /// A9：ic 基准（每 em）。
+    pub ic_per_em: f32,
 }
 
 /// 挂接 taffy 节点后的结算条目。
@@ -126,6 +163,7 @@ pub(crate) fn take_calc_deferred() -> Vec<DeferredRaw> {
 }
 
 fn defer_calc(expr: &CalcNode, cs: &ComputedStyle, env: &MediaEnv, axis: CalcAxis) {
+    let m = cs.font_metrics();
     CALC_DEFERRED.with(|c| {
         c.borrow_mut().push(DeferredRaw {
             axis,
@@ -134,6 +172,9 @@ fn defer_calc(expr: &CalcNode, cs: &ComputedStyle, env: &MediaEnv, axis: CalcAxi
             rem: 16.0,
             vw: env.viewport_w,
             vh: env.viewport_h,
+            ch_per_em: m.ch_per_em,
+            ex_per_em: m.ex_per_em,
+            ic_per_em: m.ic_per_em,
         });
     });
 }
@@ -149,15 +190,16 @@ fn dimension(
         None => Dimension::auto(),
         Some(LengthPercentage::Percent(f)) => Dimension::percent(*f),
         // ①calc 直通：含百分比 calc 延迟结算（px 部分先行折叠供首遍布局）。
-        Some(LengthPercentage::Calc(e)) if e.has_percent() => {
+        Some(LengthPercentage::Calc(e)) if e.has_percent() || e.has_cq() => {
             defer_calc(e, cs, env, axis);
-            let ctx = ResolveCtx {
-                em: cs.font_size_px(),
-                rem: 16.0,
-                viewport_w: env.viewport_w,
-                viewport_h: env.viewport_h,
-            };
-            Dimension::length(e.resolve(&ctx, 0.0).unwrap_or(0.0))
+            // 首遍折叠：cq 叶按 small viewport 回落（settle 期以真实容器基精化）
+            Dimension::length(e.resolve(&map_ctx(cs, env), 0.0).unwrap_or(0.0))
+        }
+        // A9：cq 直变体（width: 50cqw 等）同样延迟结算
+        Some(lp) if lp.has_cq() => {
+            let node = lp_to_calc(lp);
+            defer_calc(&node, cs, env, axis);
+            Dimension::length(node.resolve(&map_ctx(cs, env), 0.0).unwrap_or(0.0))
         }
         Some(other) => match resolve_px(other, cs, env) {
             Some(px) => Dimension::length(px),
@@ -212,15 +254,16 @@ fn lp_auto_defer(
     match lp {
         None => T::auto(),
         Some(LengthPercentage::Percent(f)) => T::percent(*f),
-        Some(LengthPercentage::Calc(e)) if e.has_percent() => {
+        Some(LengthPercentage::Calc(e)) if e.has_percent() || e.has_cq() => {
             defer_calc(e, cs, env, slot);
-            let ctx = ResolveCtx {
-                em: cs.font_size_px(),
-                rem: 16.0,
-                viewport_w: env.viewport_w,
-                viewport_h: env.viewport_h,
-            };
-            T::length(e.resolve(&ctx, 0.0).unwrap_or(0.0))
+            // 首遍折叠：cq 叶按 small viewport 回落（settle 期以真实容器基精化）
+            T::length(e.resolve(&map_ctx(cs, env), 0.0).unwrap_or(0.0))
+        }
+        // A9：cq 直变体同样延迟结算
+        Some(lp) if lp.has_cq() => {
+            let node = lp_to_calc(lp);
+            defer_calc(&node, cs, env, slot);
+            T::length(node.resolve(&map_ctx(cs, env), 0.0).unwrap_or(0.0))
         }
         Some(other) => match resolve_px(other, cs, env) {
             Some(px) => T::length(px),
@@ -242,15 +285,19 @@ fn lp_defer(
     let fold = |px: f32| T::length(if clamp_neg { px.max(0.0) } else { px });
     match lp {
         LengthPercentage::Percent(f) => T::percent(*f),
-        LengthPercentage::Calc(e) if e.has_percent() => {
+        LengthPercentage::Calc(e) if e.has_percent() || e.has_cq() => {
             defer_calc(e, cs, env, slot);
-            let ctx = ResolveCtx {
-                em: cs.font_size_px(),
-                rem: 16.0,
-                viewport_w: env.viewport_w,
-                viewport_h: env.viewport_h,
-            };
-            fold(e.resolve(&ctx, 0.0).unwrap_or(0.0))
+            // 首遍折叠：cq 叶按 small viewport 回落（settle 期以真实容器基精化）
+            fold(e.resolve(&map_ctx(cs, env), 0.0).unwrap_or(0.0))
+        }
+        // A9：cq 直变体同样延迟结算
+        LengthPercentage::Cqw(_)
+        | LengthPercentage::Cqh(_)
+        | LengthPercentage::Cqi(_)
+        | LengthPercentage::Cqb(_) => {
+            let node = lp_to_calc(lp);
+            defer_calc(&node, cs, env, slot);
+            fold(node.resolve(&map_ctx(cs, env), 0.0).unwrap_or(0.0))
         }
         other => fold(resolve_px(other, cs, env).unwrap_or(0.0)),
     }
@@ -317,25 +364,40 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
     let padding = cs.padding();
 
     let mut ts = Style {
-        display: match cs.display() {
-            crate::css::property::Display::Block => taffy::prelude::Display::Block,
-            crate::css::property::Display::Flex => taffy::prelude::Display::Flex,
-            crate::css::property::Display::Grid => taffy::prelude::Display::Grid,
-            crate::css::property::Display::None => taffy::prelude::Display::None,
-            // 二期②表格三值：表=块容器（行级 Grid 纵向堆叠）、行=单行 Grid
-            // （列模板由引擎 settle_tables 结算回写）、单元格=Grid 项。
-            crate::css::property::Display::Table => taffy::prelude::Display::Block,
-            crate::css::property::Display::TableRow => taffy::prelude::Display::Grid,
-            crate::css::property::Display::TableCell => taffy::prelude::Display::Block,
-            // 三期④：行组=纵向透明块包装、caption=普通块（置于行区上方）。
-            crate::css::property::Display::TableRowGroup => taffy::prelude::Display::Block,
-            crate::css::property::Display::TableCaption => taffy::prelude::Display::Block,
+        display: if cs.pseudo().is_some()
+            && !matches!(cs.content(), crate::css::property::ContentValue::Str(_))
+        {
+            // C1（ADR-0015）：伪节点 content none/normal → 无盒（spec：
+            // content 仅作用于伪元素；宿主节点恒 Normal 不受影响）
+            taffy::prelude::Display::None
+        } else {
+            match cs.display() {
+                crate::css::property::Display::Block => taffy::prelude::Display::Block,
+                // F1（ADR-0021）：inline/inline-block 均映射 taffy Block
+                //（零布局差异）；行内参与由引擎 settle_lines 行打包处理。
+                crate::css::property::Display::Inline
+                | crate::css::property::Display::InlineBlock => taffy::prelude::Display::Block,
+                crate::css::property::Display::Flex => taffy::prelude::Display::Flex,
+                crate::css::property::Display::Grid => taffy::prelude::Display::Grid,
+                crate::css::property::Display::None => taffy::prelude::Display::None,
+                // 二期②表格三值：表=块容器（行级 Grid 纵向堆叠）、行=单行 Grid
+                // （列模板由引擎 settle_tables 结算回写）、单元格=Grid 项。
+                crate::css::property::Display::Table => taffy::prelude::Display::Block,
+                crate::css::property::Display::TableRow => taffy::prelude::Display::Grid,
+                crate::css::property::Display::TableCell => taffy::prelude::Display::Block,
+                // 三期④：行组=纵向透明块包装、caption=普通块（置于行区上方）。
+                crate::css::property::Display::TableRowGroup => taffy::prelude::Display::Block,
+                crate::css::property::Display::TableCaption => taffy::prelude::Display::Block,
+            }
         },
         position: match cs.position() {
-            crate::css::property::Position::Static | crate::css::property::Position::Relative => {
-                taffy::prelude::Position::Relative
-            }
+            crate::css::property::Position::Static
+            | crate::css::property::Position::Relative
+            | crate::css::property::Position::Sticky => taffy::prelude::Position::Relative,
             crate::css::property::Position::Absolute => taffy::prelude::Position::Absolute,
+            // A4：taffy 无 fixed——映射为 Absolute；包含块（transformed
+            // 祖先或 ICB 视口）由 settle_absolute_anchors 的 cb 判定。
+            crate::css::property::Position::Fixed => taffy::prelude::Position::Absolute,
         },
         // box-sizing 直通：taffy 的 size 语义随 ContentBox/BorderBox 换算
         // （block.rs 布局期以 padding_border_size 调整），CSS 默认 content-box
@@ -389,11 +451,22 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
                 .map(|lp| lp_defer(lp, cs, env, CalcAxis::PaddingLeft, true))
                 .unwrap_or_else(|| taffy::prelude::LengthPercentage::length(0.0)),
         },
-        inset: Rect {
-            top: length_percentage_auto(lp_auto(PropertyId::Top), cs, env),
-            right: length_percentage_auto(lp_auto(PropertyId::Right), cs, env),
-            bottom: length_percentage_auto(lp_auto(PropertyId::Bottom), cs, env),
-            left: length_percentage_auto(lp_auto(PropertyId::Left), cs, env),
+        // A4 sticky：in-flow 布局不施加 inset 偏移（top/right/bottom/left
+        // 是粘滞约束语义、宿主消费；taffy 相对定位会把 inset 当偏移用）。
+        inset: if matches!(cs.position(), crate::css::property::Position::Sticky) {
+            Rect {
+                top: taffy::prelude::LengthPercentageAuto::auto(),
+                right: taffy::prelude::LengthPercentageAuto::auto(),
+                bottom: taffy::prelude::LengthPercentageAuto::auto(),
+                left: taffy::prelude::LengthPercentageAuto::auto(),
+            }
+        } else {
+            Rect {
+                top: length_percentage_auto(lp_auto(PropertyId::Top), cs, env),
+                right: length_percentage_auto(lp_auto(PropertyId::Right), cs, env),
+                bottom: length_percentage_auto(lp_auto(PropertyId::Bottom), cs, env),
+                left: length_percentage_auto(lp_auto(PropertyId::Left), cs, env),
+            }
         },
         // 边框占位（Numeric Channel box-model 用例驱动，ADR-0003）：CSS 边框
         // 计入布局（content-box 调整式含 padding+border）；style none → 0，
@@ -705,6 +778,13 @@ fn auto_tracks(
     env: &MediaEnv,
 ) -> Vec<taffy::prelude::TrackSizingFunction> {
     match v {
+        // E5（ADR-0020）：grid-auto-* 与模板共用轨道列表解析（GridTracks，
+        // line_names 空）→ 全列表映射（多条目按奇偶隐式轨交替）。
+        Some(DeclValue::GridTracks(t)) => t
+            .tracks
+            .iter()
+            .map(|ts| track_sizing(ts, cs, env))
+            .collect(),
         Some(DeclValue::LenAuto(Some(lp))) => {
             vec![track_lp(lp, cs, env)]
         }

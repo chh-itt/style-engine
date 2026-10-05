@@ -87,13 +87,21 @@ pub mod layout;
 pub mod cascade;
 pub mod computed;
 pub mod css;
+/// 调试工具链（F3e，ADR-0027）：宿主侧人读视图（DisplayList 树/布局树/
+/// 几何盒；ComputedStyle 视图在 `ComputedStyle::debug_dump`）。零新状态
+/// 纯投影，不参与级联/结算/绘制任何路径。
+pub mod debug;
 pub mod error;
 pub mod paint;
+#[cfg(feature = "serde")]
+pub mod paint_dump;
 pub mod selector;
 pub mod tree;
 
 #[cfg(feature = "text")]
 pub mod text;
+/// text-transform 变换（C2；无 cfg 门——度量与绘制路径共用）。
+pub mod text_transform;
 
 pub use cascade::{Candidate, CascadeOutput, CustomCandidate, MatchedRule, Origin};
 pub use computed::{ComputedStyle, compute_node};

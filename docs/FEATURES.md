@@ -20,16 +20,364 @@
 - 容器查询（阶段2③）：@container 尺寸查询 MVP——解析：@container [name]? { rules }（AtPrelude::Container → 子 StylesheetParser 递归，嵌套 @container/@media 条件扁平 AND；条件=逗号分隔 OR 段、段内特性并置/and 均 AND；特性=(width|inline-size|height|block-size)[: op] len、(orientation:portrait|landscape)、值在前反序形式（300px <= width ≡ width >= 300px，算子翻面）、旧形 min-*/max-* 前缀（→ ≥/≤ 语义改写）；坏条件 report 告警+整规则跳过，与 @media 同形）；数据结构 ContainerFeature{Size{axis,op,value}|Orientation(bool)}/ContainerCondition{name,features} 自带 eval，Rule.container=Option<Vec<_>>（None=无条件）、Stylesheet.has_container_rules 单源派生；级联：ContainerCtx{names,ctype,size}（cascade.rs）——match_rules/cascade_declarations 增 container_ctx 参，规则条件逐段求值不满足即跳过；有名段沿容器栈 rev() 取最近同名容器、无名段取栈顶最近可用容器，无可用容器或 InlineSize 容器遇 Block 轴/orientation 特性（尺寸未知语义）→ 不命中；布局收敛：container-type（normal|size|inline-size）+container-name（none | 空格分隔 custom-ident 列表）长手 + container 简写（<'container-name'> [/ <'container-type'>]?，真简写无条件重置两长手；裸类型关键字 size/inline-size 歧义归 type——CSSWG 裁定）；engine.rs record_container_sizes 帧末记录各容器 content-box 尺寸（taffy size−border−padding），restyle DFS 维护容器栈（自身样式按祖先求值后才入栈——查询容器不含自身），frame 收敛环（has_container_rules 时上限 3 pass：restyle→布局→record，快照变更→dirty_style 重跑，稳态零额外 pass），set_stylesheet 清空快照；锁定测试：container_rule_parse_shapes/container_orientation_and_nested_media/container_invalid_condition_skips_rule/container_longhands_parse/container_shorthand_name_and_type + shorthand_longhands_match_expand（16 简写防漂移）/container_rule_matches_named_and_unnamed/container_inline_size_blocks_block_axis_features/container_no_available_container_no_match/container_query_converges_within_first_frame/container_query_refits_on_viewport_resize/container_inline_size_gates_block_axis_features/container_named_lookup_skips_unnamed/container_snapshot_subtracts_padding；conformance 新增 container-query 用例（inline-size 容器 50% 宽=200px 内容盒，min-width:150px 命中 kid 30×30 红→60×60 蓝，Chromium 153 四盒零超差 Numeric+Pixel 双通道）；v1 边界（B 级偏差）：container-type 无强制 size containment（内容可反向影响容器尺寸，收敛环 3 pass 上限近似规范单帧语义；Chromium containment 强制）、cqh/cqw 容器单位未做、style 查询未做（T2）
 - 多列布局（二期③）：column-count/column-width（+columns 简写，任一顺序至少一项，未指定长手重置 auto）v1 平衡多列——应用层结算（taffy 无列算法，保持框架中立）：容器 map_style 映射 taffy Flex Row（multicol_requested 单源判定，引擎登记与映射共用），engine.rs settle_columns 布局期结算（settle_calc/settle_tables 同模式，frame 内两次挂点——文本重排后二次平衡）：n=显式 count（Some(1)→回退单列）或 width 模式 n=max(1,⌊(cw+gap)/(w+gap)⌋)、colw=(cw−gap·(n−1))/n；n 个幻影列叶（Block、定宽、无样式→Frame 不报告）经 set_children 跨父重挂真实子节点，collect/T5c-2 按幻影补偏移与包含块；平衡分配=子节点 margin-box 单元高的**顺序装箱二分**（三期⑤a 重写贪心）：fit(h)=列非空放不下换列、末列溢出失败、空列承接不可断高块、**列首块 margin-top 按 0 计量（断口语义 css-multicol §7）**；fit 单调 → 浮点二分 48 次收窄最小可行列高、终值重装箱定分配——[80,80,80,10] 双列得 [80,80|80,10] max160（贪心 170）；断口截断落地=MulticolState.truncated 备份 taffy margin-top 原值（taffy 0.14 LengthPercentageAuto 无公开字段，零值以 TaffyZero::ZERO 比对）、每帧无条件重算 diff（文本重排 pass 以样式重写 margin → 二次结算需重截；HashMap collect 后写覆盖缺陷已修——列首件必须 entry().or_insert 保树序第一）、回退单列/退出多列恢复全部、restyle 全清（map_style 已复位）；gap 族解析改 parse_len（原 parse_corner_radius 产 Radius 无读者会静默归零，flex/grid gap 同步修复；normal 仍拒收——multicol 语义 normal=1em 由声明缺席表达）；break-inside（avoid|auto，三期⑤a）解析存储——v1 所有块一律不可断装箱（avoid 即默认语义），auto 可分裂未做（B 级）；浏览器对齐（Chromium 153.0.8010.12，conformance multicol-basic 7 盒零超差：列宽 290、列位 0/310、每列 3 件、容器高 90；新增 multicol-balance 用例 10 盒零超差——双 multicol 叠放验二分平衡 160/110 与断口 margin-top 截断，子件 break-inside:avoid 对齐 Chromium 断行模型：无 avoid 时空块会被 Chromium 跨列拆碎平衡高 125≠160）；锁定测试 multicol_balance_two_columns/width_mode_four_columns/revert_single_column/balance_uneven + 三期⑤a multicol_bisection_balances_uneven/multicol_break_margin_top_truncated + columns_shorthand_two_longhands；三期⑤b column-span:all——spanner 切断列流分段独立平衡（engine.rs settle_columns：is_spanner=styles ColumnSpan(Some(true))，plans 段切分，每段独立 fit/二分；spanner 模式容器改 Flex Column+gap 0（每帧重断言——restyle 会以 map_style 重写回 Row+gap），每段一行包装（Flex Row width percent(1) 装 n 幻影列，行 gap=length 列 gap），spanner 为容器直系全宽块；行数/幻影数不符重建、colw 变仅回写幻影宽、容器孩子序签名 seq_sig 变仅重排（spanner 换位复用行）；MulticolState 增 rows/span_mode/seq_sig/assignment 升格 (段,列) 二元组）；截断域修正=仅段内列首（col>0）截 margin-top，段首不截——spanner 边界是强制断行，css-break-3 强断边距保留（Chromium 153 实证 b2 y=360 含 mt20，非截断的 340）；collect 补偿升级=幻影链上溯（child→phantom→row→container 累加 location，沿 taffy_parent 循环至样式节点、深度 16 限），n≤1 回退重挂改树序全部真实子件（含 spanner）；conformance 新增 multicol-span 用例（双 multicol：spanner 前后各 [80,80] 段行并排 + mc2 探针实证段首 margin 保留，11 盒零超差 Numeric+Pixel 双通道）；锁定测试 multicol_span_all_splits_flow/span_all_two_segments_balance/span_segment_start_margin_kept；三期⑤c column-rule（width||style||color 简写+三长手）——解析侧 PropertyId×3：ColumnRuleWidth（thin/medium/thick 物化 1/3/5px、无 none 关键字——none 非法列规宽整条丢弃，Chromium 同语义）、ColumnRuleStyle（复用 BorderStyle 枚举）、ColumnRuleColor（复用 DeclValue::Color）；简写 || 三分量任一顺序至少一项、未指定长手重置初始（medium 3px/style none/currentcolor）；绘制=装饰非盒——engine.rs settle_column_rules 帧末 pass（collect 后、DisplayList 前，layout_by_node 最新鲜）产 ColumnRuleSeg（相对容器 border-box 原点：每行每相邻列对 gap 居中，宽=声明宽 max(0) 缺省 medium 3px、高=列高、色经 resolve_color CurrentColor→元素 color；span 模式逐段行 rel=行+幻影 location、行模式容器直系 rel=幻影 location；style none/hidden 或零宽不画），paint_node 边框后子件前 FillRect 直出（radius 全零）；v1 仅 Solid 实绘，花式（double/dotted/dashed/groove/ridge/inset/outset）解析接受按 Solid 近似=B 级偏差；conformance 新增 multicol-rule 用例（4px 红规 gap20 居中条带 x198..202 y0..160——列规非 DOM 盒，numeric 通道两侧均只含 6 内容盒，条带几何由 Pixel 通道把关，Chromium 153 零超差 Numeric+Pixel 双通道）；锁定测试 multicol_rule_row_mode_gap_centered/multicol_rule_span_mode_per_segment/multicol_rule_style_none_or_zero_width_no_paint + column_rule_shorthand_and_longhands + column_rule_strips_paint_relative_to_container_origin；v1 边界：column-rule-color 不继承（currentcolor 逐元素解析，色差场景才可见）；v1 边界：跨列分裂内容未做（break-inside:avoid 子件与 Chromium 平衡语义一致，auto 块有偏差）、column-span:all 之外的 span 值（如整数列跨）未做、absolute 子件包含块仍为容器
 - absolute 包含块跳走（三期②）：taffy 直父锚定的结构性修正——absolute 子件的包含块按 CSS 2.1 §10.1 取最近 positioned（relative/absolute）或 transformed（has_transform；动画可翻转 has_transform，故结算挂点在 apply_animations 之后、compute #1 之前）祖先，无则初始包含块。engine.rs settle_absolute_anchors 帧内结构修正 pass：DFS 求 abs_cb（记录用严格祖先候选——节点自身 positioned 不得自选为 cb，首版自指缺陷）+abs_in 按 cb 分桶，逐节点 diff 期望子表后 taffy set_children 跨父重挂（move 语义顺带归位上帧残留；快速路径=无 absolute 且上帧未重挂则零成本跳过）；taffy_parent 同步维护；collect 对 abs_cb 命中节点改取 cb 视口坐标+l.location（ICB 哨兵→视口原点；style DFS 先序保证 cb 布局先就绪），并在幻影 effp 补偿前短路防双重偏移；v1 契约豁免 table/multicol 子树（absolute 子件包含块仍为容器，见多列条）；auto inset 静态位置=cb 流内近似（显式 inset 全正确，B 级）；fixed 不处理（T2）。Chromium 153 对齐：conformance 新增 absolute-anchor-jump（transformed mid 与叶间夹 static wrap，叶落 (60,20) 而非直父锚定的 (85,20)——x 差 25px 属 Class 3/4 零容忍拦截域），Numeric 合计 19 用例、Pixel 7 用例（该用例整数盒纯色 diff 0），零 xfail；引擎锁定测试×4（跨 static 包装跳走 / ICB 跳全 static 祖先 / 嵌套 absolute 自为后代 cb / 样式表替换后重挂归位）。随用例记录 taffy 0.14 塌陷偏差：末子 margin-bottom 与父 margin-bottom 塌陷时父盒被下移（塌陷量落在父上方而非父底缘之外，违 CSS 2.1 §8.3.1）——用例规避、偏差在案（B 级，见布局映射条）。
-- 绘制：背景色、线性/径向渐变（sink 内 stop 加密对齐 sRGB 插值）、圆角、边框、阴影、opacity、图片、圆角矩形 clip
-- 文本：单 style run、断行、字体注册与基础 fallback（测量内置，见 ADR-0006）
+- 绘制：背景全集（F3b：多层列表 cycling、repeat 平铺、position/size/origin/clip、attachment、background 简写）、clip-path 裁剪形状（F3c：inset/circle/ellipse/polygon + geometry-box 参考盒，PushClipPath 多边形裁剪）、border-image 九宫格（F3d：slice/width/outset/repeat，图片与渐变源，替代 Border op）、背景色、线性/径向渐变（sink 内 stop 加密对齐 sRGB 插值；F3d 起携带绝对几何 LinearGeom）、圆角、边框、阴影、opacity、图片（F3d 起携带采样窗口）、圆角矩形 clip
+- 文本：单 style run、断行、字体注册与基础 fallback（测量内置，见 ADR-0006）；字体深化（F3d：font-stretch/word-spacing/font-feature-settings/font-variation-settings/font-variant-caps 全通道——测量与双 sink 绘制同源；small-caps 合成）
 - 状态与动画：StateFlags、transition（可插值属性子集）
+- 行为提示属性（A1，docs/BEHAVIOR-HINT-PROPS.md）：cursor（CSS UI 4 关键字子集 15 值：auto/none/default/pointer/text/wait/progress/help/not-allowed/move/grab/grabbing/crosshair/zoom-in/zoom-out；url() 自定义=T2 解析期拒绝）/ user-select（auto|none|text|all|contain；**不继承**——spec 明确，宿主实现选择时自行取值）/ pointer-events（auto|none）/ caret-color / accent-color（auto|color → Option<ColorValue>，None=auto）——宿主可读零绘制通道：解析入库+级联+继承全语义，不产生任何 PaintOp、不参与布局（锁定测试 behavior_hint_no_paint_ops 断言 ops/几何零变化）；消费端=宿主经 `ComputedStyle::value(PropertyId)`（全集物化含初始值——非继承属性在子级物化为初始 auto；slot 87-91，SLOT_COUNT 94→99，slot_alignment 自动覆盖）；锁定测试 crates/style-engine/tests/behavior_hints.rs 六件
+- outline / outline-offset（A2，css-ui-4）：outline-width（<line-width> 复用 BorderWidth 值族）/ outline-style（none|auto|solid|dashed|dotted|double|groove|ridge|inset|outset；**auto=宿主 focus ring 语义位，绘制按 Solid 近似=B 级**；double/groove/ridge/inset/outset 亦按 Solid 近似——BorderStyle 仅 None/Hidden/Solid/Dashed/Dotted 变体）/ outline-color（<color>，初始 currentcolor）/ outline-offset（<length> 可负）；**outline 简写** = <'outline-width'> || <'outline-style'> || <'outline-color'>（任意序、未指定重置初始、**不重置 outline-offset**）；不继承、不占布局（零 taffy 映射）、**ink overflow 不入滚动量程**；绘制=复用 PaintOp::Border 外扩矩形承载（描边带=[border-box+offset, +offset+width]，radius 各分量 +d 圆心不变近似 v1 锁定），绘制序=边框后、列规/内容前；零 sink 改动（soft/vello 自动获得）；锁测试 crates/style-engine/tests/outline.rs 六件（几何锁 (-6,-6,112,112)@d=6）
+- 多根引擎与 top-layer（A3，ADR-0010）：`insert(None)` 多次——首个=文档根（单根语义逐位不变），后续=overlay 根（视口原点锚定、fit-content、作者显式 absolute/fixed 定位生效、各为级联根、不被文档 overflow 裁剪）；`set_top_layer(key, on)` 进出弹窗层（幂等；文档根→`ContractError::NotOverlayRoot`）；**有效绘制序 = 文档根 → 非 top overlay（插入序）→ top 层（进层序）**——`sync_root_order` 每帧同步树/taffy 子序（稳态零操作），绘制按根序逐根追加（`paint::append_display_list`）；`StyleTree::is_root` 重定义（:root 匹配全部用户根；`is_super_root` 新增）；remove 语义：overlay 摘除不动文档、文档根移除=全清；锁测试 crates/style-engine/tests/multi_root.rs 六件
+- position: fixed / sticky（A4）：Position 全值 {Static,Relative,Absolute,Fixed,Sticky}。fixed=视口锚定（包含块=transformed 祖先或 ICB，**positioned 祖先不算**；taffy 映射 Absolute+settle_absolute_anchors tcb 候选重挂；fixed 为 absolute 后代的 cb）；sticky=in-flow 布局（taffy Relative 且 inset 归 auto——top/right/bottom/left 为粘滞约束语义由宿主按滚动运行时施加，引擎经 scroll_offsets 绘制期平移；ADR-0006 边界）；锁测试 crates/style-engine/tests/position_fixed_sticky.rs 四件
+- white-space 全值（A5，css-text-3）：{Normal,NoWrap,Pre,PreWrap,PreLine,BreakSpaces}。语义矩阵：normal=折叠+按宽换行/nowrap=折叠+不换行/pre=保留+不换行/pre-wrap=保留+按宽换行/pre-line=折叠空格但保留换行符+按宽换行/break-spaces=保留+按宽换行（**任意字符断行=v1 常规断点近似=B 级在案**）；T5c-2 重排 pass 换行判定=None|Normal|PreWrap|PreLine|BreakSpaces（白空格族按包含块内容宽自动重测）；锁测试 crates/style-engine/tests/white_space.rs 五件
+- min()/max()/clamp()（A6，css-values-4）：CalcNode+Min/Max/Clamp（逗号参数折叠、clamp 恰三参、嵌套数学函数递归；clamp(MIN,VAL,MAX)=max(MIN,min(VAL,MAX))）；与 calc() 同链路（LengthPercentage::Calc 直通：has_percent 延迟结算、长度语境纯数字拒绝）；**map_env 修复**：map_style 解析环境以帧视口覆盖 media 视口（vw/vh 与 calc 视口单位=ICB=帧视口；@media 命中不受影响）；锁测试 crates/style-engine/tests/math_fns.rs 五件
+- @media L4 range + 新特性（A7，css-conditional-4/mediaqueries-4）：`Range(RangeCond)` 范围语法（`(width>=400px)`/`(400px<=width<=800px)`/值在前形；轴 width/height/aspect-ratio/resolution；`<=``>=` 含界、`<``>` 开界、双比较 AND）；`Orientation`；aspect-ratio（`<ratio>`=数字或 a/b，含 min-/max- 旧形）；resolution（dpi→/96、dpcm→×2.54/96、dppx|x 直通，含 min-/max- 旧形）；布尔语境 `(hover)`/`(any-hover)`/`(pointer)` 与 `(not feature)`（可嵌套）；**MediaEnv+resolution:dppx（破坏性 0.x，默认 1.0）**；**评估基准统一**：级联 @media 命中与全部解析环境经 map_env（宽高类媒体特性按帧视口评估，宿主 set_environment 供配色/动效/指针/分辨率偏好）；锁测试 crates/style-engine/tests/media_l4.rs 七件
+- 逻辑属性 + direction/unicode-bidi（A8，css-logical-1）：30 新槽位——margin/padding/inset ×{inline,block}×{start,end}（8）、border-{inline,block}-{start,end}×{width,style,color}（12）、border-{start,end}-{start,end}-radius（4）、direction/unicode-bidi；槽位重排=物理 0–95 / 逻辑 96–125 / 动画描述符 126–132（SLOT_COUNT 103→133，slot_alignment 锁定）。**级联期映射（规范正确）**：逻辑槽赢家与映射物理槽赢家按 (rank, specificity, order, decl_index) 序键定夺、晚者填物理槽（Candidate 新增 decl_index=同规则块声明序；物理/逻辑同池比先后），逻辑槽不外泄（写位）；ltr: inline-start=left/block-start=top，rtl 仅翻 inline 轴与 radius 四角（**纵向书写模式不支持=B 级在案**）。direction（ltr|rtl，继承）=映射基准：自身声明胜者→继承→ltr；unicode-bidi 六关键字（继承）=文本栈提示（`ComputedStyle::direction()/unicode_bidi()` 可读；引擎文本叶不做 bidi 重排——parley first-strong 现状，见 T2 direction 条=B 级）。简写：margin-inline/block、padding-inline/block、inset-inline/block（1–2 值 start end；值表穷尽校验，三值整条拒绝）、border-inline/block（`||` 任意序展开 6 长手，未指定分量重置初始）。全集物化修复：循环改按 `pid.slot()` 落槽（原以 ALL 下标充当槽位，ALL 序=槽位序时侥幸成立）。锁测试 crates/style-engine/tests/logical_props.rs 十件
+- 容器查询与字体相对单位（A9，css-values-4/css-contain-3）：LengthPercentage/CalcUnit +七变体 cqw/cqh/cqi/cqb（容器查询单位；存储=小数同 vw/vh 惯例）与 ch/ex/ic（字体相对单位；存储=em 倍数同 em 惯例），解析双通道（parse_length_percentage Dimension 臂 + calc() Dimension 臂）。**求值=延迟结算管线复用（三期①）**：映射期 has_cq 判定落延迟队列（直变体经 lp_to_calc 归一 CalcNode；首遍以回落基折叠保 taffy 首遍有确定值），settle_calc 结算期沿 taffy 父链现查最近 container-type≠Normal 祖先的本帧布局内容盒为基（size 双轴、inline-size 块轴回落视口高），无容器祖先=small viewport（规范回落）。**ch/ex/ic=真字体度量**：css::fontprobe 零依赖最小 sfnt 探测（head unitsPerEm、cmap format4 gid、hhea+hmtx advance、loca+glyf 头 bbox yMax、name 表族名），add_font 注册即探测，restyle 期按 font-family 首具名族（大小写不敏感）补写 ComputedStyle 私有字段 font_metrics（`ComputedStyle::font_metrics()` 宿主可读）；未注册族=近似缺省 ch/ex=0.5em、ic=1em（B 级在案）；ic 缺字（cmap 无 U+6C34）=1.0em 契约。B 级在案：纵向书写模式不支持 → cqi=cqw、cqb=cqh（水平书写语义）。ResolveCtx+5 字段（cq_w/cq_h/ch/ex/ic_per_em）+`ResolveCtx::base()` 构造器收敛全部 25 处字面量（style-engine-vello 渐变 stop 解析处同）。锁测试 crates/style-engine/tests/relative_units.rs 九件（容器基值≠视口、cqh/cqi/cqb 轴向、calc 混排、无容器回落、ch/ex 真度量≠近似、ic 缺字）
+- 级联起源栈与层序（B1，css-cascade-5）：`Origin` 五档阶梯
+  Default→UserAgent→User→Author(Stylesheet|Inline 合并桶)（normal 轴），
+  important 轴反转（Author→User→UserAgent→Default）；`@layer` 语句形
+  `@layer a, b;` / 块形 / 嵌套 / 匿名层 / 点名前缀 `a.b` 全形态解析，
+  先现序层树（u32 序数解析期定序），未分层 normal 胜一切分层、important
+  轴反转（早层胜晚层、未分层 important 输给分层 important）；
+  `revert`/`revert-layer` 赛后回滚（含 custom property 与内联声明）；
+  `initial`/`inherit`/`unset` 宽关键字整值物化（var() 代换结果恰为宽
+  关键字同语义；`flex: initial` 保持 flex 专属 `0 1 auto` 例外）；
+  引擎 `set_user_stylesheet`/`clear_user_stylesheet` 注入 User 起源表。
+  锁定：crates/style-engine/tests/cascade_layers.rs 十六件（层序四象限、
+  起源互压、revert 三向、custom revert、宽关键字三态、flex 例外）。
+- 多表/@import/@supports（B2，css-cascade-5 §7/css-conditional-3）：引擎
+  `add_stylesheet`/`remove_stylesheet` 句柄化多 author 表（级联序 = 主表 +
+  登记序，后表胜平手）；文档全局层树（各表层树附着重映射并入 doc_layers，
+  跨表同名层 = 同层、先现序 = 文档序）；`@import` 附着期交错拼接（导入
+  规则 = 写在导入点、拼接后全表按文档序重编号 order；`layer(name)`/裸
+  `layer` 匿名层前缀、directive media 与规则 media 合取、`supports(...)`
+  子句门控、循环 seen 栈 + 深度 32 守卫；导入源 = `set_import_source`
+  内存表或宿主 loader 回调——URL→CSS 契约归宿主、引擎零网络；未解析指令
+  保留待重拼接，主表重建自源文本重解析使嵌套未决存活）；嵌套 `@media`
+  修正为合取 AND（`MediaQuery::conjoin`，旧"内层覆盖"违规范）；
+  `@supports` 解析期求值（`(decl)` 文法试探 + `selector()` 试探 + 自定义
+  属性恒真 + 裸声明宽容形；块形 + 导入子句两用；false 静默、语法无效
+  告警）。锁定：crates/style-engine/tests/imports_supports.rs 二十件
+  （拼接序、链式递归、循环守卫、未解析告警、层前缀、匿名层、media 门控、
+  supports 门控、selector 特性、and/or 混用无效、多表句柄增删、层树跨表、
+  跨表 keyframes、嵌套 media 合取）。
+- CSS Nesting + :has() + :focus 族（B3，css-nesting-1 / selectors-4）：解析期
+  desugar（`&` ≡ `:is(父)` 特异性=父选择器、无 `&` 隐式后代、深层递归展开、
+  token 级 `&` 识别、深度 32）——级联核心零改动；规则体 RuleBodyParser 驱动
+  （嵌套体声明合法化 + 声明/规则消歧）；**嵌套声明源位置分裂**
+  （flush-at-item-boundary，浏览器一致）；嵌套条件组提升穿线（条件 AND
+  合取 + 选择器挂父链）；:has() 原生匹配（子/后裔/相邻兄弟/not 反转/嵌套
+  内组合），`has_relative_selectors` 表级标记 → 变更类失效升级全量重样式
+  （增量失效暂缓）；`set_focus(key, focus_visible)` 焦点族整链管理
+  （:focus/:focus-visible/:focus-within，祖先传播、迁移清链、移除清锚，
+  focus_visible 启发归宿主）。锁定：crates/style-engine/tests/nesting_has_focus.rs
+  二十六件（隐式后代、复合 &、状态伪类、组合器开头、深层、:is 特异性、
+  media/supports 隐式声明、穿线、坏选择器告警、:has 六形态+失效升级、
+  焦点七态）。
+- @property 注册（B4，css-properties-values-api）：三描述符 syntax/
+  inherits/initial-value——syntax 文法 MVP = 14 类型族（length/
+  percentage/length-percentage/number/integer/color/image/url/angle/
+  time/resolution/transform-function/custom-ident/string）+ `+`/`#`
+  单层多值组合子（`||`/`&&`/嵌套语法→注册无效）；注册有效性 = 非
+  universal 缺 initial 或 initial 不匹配→规则丢弃告警；universal
+  （`*` 缺省）不校验、声明值原样在场。注册表 registered_props
+  （合并序 user→主表→附加表，同名后者胜，sheet 变更点统一重建）；
+  计算三闸 = 继承门（inherits:false 不进继承通道）→ 语法门（终值
+  不匹配→unset→initial-value——Chrome 一致：var(--x) 解析到 initial
+  而非触发 fallback，fallback 仅用于缺席名）→ initial 填充（声明/
+  继承双缺→initial；无 initial 的 universal=缺席=guaranteed-invalid）；
+  仅样式表顶层合法（嵌套/条件组/语句形丢弃告警）。0.x 破坏性：
+  Stylesheet +property_rules 字段、compute_node_in +registered 参数。
+  锁定：crates/style-engine/tests/property_registry.rs 十八件
+  （initial 填充、声明直通、门败回 initial、门败不触发 fallback、
+  未注册 fallback、继承 false/true、未注册回归、多表覆盖、universal
+  在场、注册无效×2、嵌套/条件组/语句形丢弃×3、`<length>+`/`<color>#`
+  多值、custom-ident 门）。
+- 伪元素 ::before/::after + content（C1，css-content-3 / css-pseudo-4
+  MVP）：ADR-0015 树实体化——伪节点 = 引擎 materialize_pseudos 实体化的
+  真实树子节点（::before 首子 / ::after 末子，裸 StyleNode 无身份）；
+  selectors 0.40 原生匹配（parse_pseudo_element hook + originating_element
+  回 origin 左复合，单冒号 CSS2 形 :before/:after 同路由）；
+  has_pseudo_rules 解析期深扫判据——全表无伪规则零成本清除全部、有则
+  全树 ensure+归位（宿主子序过滤伪节点）；content = none/normal/字符串
+  单串 MVP（attr()/url()/counter()/quotes = T2 解析期拒绝告警）；content
+  仅伪元素语义——none/normal → Display::None 无盒（宿主恒 Normal）；
+  文本经 sync_pseudo_text 同帧测量布局（继承 origin 字体/字号）；结构
+  伪类与 :empty 不受伪节点影响；set_children 镜像自动合并伪键、remove
+  两路径清 pseudo_ids 注册表。0.x 破坏性：StyleNode +pseudo 字段、
+  ComputedStyle +pseudo 字段与 content()/pseudo() 访问器、Stylesheet
+  +has_pseudo_rules、PropertyId +Content（SLOT_COUNT 134）。锁定：
+  crates/style-engine/tests/pseudo_elements.rs 十四件（before/after 造盒、
+  none/normal 无盒、下推宿主子、单冒号形、first-child/:empty 排除伪节点、
+  hover 门控、字号继承、content 级联覆盖、换表清除、多表、class origin）。
+- 文本变换与断行控制（C2，css-text-3 / ADR-0016）：text-transform
+  none/uppercase/lowercase/capitalize/full-width（full-size-kana 接受
+  no-op=T2）——自实现分段变换：span 边界切段、逐字符 old→new 字节映射
+  （扩缩字符安全）、测量（measure_two_pass）与绘制（op.text 变换后文本
+  +span 偏移重映射）双注入、全表 none 快路径直通；word-break
+  normal/break-all/keep-all + overflow-wrap normal/break-word/anywhere
+  （`word-wrap` 别名）= parley 原生断行映射，测量/vello 绘制同参
+  （PaintOp::Text +word_break/+overflow_wrap 通道）。继承：transform 是、
+  wrap 对否（spec）。锁定：text_transform 单元 5+tests/css_text.rs 11
+  （uppercase/capitalize 折行几何、继承等高、full-size-kana 惰性、
+  full-width 加宽、break-all 词内断、break-word 溢出断、anywhere 等高、
+  别名等高、keep-all CJK 禁断、变换+断行叠加）。偏差：capitalize 词界
+  ≈alphanumeric（spec=UAX#29）、soft 渲染不消费断行参数（v1 无折行）、
+  anywhere min-content 差异未锁（折行几何等高已锁）。
+- conic-gradient + object-fit/object-position（C3，css-images-3 / ADR-0017）：
+  conic = `GradientKind::Conic(ConicSpec { from, position })`（缺省
+  0deg/center；语法 `conic-gradient([from <angle>]? [at <position>]? ,?
+  <stops>)` 复用角度/位置/停点三助手）——paint 层 `ConicGeom { cx, cy,
+  start }`（绝对 px 圆心+起始角弧度；CSS 0deg=12 点→(deg−90°)·π/180 正 X
+  轴起顺时针），vello 经 peniko 0.6.1 Sweep 原生映射（SweepGradientPosition
+  center 内建、Y-down 顺时针=CSS 同向），soft 逐像素 atan2 扫角归一——
+  四象限硬停点像素锁。object-fit fill/contain/cover/none/scale-down +
+  object-position（left/center/right/top/bottom/<length-percentage>；slot
+  130/131，SLOT_COUNT 139）：诚实替换内容通道——`StyleNode.image` 引用
+  （与背景 url() 语义解耦、background-size 留 F 批不冲突）→ 引擎
+  seed_image_leaves（compute_layout 前种子：双边声明=盒取声明/单边=另一边
+  按源宽高比缩放/全 auto=自然尺寸（块级替换不拉伸）；absolute 叶仅注入
+  固有区间走 T5d shrink 通道；宿主 set_leaf_intrinsic 手动优先）→ paint
+  元素图像段（fit 数学+object-position 偏移 offset=pct·(盒−拟合)（负基
+  合法=溢出反向对齐）；溢出/圆角 PushClip(内容盒+radius) 包裹；
+  PaintOp::Image=拟合后矩形，sink 零改动）；未注册引用告警跳过（零副
+  作用契约）。0.x 破坏性：GradientKind +Conic、PaintOp::Gradient +conic
+  字段、StyleNode +image、PropertyId/DeclValue +2（SLOT_COUNT 139）、
+  ComputedStyle +object_fit()/object_position()。锁定：
+  crates/style-engine/tests/css_images.rs 十三件（conic 默认几何 −π/2+
+  盒心/from 90deg→0+at 25%→(15,10)/停点直通；fit 五模式 dest 矩形、cover
+  PushClip、position 关键字与 px 偏移；image 叶自然 40×20/声明宽 80px→
+  80×40；未注册零 op）+ soft conic 象限像素一件（45°/135°/225°/315°
+  红蓝交替）。
+- ::selection / ::placeholder（C4，css-pseudo-4 / ADR-0018）：非盒生成
+  伪元素双通道——`PseudoElement` +`Selection`/`Placeholder`（单冒号形
+  拒绝），匹配=origin 直配（pseudo==None 即命中；实体化伪节点恒不
+  命中；originating element=节点自身，前缀复合在 origin 求值），主级联
+  防泄漏（collect_sheet 过滤，通道规则不进主样式）+ `cascade_channel`
+  通道级联（无内联段）+ `compute_node_from_cascade` 复用（继承基=
+  origin 主样式，css-pseudo-4）；engine `selection_style(key)`/
+  `placeholder_style(key)` 通道访问器，契约=有规则命中才 Some（@media
+  外/选择器不命中 → None 宿主回退系统缺省；全表无规则 → 整 map 清
+  零成本）；selection-only 表不触发 materialize_pseudos；Chrome 生效
+  属性子集（selection=色/背景/文本装饰系/text-shadow/caret-color；
+  placeholder=色/font 系/opacity/letter-spacing/line-height/
+  text-transform/background-color）全量解析计算、宿主取舍；选区在场/
+  占位文本存在性归宿主（零副作用）。锁定：tests/css_selection.rs 十件
+  （解析/单冒号拒绝/主级联隔离/特异性/author 表序/@media 门/origin
+  继承基/双通道独立/无规则缺席/实体化闸宿主盒三态）+ selector.rs
+  origin 直配探针一件。
+- float / clear（E4，css-position-3 / ADR-0019）：浮动结算引擎侧实现
+  （taffy 0.14 无原生 float）——`settle_floats` 两相（每帧 map_style
+  重放还原→pristine 布局→放置/覆写→终布局；挂点=settle_columns 后、
+  文本 remeasure 前）：浮盒出流（taffy Position::Absolute+inset 锚定）+
+  同父浮栈水平适配贪心放置（同带继续直至容器缘溢出才下移；own_clear
+  钳位）+兄弟环绕（出流补偿 post_y；顶缘落带内=同侧带宽和 margin
+  增量；clear 盒全宽）+clear 钳位（margin-top 增量至相关向最后浮盒
+  底）；`FloatKind`（none/left/right）+`ClearKind`（none/left/right/
+  both）slot 132/133（SLOT_COUNT 141）；诚实边界=兄弟级环绕带宽
+  常量化、嵌套子树局部结算、BFC 隔离边界按需迭代（偏差在案）。
+  锁定：tests/css_float.rs 五件（左浮出流+环绕/clear 钳位/右浮右缘
+  对齐/同带堆叠/none 回归）。
+- grid-template-areas 与命名线（E5，css-grid-1 / ADR-0020）：grid
+  放置全链（taffy 0.14 模板存储缺非重复行名）——`apply_grid_placements`
+  纯样式派生（容器线名注册表 line_names[i]=线 i+1 + 区域矩形 → 子
+  四长手解析 → taffy grid_row/grid_column 数字放置；挂点=
+  seed_image_leaves 后、compute_layout 前无额外重排；每帧幂等）；
+  解析面=GridTemplateAreas/GridRowStart/GridRowEnd/GridColumnStart/
+  GridColumnEnd 五槽（SLOT_COUNT 146）+`GridAreas`（矩形校验：行宽
+  一致+逐名格数==行跨×列跨——min/max 边界法漏对角格）+
+  `GridLineSpec`+`GridTemplate.line_names`（cssparser `[ … ]`=
+  SquareBracketBlock → parse_nested_block 收名）；简写 grid-row/
+  grid-column/grid-area（缺省段镜像 ident per spec §7.4/7.5）；
+  解析序=区域边线→全名线→-start/-end 后缀裸名→未知名 Auto；隐式
+  轨=taffy grid-auto-* 原生（auto_tracks 升级全列表映射）。诚实
+  边界=repeat 内线名解析失败声明无效、`span <int> <ident>` 混合形、
+  subgrid（taffy 无 Subgrid 变体）。锁定：tests/css_grid_areas.rs
+  八件（2×2 区域矩形放置/线名 a..b/整数线号/span 整数/span 名线/
+  未知名 Auto/非矩形区域无效回退/区域隐式列）。
+- IFC 行内流 v1（F1，css-display-3 / ADR-0021）：块容器直子行内参与者
+  贪心行打包——文本叶（tree.node.text）/inline-block 原子盒/inline 组
+  盒 → `settle_lines`（settle_floats 后、文本 remeasure 前；Absolute+
+  inset 锚定=浮盒先例；inline_run_participants 豁免 remeasure 全宽重
+  测；prev_participants 快照帧间幂等）。Display +Inline（连续性标记/
+  组盒）+InlineBlock（原子）变体；inline-flex/grid/table 仍归一告警。
+  行打包=叶 measure_rich(剩余宽) 接排+折行叶占满本行、声明宽/高叶原
+  子式参与、盒自然尺寸=MaxContent 探针+子树叶 nowrap 测宽 max（taffy
+  无文本内在尺寸）、行盒溢出续排（CSS 真行为）、容器 min_height=打包
+  行高（auto 高塌陷防护）。诚实边界（0.x）：行高=max(测量高)、
+  vertical-align=TOP（baseline 延后）、组内子叶纵向堆叠（多叶组宽=
+  max）、跨叶 br 不支持、仅 Block 容器直子。锁定：tests/css_inline.rs
+  七件（叶+盒同行 advance 接排/双盒换行+容器高/叶续盒/折行推下行/
+  组盒参与/nowrap 溢出续排/无参与者块流回归）。
+- 结算 DAG 与文本效果五件（F2，ADR-0022）：①帧内结算链硬编码 →
+  `SettlePassKind{Calc,Tables,Columns,Floats,Lines}` 显式依赖图+拓扑
+  `schedule()`（debug_assert 环防护）+ `settle_should_run` 空输入门——
+  后续结算 pass 声明式插 DAG（顺序/豁免语义逐位保留）。②text-overflow:
+  ellipsis（css-overflow-3，槽 139）：叶级绘制期截断——`text_overrides`
+  覆盖（布局不变，ink 裁切语义同浏览器）+ `make_ellipsis_text` 二分
+  字符前缀（width(prefix)+"…"≤可用宽，前缀即溢出→空串）+
+  `apply_text_truncation` 两相（不可变扫描→分派，measure_rich 借用
+  约束）；PaintCtx 通道+span 字节区间随前缀过滤/钳位；overflow: visible
+  不截断（spec）。③-webkit-line-clamp（槽 140，none|正整数
+  `min(i32::MAX)` 防 as-cast 回绕）：截断预算=行数×行高（行高缺省
+  1.2×font_size）、全文折行测量≤预算不截断；display:-webkit-box 接受
+  按块布局（偏差在案）。④text-decoration 四长手+简写（槽 141–144）：
+  line 位集（1=underline 2=overline 4=line-through）/style
+  Solid|Double|Dotted|Dashed|Wavy/color（缺省 currentColor）/thickness
+  Auto|FromFont|Length，简写『line*|style|color|thickness』任意序贪心
+  （line 多关键字累积 OR）；绘制=Text.decorations（厚度 LP 解析 px），
+  sink 线位 underline=baseline+descent×0.5、overline=baseline−ascent×
+  0.9、line-through=baseline−ascent×0.5，solid/double 实绘、dotted/
+  dashed/wavy v1 实线矩形近似，span 级装饰=边界（v1 叶级）。⑤
+  text-shadow（css-backgrounds-3，槽 145，SLOT_COUNT 153；**继承**）：
+  `none | [<color>? <dx> <dy> <blur>? <color>?]#`（颜色前后均可置，
+  缺省 currentColor/blur 0）；绘制=Text.shadows 影字先绘（transform
+  平移重发、spans 置空=全字影色），blur=B 级（锐利影落地）。诚实边界
+  （0.x）：装饰厚度 auto/from-font≈font_size/12、字体优先装饰位未接
+  （线位=B 级近似）、text-shadow 模糊未启（vello 逐 run/软栅格字形
+  模糊）。锁定：tests/css_text_overflow.rs 六件（ellipsis 截断/放得下
+  不截/visible 不截/clamp 两行/clamp none 全文/clamp 放得下不截）+
+  tests/css_text_decoration.rs 六件（简写解析携带/缺省空装饰/line
+  位集/影单+色/影多+blur/none 空）。
+- hit_test 命中测试（F3a，ADR-0023）：paint 期命中几何表——paint_node
+  递归收集 `HitRect{node_id,x,y,w,h,clips}`（border-box 视口坐标+活跃
+  clip 链快照；子树 PushClip 登记/PopClip 弹出同步），`PaintCtx.hit`
+  通道透传（RefCell 收集器，None=零成本）；`StyleEngine::hit_test(x,y)
+  -> Option<HitTestHit>`（绘制序逆序=顶优先，祖先 clip 链全含判定）+
+  `StyleEngine::node_id(key)`（用户键→NodeId 宿主解释通道）。
+  visibility: hidden/display:none 天然不入表；pointer-events: none
+  收集期排除。诚实边界（0.x）：变换节点=未旋盒（op 坐标视口系，
+  PushTransform 由 sink 终结）。锁定：tests/css_hit_test.rs 三件
+  （顶层命中=后绘优先/overflow 裁剪外不命中/pointer-events: none
+  穿透）。serde（同 ADR 后半）拆 F3a2 批。
+- DisplayList serde 投影（F3a2，ADR-0023 决策 2）：paint_dump 模块
+  （feature="serde"，serde 可选依赖）——PaintOp 全 14 变体 typed
+  tagged-enum 镜像（serde tag="op"；色=[f32;4]、ImageRes 像素
+  Vec<u8> 直序列）；`to_dump()`/`to_display_list()` 往返；枚举
+  canonical 名承载（non_exhaustive 同 crate 全变体枚举——新增变体
+  编译器强制更新镜像）；未知 op/单位/枚举名降级跳过（不 panic）。
+  锁定：tests/css_serde_dump.rs（结构往返+JSON 通道相等，serde_json
+  仅 dev-dep）。
+- 背景全集（F3b，ADR-0024，css-backgrounds-3）：①六长手值族——
+  background-repeat（RepeatXY 双轴 Repeat/Space/Round/NoRepeat，
+  repeat-x/y 简值展开）、background-attachment（Scroll/Fixed/Local）、
+  background-position（两轴 PositionComp{base, offset}，edge 关键字/
+  百分比/长度 + 三值四值偏移文法，right/bottom 偏移解析期取反=B 级）、
+  background-size（斜杠对 Auto/Cover/Contain/Explicit）、
+  background-origin/clip（BorderBox/PaddingBox/ContentBox；clip 另有
+  Text——降级 border-box+警告=B 级）。②多层列表：七长手全 Vec 化，
+  `ComputedStyle::background_layers()` 层对齐视图（层数=max(各列表,1)、
+  i%len cycling、缺省=初始值参与）；background-image: Url/Gradient/None。
+  ③background 简写：八长手展开（层内无序贪心；单 box=origin/clip 双
+  赋、双 box 首 origin 次 clip；color 仅末层否则整条拒绝；缺省部件回
+  初始值）。④绘制：色 FillRect 恒发（border-box+元素圆角）；层反序
+  发射=首层最上；fixed=视口锚定；origin/clip=PushClip 裁剪盒（每层
+  包裹）；tile 双循环平铺（space/round→重复=B 级）；cover/contain 精确
+  数学、explicit 宽+auto 高保纵横比；渐变逐 tile 重解几何；Image 固有
+  尺寸+repeat 平铺（未注册 url=警告跳过）。0.x 破坏性：PropertyId +6
+  变体（SLOT_COUNT 153→159，动画描述符让位 152–158）、
+  `DeclValue::BackgroundImage` 单值→Vec。锁定：decl.rs 四件（全组件
+  解码/多层缺省/box 双赋/三拒绝）+ computed.rs cycling 双向 +
+  paint.rs 多层反序发射序 + tests/css_images.rs 十三件。
+- clip-path 裁剪形状（F3c，ADR-0025，css-masking-1 §5.1 / css-shapes-1
+  §3）：①值族——`ClipShape{None, Inset{insets, radius, reference},
+  Circle{radius, at, reference}, Ellipse{rx, ry, at, reference},
+  Polygon{nonzero, points, reference}, Other}` + `ClipRadius{Length/
+  ClosestSide/FarthestSide/ClosestCorner/FarthestCorner}`；`<basic-shape>
+  || <geometry-box>` 次序不限、geometry-box 单独出现=inset(0) 基准该盒、
+  reference 平铺进形状变体；margin-box 降 border-box=B 级；url()/path()
+  宽容→Other（UnquotedUrl 顶层 token 与 Function 两形态都接住）+tracing
+  警告（SVG clipPath=T2）；polygon fill-rule 缺省 nonzero、<3 坐标对整条
+  拒绝；负半径拒绝；circle 百分比半径合法（F3e 修正：css-shapes-1 §3.2.1 基准
+  √(w²+h²)/√2，paint.rs 同步解析——原"轴歧义拒绝"系误读，遗留 token 曾致整条
+  声明丢弃）。②计算：复用
+  第四批④ `PropertyId::ClipPath`（slot 71 原位升级，Effect 组剥离——
+  零 slot 破坏、SLOT_COUNT 保持 159）；初始 none、非继承；
+  `has_clip_path()`=形状≠none。③绘制：新 `PaintOp::PushClipPath{points,
+  nonzero}`——inset 走既有 PushClip 矩形（round radius 精确承载）；
+  circle/ellipse 64 段折线（面积误差 0.14%=B 级）；polygon 顶点直传+
+  fill-rule 随 op；裁剪作用元素+子树（overflow 后、背景前，LIFO 双
+  PopClip）；命中=AABB 链近似（B 级）；量程不变。④sink：vello BezPath
+  push_layer（NonZero/EvenOdd）、soft 射线法 point-in-polygon（winding/
+  even-odd 双规则）、paint_dump 镜像同步。锁定：decl.rs 五件 + paint.rs
+  六件 + soft 像素两件（{5/2} 五芒星序 nonzero/evenodd 差分）+
+  css_serde_dump 往返 + computed 初始非继承；效果触发 SC 测试重基线
+  （inset(0) 实发 PushClip+PopClip 对）。0.x：PaintOp 新变体
+  （non_exhaustive 宿主 match 需新臂）。
+- border-image 全集与字体深化（F3d，ADR-0026，css-backgrounds-3 §6 /
+  css-fonts-4）：①**border-image 值族与解析**：五长手——source（复用
+  BackgroundImage{None,Url,Gradient}）、slice（1–4 值 + fill 任意位、
+  负值拒绝）、width（<LP>|<number>|auto 三态，负值拒绝）、outset
+  （<LP>|<number>，百分比拒绝）、repeat（stretch/repeat/round/space ×双轴）
+  + **border-image 简写**（`<source> || <slice> [/ <width>? [/ <outset>?]?]?
+  || <repeat>`，词法不相交贪心单遍）。②**计算**：slot 152–161（
+  SLOT_COUNT 159→**169**）+ font 族五槽 162 区（stretch/word-spacing/
+  features/variations/variant-caps）；border-image 五长手非继承、font 族
+  继承（css-fonts-4）；ComputedStyle 访问器 ×10。③**绘制九宫格**：source
+  ≠none 时**替代 Border op**——四角恒拉伸 → 四边 tile（repeat 双轴独立）
+  → fill 中心；切片溢出缩放 f=(w/(sl+sr)).min(h/(st+sb))、带宽 fw 同型
+  （基准=边框盒）；outset 仅 ink-overflow（不入滚动量程/命中）；
+  Repeat 顺排末片 PushClip 截断、Round 等分拉伸、Space 首尾贴边 gap 均
+  摊（优于 CSS 精确重排=B 级在案）。④**图像/渐变通道精化**：
+  PaintOp::Image +src 采样窗口四字段（vello sub_rect 裁剪层 + 非均匀仿
+  射、soft 源窗口采样）、PaintOp::Gradient +linear 绝对几何 LinearGeom
+  （0deg=12 点顺时针 d=(sinθ,−cosθ)；径向/锥形已有盒几何，线性对齐）。
+  ⑤**@font-face 登记表**：FontFaceRule 全描述符（font-family/src
+  （url()|local()+format()）/font-style（oblique 角）/font-weight（区间）/
+  font-stretch/font-display/unicode-range（'?' nibble 通配、0x10FFFF 钳
+  制）/font-feature-settings/font-variation-settings）；登记语境不设限
+  （顶层/条件组/嵌套均登记，@media 内 @font-face 真实世界常见）；缺
+  family/src=规则无效 warn 丢弃、未知描述符宽容跳过、已知描述符值非法=
+  该描述符忽略规则存活；`engine.font_faces()` 访问器（user→主表→附加表
+  合并序，同族后规则胜）；字体字节仍宿主 add_font 推送（契约不变，src
+  url 文本=注册表键）。⑥**字体深化接线**：PaintOp::Text +4 字段
+  （font_stretch/word_spacing/font_features/font_variations，基样式级）；
+  vello push_default FontWidth(from_percentage)/WordSpacing/
+  FontFeatures/FontVariations（parley 0.11 原生）；soft 伪拉伸（轮廓与
+  步进同比 x 缩放）+空格词距（软栅格无 GSUB/gvar=记录偏差）；
+  effective_font_features（显式 settings ∪ font-variant-caps 派生
+  titl/unic，同 tag 显式优先）；**small-caps 合成**（lowercase→uppercase
+  + 0.8 缩放 span，petite 回退 small、先 text-transform 后合成=CSS 顺序，
+  Chromium 一致语义）。**顺手修复两既有缺陷**：@media/@container 臂漏并
+  子表 keyframes（条件组内 @keyframes 静默丢弃）；parse_font_stretch 百
+  分比漏 ×100（cssparser unit_value=分数，125% 误判越界整条丢弃——锁测
+  试抓出）。0.x 破坏性：SLOT_COUNT 159→169、PaintOp::Image/Gradient/Text
+  新字段、AtPrelude::Skip→AtPrelude::FontFace 更名、Stylesheet+font_faces。
+  锁定：decl/paint/soft/dump/registry 五面（九宫格区域与 src 窗口精确
+  锁、repeat tile 数与 clip、渐变九区共享绝对几何线、@font-face 全描述
+  符/无效丢弃/条件组登记/合并序、small-caps 测量=大写×0.8 组合、serde
+  往返含四新字段）。全量 **477** 测试绿（462→477，serde,text 全跑）。
+- 人读调试工具链（F3e，ADR-0027）：纯 core 格式化零新依赖——`debug::
+  display_list_dump`（Push/Pop 作用域缩进树，元素自身 bg/text 印在自身
+  clip push 之前）、`ComputedStyle::debug_dump`（全 ALL 槽逐属性 +
+  [metrics]/[pseudo]）、`Frame::boxes_dump`/`StyleEngine::layout_tree_dump`
+  （0.x 加性公共 API）；锁测试 `css_debug_toolchain.rs` 断言缩进结构。
+  配套：conformance `pixel_invariants.rs` 七锁（渐变单调/背景层序/
+  circle 遮角/border-image 环/box-shadow 墨迹/opacity 混合/确定性）+
+  fuzz 三靶（@font-face 注册表/绘制声明/hit_test⊆border-box）+
+  clippy workspace `-D warnings` 清零（78→0）；circle 百分比半径修正
+  （√(w²+h²)/√2 基准，见 ADR-0025 落地修正）。全量 **490** 测试绿。
+- 属性面补全 F4（ADR-0028，31 项收口）：①**backdrop-filter**——filter 同
+  型存在性语义位（parse_sc_effect 复用：值 ≠ none → `Effect(true)`、none
+  缺席、函数块宽容吞咽）；css-filters-2 非 none 即触发 stacking context，
+  paint SC 谓词并入 `has_backdrop_filter()`（非定位触发者进 Pos 带键 0，
+  触发表锁扩 backdrop-filter 行）；效果本体=T2（同 filter/mix-blend-mode
+  先例，vello 0.10 无滤镜管线）。②**hyphens**——`HyphensKind{#[default]
+  Manual,None,Auto}` 属性层（css-text-3 §5.4 initial=manual、继承属性入
+  inherits 白名单）；断词效果三值 v1 一致=上游边界（显式断点 U+00AD/
+  U+2010 由 parley UAX 14 分段、auto 无词典、none 无法抑制上游断点——
+  重估条件=parley 连字/断点覆盖 API，见 T2 hyphens 条）。槽位：ALL 尾
+  追加 Hyphens=162/BackdropFilter=163、动画描述符整体后移 ×2 至
+  164..171（0.x 破坏性=SLOT_COUNT 169→171 + PropertyId/DeclValue 变体
+  加性）。锁：decl.rs `hyphens_parse_modes`（三关键字+非法拒绝+initial
+  manual）、`backdrop_filter_parse_presence`（none/函数/宽容存在性）+
+  engine SC 触发表扩行。全量 **492** 测试绿（490→492）。
 - T0 零容忍收敛（二期⑤）：conformance 全量绿且零 xfail——Numeric 16 用例（仅存 xfail 项 calc-width 已于二期①转正）+ Pixel 3 用例（二期④通道转正）；9 manifest 显式 xfail=false、其余 serde 默认 false，零 xfail 资产存续，T0 范围内 Class 3–5 零违规；含文本/变换用例暂不入 Pixel 通道属 ⑦ 能力缺口（非 xfail，⑦ 转正后并入）
 
 ## T1 — v0.2+
 
 - @keyframes 动画（第五批⑰已落地）：解析——`@keyframes name { from/to/百分比 [,分组] { decls } }`（-webkit-keyframes 别名；坏帧选择器整帧容错丢弃+告警）；描述符——animation-name/duration/delay/iteration-count(infinite)/timing-function(linear/ease 系三次贝塞尔二分求值/steps(n[,start|end]))/direction(normal/reverse/alternate/alternate-reverse)/fill-mode(none/forwards/backwards/both) + animation 简写（单动画组：`<time>` 首现=duration 次现=delay、关键字先行消歧、余下 ident=名；多动画组逗号分隔=残余偏差）；采样——engine.frame 每帧 apply_animations（级联后、布局前覆写）：fill 语义（未开始 backwards/both、结束 forwards/both，否则回底层值）、方向折叠、缓动按关键帧段施加、插值=lerp_decl（颜色 pick_scheme 终结后 sRGBA 直排混合、长度同变体线性跨单位离散、transform 同名函数逐参、圆角/origin 双组件、不可插值离散取段进度 0.5 界）；锁定测试 keyframes_parse + keyframes_animation_sampling（0/0.25/0.5/1 插值、fill both 端点保持、无 fill 回底层）
 - bidi 与多 run 混排（第五批⑲已落地评估）：parley 0.11 内建 Unicode bidi 算法（analysis 以 base_level=None 调 resolve）——引擎文本栈零成本继承混排重排（first-strong 基向、嵌段层级、簇视觉序经 line items 直出）；锁定测试 bidi_mixed_direction_first_strong（混排串 LTR+RTL 双 run 划分、纯 RTL 串全 run 奇数层级、advance 不塌缩，DejaVu 覆盖希伯来字形）；残余偏差：CSS direction 属性无显式基向管道（parley 0.11 硬编码 first-strong，上游暴露 builder 级基向后接入）
-- text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter/clip-path 触发的 stacking context 已落地（第四批④：仅 SC 触发、不做滤镜/裁剪效果，见偏差核对 filter/clip-path 条）；容器查询已落地（阶段2③，见 T0 段条目）
+- text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter 触发的 stacking context 已落地（第四批④：仅 SC 触发、不做滤镜效果，见偏差核对 filter 条）；clip-path 已升实裁剪（F3c，见 T0 段条目）；容器查询已落地（阶段2③，见 T0 段条目）
 - T1 用例覆盖（二期⑥）：conformance 新增 2 用例入 Numeric 通道（合计 18，零 xfail）——①keyframes-layout（动画布局不变性：.a/.b 挂 animation 简写+@keyframes（背景色/透明度插值），golden 与静态布局逐位一致，实证 apply_animations 每帧采样不扰动布局；transform 动画刻意不用——getBoundingClientRect 含变换、像素截图时机非确定，动画终值像素验收待 ⑦）；②bidi-mixed（混排一致性：相对容器 600×200 内 3 个 absolute 文本叶——拉丁+希伯来混排串/纯 RTL 串/声明宽 140px 折行串，宽 203.1/42.4/140、高 19/19/38 与 Chromium 153 golden 零超差，parley first-strong 基向两侧一致）；随用例修复两缺陷：restyle 的 absolute 宽例外改查本地 cs（原 is_absolute 查 self.styles 而本节点 cs 到函数尾才 insert 恒 None——auto 宽绝对文本叶测量宽丢失，taffy 绝对布局对 auto 叶无测量回退得 0）与 T5d 换行宽声明优先（原一律用 shrink 夹紧宽，声明 140px 被无界测量 233px 盖过漏折行；percent 基准暂取夹紧宽 v1 近似）；引擎锁定测试 absolute_text_leaf_sizes（混排/RTL 测量宽正负号回归+声明宽折行高）
 - 第二软 Sink 转正：Text + Transform（二期⑦）——style-engine-soft 从 FillRect/Gradient/Shadow/Image/Border/Clip/Opacity/Scroll 八算子扩至全算子：①Transform 逆映射光栅化（DisplayList 级组合矩阵 cur=[f32;6]+栈消费 PushTransform（cur=M∘cur）/PushScroll（平移折叠）/Pop*；dest 包围盒=变换后角点，逐像素中心逆仿射回源空间做矩形/圆角/clip 判定，color_at 源坐标采样——旋转 90/180° 轴对齐整数边缘无 AA，与 Chromium 逐位一致，transform-pixel 实测 diff 0/120000）；②Text 最小 TrueType 光栅化（soft::ttf 纯 std：sfnt/head/hhea/maxp/hmtx/loca/glyf 简单+复合字形（平移+双轴缩放，点匹配与 2×2 按单位阵近似记录偏差）、cmap format 4 BMP、二次曲线 16 段折线化（2048 upm 偏差≲0.06px@16px）、4×4 超采样 16 级 AA；FontBank 族名→字节注入（零副作用原则，宿主推字体），render_with_fonts 接管 Text op（基线=y+(行高−(asc+desc))/2+asc，normal 行高=round(asc)+round(desc) 与引擎㉔/Chromium 同式）；v1 边界：无合成粗斜体/kerning/spans/换行/align 消费）；③Pixel 通道转正新增 3 用例（合计 6）——transform-pixel（rotate(180)×2 非对称渐变盒+非对称 border-top 宽盒，预算 0.001 实测逐位一致）、text-pixel（DejaVu 16/20px 单行短词，预算 0.01 实测 0.00585）、table-basic 并入（预算 0.005 实测 0.002875）；④随用例修复引擎缺陷：resolve_transform_affine 漏传盒偏移——op 坐标为视口系而 origin 按 (w/2,h/2) 解析，offset 盒绕错中心旋转、子树整体错位/消失（既有单测盒在 (0,0) 故盲），paint.rs paint_node 改传 (x,y)、origin=(x,y)+盒内百分比基点，锁定测试 transform_origin_includes_box_offset（盒 (10,20,100,50) rotate(180) → e=120/f=90）
 
@@ -38,20 +386,51 @@
 > T2 定位：**有意不进 MVP 的特性**（区别于已落地项的 B/C 级偏差）。每项记录：当前行为（引擎真实状态，勿臆测）→ 重估条件（何时/依赖什么才值得做）。清单随特性落地增删。
 
 - sticky / fixed 定位：当前 `position: fixed|sticky` 声明整体丢弃（Position 枚举仅 Static/Relative/Absolute，property.rs）——fixed 不回落 absolute 语义（Chromium 中 fixed 锚视口）。重估条件：滚动容器模型完整所有权（滚动偏移已按 ADR-0005 归宿主，重估时补滚动容器注册+偏移驱动的重布局钩子）；fixed 另需视口=ICB 锚定语义。
-- float 浮动：`float`/`clear` 属性不存在、声明丢弃。taffy 0.14 block 算法内建浮动与 clearance 机械（第五批⑦评估证实），引擎侧缺属性解析与 Float 映射。重估条件：有真实用例需求时（解析+taffy FloatStyle 直通，估计一小批当量）。
+- float 浮动：已于 E4 落地（css-position-3 / ADR-0019）——解析+
+  settle_floats 引擎侧结算，见 T0 段 float/clear 条；子树局部/带宽
+  常量化等偏差见该条诚实边界。
 - 打印 / @media print / 分页：媒体查询求值按视口（screen 语义），无 page box 与 fragmentation。重估条件：分页布局需求出现（page 模型+跨页断行是独立工程量级）。
 - 3D 变换（matrix3d/translate3d/rotate3d/scale3d/perspective 等，ADR-0009）：解析期 warn 拒绝、声明丢弃=none——vello 0.10 纯 2D 仿射管线（[f32;6]）。重估条件：sink 升级 3D 或换渲染后端。
-- filter / clip-path / mix-blend-mode 效果本体：仅 stacking context 触发语义位（第四批④/第五批㉒），不产生任何 PaintOp——无滤镜、无路径裁剪、无混合实现。重估条件：vello 滤镜/图像效果管线可用。
-- :has() 相对选择器：未解析（选择器能力=结构伪类+组合器）。重估条件：上游 selectors 0.40 :has() 匹配能力查证通过 + 级联失效模型（父/兄弟变更反向传播的 restyle 标记——查询型选择器需依赖方向反转）。
-- CSS 嵌套（CSS Nesting，`&`）：未支持——规则体平铺，`&` 开头的规则按无效选择器丢弃。重估条件：需求出现时做解析期 desugar 展开 pass（不改级联内核）。
-- 容器查询单位（cqw/cqh/cqi/cqb）与 style 查询（@container style()）：阶段2③ v1 边界。cq 单位需要长度延迟求值（当前解析期即 resolve，容器基值布局期才有——与 calc 百分比扁平化同病，calc A·待办⑤ 同批重估）；style 查询依赖容器自定义属性计算值快照。重估条件：延迟求值管线落地。
+- filter / mix-blend-mode / backdrop-filter 效果本体：仅 stacking context
+  触发语义位（第四批④/第五批㉒/F4 ADR-0028——三者解析与 SC 触发均在
+  场，backdrop-filter 同 filter 型 `Effect` 存在位），不产生任何 PaintOp——
+  无滤镜、无混合、无背景回采实现（clip-path 裁剪已于 F3c 落地，见 T0 段
+  条目）。重估条件：vello 滤镜/图像效果管线可用（backdrop-filter 另需
+  已绘制内容回采语义）。
+- @container style() 查询：未支持——依赖容器自定义属性计算值快照与样式重算反馈回路。（其伴生条目 cqw/cqh/cqi/cqb 单位已于 A9 落地：延迟结算+容器基值结算期现查+small viewport 回落，见 T0 A9 条。）重估条件：容器 custom property 快照管线 + 依赖失效模型。
+- @layer 跨样式表：**主体已落地（B2）**——文档全局层树（各表层树附着
+  期经 remap_layers_to_doc 重映射并入 doc_layers，跨表同名层 = 同层、
+  先现序 = 文档序，LayerRegistry::merge 承接表间并树）。残余 = UA 样式
+  表内容仍空缺（Origin::UserAgent 档语义完备；`add_stylesheet` 仅
+  author 起源——UA 表注入 API 的重估条件 = UA 默认样式需求出现）。
+- 条件组规则内的 @layer：@media 块内 @layer 无条件登记层树（条件求值
+  过滤规则命中而非层登记）；B2 复核完成：@supports 块形同约定（子解析
+  继承层上下文，块内层登记无条件）。
+- revert 与内联声明：内联与 author 表同桶（Author important/normal），
+  revert 语义按"严格更低 origin-importance 档"回滚，不会回滚到
+  简写展开前的分量（展开发生在解析期）。
+- var() 代换简写结果恰为宽关键字：按"各长手各得该语义"物化（与浏览器
+  逐字行为待 conformance 对拍）。
 - 多列 fragmentation 深化：break-inside:auto 内容跨列分裂、column-span 整数列跨。当前 avoid/整列装箱语义（B 级在案）。重估条件：fragmentainer 模型（内容分裂是通用断行工程，table/多列共享）。
 - 多动画组：animation 简写逗号分隔多组（残余偏差，第五批⑰）。当前单组采样。重估条件：采样循环数组化（小工程，随动画需求）。
-- direction / unicode-bidi 显式基向：未解析——parley 0.11 硬编码 first-strong（第五批⑲已记录上游限制）。重估条件：parley 暴露 builder 级基向 API。
-- text-decoration（underline/overline/line-through + 装饰色/线型）：未解析、声明丢弃。重估条件：文本装饰绘制批（sink 文本通路画线+跨 run 装饰传播语义）。
-- @import / @supports / 其余未支持 at-rule：解析跳过+report 告警（既有）。@import 需交叉样式表装载（宿主取 URL 契约扩展）；@supports 需特性支持表。重估条件：按宿主需求。
-- 字体描述符深化：unicode-range / font-display / ascent-override 等无引擎语义（第五批⑯已记 @font-face 主体契约）。重估条件：多字重/子集化字体需求。
-- 背景图片 repeat / size / position：当前拉伸至 padding box MVP。重估条件：视觉需求出现（repeat/cover/contain 是独立绘制批）。
+- direction / unicode-bidi 显式基向：**属性层已落地（A8：解析/级联/继承/计算值经 `ComputedStyle::direction()/unicode_bidi()` 可读）**——文本栈基向仍硬编码 first-strong（parley 0.11 上游限制，属性值暂不改变折行方向）。重估条件：parley 暴露 builder 级基向 API（届时以计算 direction 接管基向）。
+- text-decoration（underline/overline/line-through + 装饰色/线型）：**已落地
+  （F2 D4，ADR-0022——见 T0 段 text-decoration 四长手+简写条）**，本条仅
+  存档；残余 B 级（线位近似/blur）见该条。
+- hyphens 断词效果本体：**属性层已落地（F4，ADR-0028——HyphensKind 解析/
+  继承/计算值可读）**；断词效果三值 v1 行为一致（显式断点由 parley UAX 14
+  分段≈manual 默认语义、auto 无词典、none 无法抑制上游断点）。重估条件：
+  parley 暴露连字/断点覆盖 API，或引擎侧软连字预处理管线。
+- 其余未支持 at-rule（@namespace/@page 等）：解析跳过+report 告警（既有）。@import/@supports 已于 B2 落地（见 T0 B2 条：宿主取 URL 契约 + 静态能力求值）。重估条件：按宿主需求。
+- 字体描述符深化：**@font-face 登记表已落地（F3d，ADR-0026——见 T0 段
+  条目⑤）**——全描述符解析入 `engine.font_faces()`（unicode-range/
+  font-display/font-stretch/features/variations 均记录）；**残余**：
+  unicode-range 记录但不驱动字体 fallback 选择（需子集化匹配管线）、
+  ascent/descent/line-gap-override 与 src format 匹配度校验未消费、
+  local() 仅记录（FontBank 无本地字体探测）。重估条件：多字重/子集化字
+  体需求或宿主接注册表驱动的字体选择。
+- 背景图片 repeat / size / position：**已落地（F3b，ADR-0024——见 T0 段背景全集条）**；残余 B 级：space/round 平铺按重复近似、background-attachment: local 滚动联动=宿主滚动运行时消费（ADR-0006 边界）、clip: text 降级 border-box。
+- border-image 与字体深化（F3d，ADR-0026）**已落地（见 T0 段条目）**；残余 B 级：round/space 切片平铺为改进近似（Round 等分拉伸/Space 首尾贴边 gap 均摊，非 CSS 精确「最近整数 tile 重排」）、圆角与九宫格边不相交裁剪（圆角不切 9 片）、渐变源 repeat→stretch；small-caps 合成=uppercase+0.8 缩放（petite 回退 small，真 smcp 字形未探测——fontique 无协商钩子）、font-variant 其余轴（numeric/ligature/east-asian）未消费；span 级 stretch/word-spacing/features/variations 仅基样式生效（行高/字距先例同型）。
 - git-lfs（第五批㉗暂缓，记录重估条件）：字体基准资产（NotoSansSC.ttf/DejaVuSans.ttf 等 demo+conformance 双侧共享）暂以普通 git 对象入库；重估条件=仓库二进制总量显著增长（如新增多字重字体族/图片基准资产）或克隆体积成为协作痛点——届时迁 LFS 需同步改 CI checkout（lfs: true）与 dumper 路径无差（file 语义不变）
 - DisplayList serde 序列化（阶段3 决策）：`DisplayList`/`PaintOp` v1 不提供 serde derive——不引入 serde 依赖（C4 依赖纪律），且 `PaintOp` 为中立公共枚举（`#[non_exhaustive]`），宿主可零成本自行编写转换层。重估条件=出现跨进程合成、录制回放或可视化调试工具链需求；届时优先独立 feature gate（如 `serde`）而非默认依赖
 
@@ -64,12 +443,14 @@
 - 边框【方角对角线二分=已修复（第四批⑤）；不等宽圆角弧起点=B·豁免｜Pixel 用例验收（㉔ 批）】：四边独立（`PaintOp::Border` 携带每边 `BorderSide{width,style,color}`，none/0 宽边由 sink 忽略）；solid 与 dashed/dotted 同走「角弧+直线」中心线描边（圆角弧三次贝塞尔近似），角弧按顺时针归属（TL→top、TR→right、BR→bottom、BL→left）；方角（radius≈0）角部 = 对角线二分（第四批⑤：外角→内角对角线把角部方块分给相邻两边、单边存在整块归该边、同色一次填充——消除旧「全边长直线交叉」的半透明双重着色与「后画方」角色偏差，四色快照目验通过）；残余偏差：不等宽圆角的弧起点不随邻边带宽调整（角部可能有细缝/重叠）。
 - 渐变【rx≠ry 画刷缩放=B·豁免｜几何已校准（第五批⑫：radial_ellipse_geometry_calibrated 全组公式锁定，像素校验归 ㉔ 批）；线性画刷原点=已修复（第四批⑤）】：radial 语义完整（T4c：`circle|ellipse` + `closest/farthest-side|corner` / 显式半径 + `at <position>`，paint 层按盒子解析为绝对 center/r；ellipse rx≠ry 由 sink 画刷 x 向缩放近似；farthest-corner 公式第四批⑤复核=css-images-3 一致——circle=最远角距离、ellipse=fx·√2/fy·√2（fx/fy=圆心到最远边距离），偏心 circle farthest-corner 用例锁公式；第五批⑫新增全组校准测试——两形状×四关键字在居中/偏心两中心下的 rx/ry 与绝对锚点全数断言=spec 一致）；stop 缺省位置按 CSS 语义均匀补位；插值色空间 sRGB；线性渐变画刷中心第四批⑤修复补入盒原点（此前漏加 (x,y)，非原点盒采样区错位——与 radial 含原点不对称暴露）。
 - 文本【line-height/letter-spacing 消费=已修复（第四批①）；text-align=已消费（第五批⑳：PaintOp::Text 携带声明值、sink 折行后 `Layout::align`——start/end/center/left/right/justify 全语义消费，对齐宽=max_advance 与 CSS 内容盒语义一致、justify 末行起始对齐、测量不变宽故盒几何零变化；像素目验归 Pixel 批）；span 级行高/字距=B·豁免；自定义禁则=B·豁免（上游）】：`PaintOp::Text` 经 sink `VelloTextSystem`（parley 0.11 排版 + DrawGlyphs）落字形（零副作用——系统字体禁用、字体字节由宿主双推 engine 测量/sink 绘制）；文本测量亦内置（text.rs），未推送测量的文本叶自动测量。富文本 spans（T5c-1）：`StyleNode.spans` 字节区间声明以节点基样式为 parent 复用 `compute_node` 级联求解，`PaintOp::Text.spans` 携带绘制期终结样式，sink 按 run 文本区间选色/推样式；测量按字节区间吸收 span 度量。换行（T5c-2）：white-space: normal 的自动测量文本叶在 pass1 布局后按包含块内容宽重测量并按需二次布局（包含块内容宽 = 父 border-box − 父左右 padding − 已生效 border，border-style 为 none 时宽归零、初始 medium 不计入；shrink-to-fit 父宽受无界文本影响的场景仍为近似）；宿主 `set_leaf_measure` 不参与自动重测。span 区间契约：`insert` 校验 UTF-8 字节边界/有序/不越界（无文本节点的 span 一律非法），违规返回 `ContractError::InvalidSpan`。未注册字体对应的泛族（缺省 sans-serif）测量为 0 尺寸——宿主应显式指定已注册族名或注册匹配泛族的字体。绘制侧 `PaintOp::Text.max_advance` 与测量共用同一约束保证折行一致（sink 用 `positioned_glyphs`，已含 run 偏移与基线）。属性→通路盘点（第四批）：line-height 与 letter-spacing 此前已解析入库但**无任何消费者**（无效声明）——已接入测量与绘制双通路（ComputedStyle 解析为 px，PaintOp::Text 携带 `line_height/letter_spacing`，sink 与测量同源推 StyleProperty，保证折行一致；span 级行高/字距为已知近似、仅基样式生效）；letter-spacing 的 initial 类型与解析产物不一致（Len(Px(0)) vs LenAuto(None)）已修同型；text-align 解析入库无消费者（start-only），列入 T1。离屏目验通路：`cargo run -p style-engine-demo --example snapshot`（vello `render_to_texture` → 纹理回读 → PNG；存储纹理路径要求 Rgba8Unorm，快照色彩较窗口路径偏亮属已知伪影）。字体资产：demo 内嵌 DejaVu Sans Regular/Bold（许可证见 `crates/style-engine-demo/assets/fonts/LICENSE-DejaVu.txt`）与 CJK 第二波 Noto Sans SC 可变字体（默认实例 Regular，OFL 见 `crates/style-engine-demo/assets/fonts/LICENSE-NotoSansSC.txt`）。CJK 行断行走 UAX #14 类规则（快照目验通过：混排行在表意文字边界折行；icu_segmenter 2.x 行分段器有意不加载 CJ 词典——设计取舍，调研见 DEPENDENCIES）。parley 已开 `complex-scripts`（上游 #621）：词分段获得 CJ 词典（`No segmentation model` 警告消除，≈+2MiB baked 数据），SEA 文字获词典级行断；禁则处理（kinsoku）仍不可达——parley `LineBreakOverrideFn` 仅 ASCII（上游限制，详见 DEPENDENCIES）。
-- opacity / 背景图片【opacity=已实现（勘误：旧文「Opacity 未映射」系文档失同步，与下条 z-index、L12 绘制清单及快照目验矛盾）；背景图片=已落地（第五批⑨）】：opacity 经 `PaintOp::PushOpacity{alpha}/PopOpacity` 层对落地；背景图契约：background-image: url() 引用（解析已支持 UnquotedUrl 与 url() 函数两形）→ 宿主 `add_image(reference, w, h, rgba)` 注册表解析（零副作用——引擎不取 URL、不解码位图格式；rgba=宿主预解码 ARGB8 直排，peniko Blob 同型 `Arc<dyn AsRef<[u8]>>` 承载）；未注册引用=tracing 告警跳过（无 op）；渲染=拉伸至 padding box（MVP 语义，repeat/size/position 语义后置）、圆角非零时套 PushClip/PopClip 裁剪；`PaintOp::Image{source_w, source_h, pixels: ImageRes}` 自足携带（DisplayList 中立载体）；锁定测试 background_image_op（注册命中+未注册跳过）（vello `push_layer` alpha，SC 触发 opacity<1 已并入带序判定，见下条）；背景图片未实现（`BackgroundImage` 仅 Gradient/None——宿主推图片字节、paint 层解析 `PaintOp::Image`，Pixel 用例验收，见路线图⑨）。
-- z-index / 层叠【flex/grid 子项显式 z-index（无 position）=已落地（第五批㉑：显式 z ≠ auto 的 flex/grid item 与定位元素同等参与 ADR-0008 三带——负 z 进 Neg、其余进 Pos 带排序，锁定测试 flex_grid_item_z_index_orders；CSS 语义 flex/grid item 的 z-index ≠ auto 还创建 stacking context，按三带即可表达）；SC 触发全集=已落地（第四批②④ + 第五批㉒：transform / filter / clip-path / will-change 含触发属性 / isolation: isolate / mix-blend-mode ≠ normal——均仅触发、无效果实现）】（ADR-0008，CSS 2.1 Appendix E 简化三带）：SC 触发 = positioned 且数字 z、opacity < 1（clamp [0,1]）；带序 Neg（负 z 升序、等值树序）→ Flow（in-flow 树序）→ Pos（auto/0 树序在前、正 z 升序在后，非定位 SC 触发者键 0 树序）；SC 子树经 paint 递归天然原子。opacity 经 `PaintOp::PushOpacity{alpha}/PopOpacity` 层对（sink 用 vello `push_layer` alpha，快照目验通过）；`z-index: auto` 物化为 `ZIndex(None)`（与缺席等价、不触发 SC），数字为 `ZIndex(Some)`。残余偏差：flex/grid 子项的 z-index（无 position）不生效；transform 触发者已落地（第四批②，Pos 带键 0——层序测试覆盖树序控制组 + 快照目验）；filter/clip-path 触发者已落地（第四批④：`DeclValue::Effect(bool)` 存在性语义位——`filter: none` 缺席、任意值宽容存在，函数块经 skip_block_content 递归吞咽满足 parse_nested_block 的 parse_entirely 耗尽契约；带序并入 SC 判定、不产生任何 PaintOp——测试断言 op 数与控制组一致；效果实现显式不在范围）；will-change/isolation/mix-blend-mode 触发者已落地（第五批㉒ SC 触发全集：will-change 列表含 transform/filter/opacity/mix-blend-mode/clip-path/isolation/perspective 才置位（宽容接受任意 ident、纯语义位无提示优化）、isolation 仅 isolate 置位、mix-blend-mode 16 标准模式 + plus-lighter/darker 非 normal 置位——效果实现不在范围，带序测试 + 解析语义测试×2 覆盖）。
+- opacity / 背景图片【opacity=已实现（勘误：旧文「Opacity 未映射」系文档失同步，与下条 z-index、L12 绘制清单及快照目验矛盾）；背景图片=已落地（第五批⑨；repeat/size/position/多层=F3b 语义精化取代 MVP 拉伸）】：opacity 经 `PaintOp::PushOpacity{alpha}/PopOpacity` 层对落地；背景图契约：background-image: url() 引用（解析已支持 UnquotedUrl 与 url() 函数两形）→ 宿主 `add_image(reference, w, h, rgba)` 注册表解析（零副作用——引擎不取 URL、不解码位图格式；rgba=宿主预解码 ARGB8 直排，peniko Blob 同型 `Arc<dyn AsRef<[u8]>>` 承载）；未注册引用=tracing 告警跳过（无 op）；**渲染（F3b）=固有尺寸+repeat 平铺（tile 双循环 ceil 对齐；space/round→重复=B 级）、size cover/contain/显式 LP 消费、多层反序发射（首层最上）、origin/clip PushClip 裁剪盒、圆角非零时 clip=BorderBox 用元素圆角**；`PaintOp::Image{source_w, source_h, pixels: ImageRes}` 自足携带（DisplayList 中立载体）；锁定测试 background_image_op（首 tile 几何+tile 计数 1250+未注册跳过）（vello `push_layer` alpha，SC 触发 opacity<1 已并入带序判定，见下条）。
+- z-index / 层叠【flex/grid 子项显式 z-index（无 position）=已落地（第五批㉑：显式 z ≠ auto 的 flex/grid item 与定位元素同等参与 ADR-0008 三带——负 z 进 Neg、其余进 Pos 带排序，锁定测试 flex_grid_item_z_index_orders；CSS 语义 flex/grid item 的 z-index ≠ auto 还创建 stacking context，按三带即可表达）；SC 触发全集=已落地（第四批②④ + 第五批㉒：transform / filter / clip-path / will-change 含触发属性 / isolation: isolate / mix-blend-mode ≠ normal——clip-path 已升实裁剪（F3c，见 T0 段条），其余仅触发、无效果实现）】（ADR-0008，CSS 2.1 Appendix E 简化三带）：SC 触发 = positioned 且数字 z、opacity < 1（clamp [0,1]）；带序 Neg（负 z 升序、等值树序）→ Flow（in-flow 树序）→ Pos（auto/0 树序在前、正 z 升序在后，非定位 SC 触发者键 0 树序）；SC 子树经 paint 递归天然原子。opacity 经 `PaintOp::PushOpacity{alpha}/PopOpacity` 层对（sink 用 vello `push_layer` alpha，快照目验通过）；`z-index: auto` 物化为 `ZIndex(None)`（与缺席等价、不触发 SC），数字为 `ZIndex(Some)`。残余偏差：flex/grid 子项的 z-index（无 position）不生效；transform 触发者已落地（第四批②，Pos 带键 0——层序测试覆盖树序控制组 + 快照目验）；filter 触发者已落地（第四批④：`DeclValue::Effect(bool)` 存在性语义位——`filter: none` 缺席、任意值宽容存在，函数块经 skip_block_content 递归吞咽满足 parse_nested_block 的 parse_entirely 耗尽契约；带序并入 SC 判定、不产生任何 PaintOp——测试断言 op 数与控制组一致；效果实现显式不在范围）；clip-path 已升实裁剪（F3c，ADR-0025——ClipShape 全形状解析 + PushClipPath 绘制裁剪，SC 触发=形状≠none，inset(0) 实发 PushClip/PopClip 对、效果触发测试已重基线）；will-change/isolation/mix-blend-mode 触发者已落地（第五批㉒ SC 触发全集：will-change 列表含 transform/filter/opacity/mix-blend-mode/clip-path/isolation/perspective 才置位（宽容接受任意 ident、纯语义位无提示优化）、isolation 仅 isolate 置位、mix-blend-mode 16 标准模式 + plus-lighter/darker 非 normal 置位——效果实现不在范围，带序测试 + 解析语义测试×2 覆盖）。
 - transform【cb 跳走=已落地（三期②，见 absolute 包含块跳走条——数值哨兵 transform-cb 的「引擎 taffy 直锚同点 (50,20)」说明随之作废：直父锚定场景行为不变，跨 static 层场景改锚 cb）；transform-origin=已落地（第五批⑬）；同节点 transform×自滚动=C·豁免】（第四批②，ADR-0009 双时机契约）：L1 解析 transform 函数列表（translate/scale/rotate/skew/matrix 及 2D 变体，单参回退；3D 函数族 warn 拒绝、声明丢弃=none；函数间逗号宽容、终止符不消费交回声明循环）；布局盒永不被变换污染（taffy 不可见，Frame/scrollable 全为非变换几何）。L2：has_transform 谓词进 absolute 可用宽 cb walk（transformed 祖先=cb，收缩夹紧红转绿 360→200）+ 数值哨兵 transform-cb 进 Numeric Channel（恒等变换零投影噪声）+ has_transform 进三期② cb 判定（absolute 跳走谓词=positioned‖transformed，与可用宽 walk 同一语义）。L3：PushTransform/PopTransform 层对（paint 期终结仿射 A=T(origin)·M·T(−origin)，origin 按 transform-origin 解析消费——第五批⑬：2D 二维子集 1~2 组件（length-percentage 或 left/center/right/top/bottom 关键字）、关键字轴归类顺序宽容（top left ≡ left top）、单值=横向在前且 top/bottom 单值横向缺省 center、第三组件（z 轴）随终止符宽容吞下不解析、百分比基=自身 border-box、无效值声明丢弃；原「固定 50% 50% v0 不解析」已替代；仿射断言测试含默认/显式 center/0 0/关键字/单值/px 双值×8 组）+ 非定位触发者进 Pos 带键 0；层栈序 transform→clip→filter→opacity（transform 组合的像素级组合已由二期⑦软 Sink 逆映射光栅化转正+transform-pixel 用例验收）。sink：vello 0.10 Scene 无变换栈 API——自维护 xforms 栈（A·B 中 B 先行）+ per-call **偏移共轭** eff(v)=offset+T·(v−offset)（形状坐标构造期已手叠偏移）、字形 run 变换=translate(offset+T·原点)∘T，恒等栈顶逐位退化回原行为；同节点 transform×自身滚动的次序近似（CSS 语义滚动在变换内，此处为外）记录在案、验收不覆盖。命中测试与滚动补偿=宿主契约（ADR-0009 §5：宿主自重建仿射求逆映射，引擎不提供助手）。
 - @font-face / 字体资源【已契约（第五批⑯）：@font-face 解析静默跳过且不产生报告警告（良性已知规则——告警留给影响渲染的事，`@import`/`@supports` 等其余未支持 at-rule 仍跳过+告警）；字体资源=宿主经 `add_font` 推送字节（零副作用，引擎不取 src() URL）；font-family 按字体内部家族名匹配（fontique 注册，generic 族 sans-serif/monospace 等不在无系统环境下回退——用例须显式命名族）；unicode-range/font-display/ascent-override 等描述符无引擎语义；golden 侧 dumper 经 data:-URL @font-face + document.fonts.ready、引擎侧 run_case 以同字节 add_font——双源同字形】
 - 文本叶尺寸语义【已契约+已落地（第五批⑥）】（第四批快照目验发现，旧语义=盒尺寸被文本实测覆写、显式 width/height 不生效——demo tilt 卡曾现形 90×24 即该缺陷）：契约=①声明 width/height 优先于文本测量（CSS 显式尺寸胜出）；②无声明时交 taffy auto——块流文本叶拉伸到容器内容宽（与浏览器匿名块盒一致），flex/grid 子项取内容宽（固有尺寸经 LeafMeasure/min-content 供给），min/max 宽仍由 taffy 夹紧；③absolute 无声明宽 = shrink-to-fit 夹紧 clamp(min_content, cb 内容宽, max_content)（CSS 10.3.7，第三 pass 保留——restyle 期落显式测量宽保 compute #1 可用）；④测量高兜底 height:auto=内容高、声明高优先；⑤折行约束（wrap_widths/max_advance=容器内容宽）与盒宽解耦——盒宽不再夹住折行。测试 text_leaf_block_stretch_and_declared_width（拉伸 220/声明 120/内容高非零）+ absolute_text_shrinks_to_fit 断言更新（host 声明宽保留后夹紧宽=300、measures=该约束下最宽行）。
 - 滚动容器【量程语义=已文档（第五批⑭；绝对定位后代并入为近似=C·豁免）】（ADR-0007）：overflow ∈ {auto（解析归一为 scroll）, scroll} 两轴独立识别；偏移归宿主（`set_scroll_offset`，引擎不夹紧——越界/回弹/阻尼语义=宿主按 `Frame.scrollable` 自行实现），量程经 `Frame.scrollable`（key → 各轴 (max_x, max_y)，px，每帧随布局重算）上报。量程定义=每轴 max(0, 内容并集在该轴超出 padding box 的幅度)：内容并集 = 滚动容器 padding box ∪ 全部流内后代 border box（按 relative 偏移后实际位置；文本叶按实测盒；三期⑥：带 transform 的后代（含祖先链复合仿射——各变换均以未变换视口系为基，复合序 `mul_affine(acc, own)` 与绘制流 cur∘M 嵌套一致，终结复用 ADR-0009 的 `resolve_transform_affine`）按变换后四角 AABB 并入、仅正向溢出（LTR 左/上越界不扩量程，Chromium 同语义；锁定测试 scroll_range_includes_transformed_child / scroll_range_nested_transform_composes / scroll_range_rotate_aabb_positive_side_only / scroll_range_transform_up_extends_nothing））；绝对定位后代以当前布局位置并入为近似（abspos 盒锚定最近 positioned 祖先而非滚动容器流，滚动后不重投影、量程不随之重算——精确 abspos 量程=C·豁免，宿主如需可自并集）；hidden/clip 仅裁剪、不上报量程；滚动条 overlay 式、宿主所有、不占布局空间；sticky 契约记录（后布局位移 pass）、实现停泊。绘制 PushClip → PushScroll{dx,dy} → PopScroll → PopClip，偏移变更不触发重排（量程计算锁定于 scrollable 上报测试 (0,190) 用例）。
-- 布局映射【display:inline=已契约（第五批⑧：决策=契约化而非 IFC——taffy/parley InlineBox 集成约一行程项目当量、MVP 不值；契约=inline/inline-block 解析接受并归一 Block、inline-flex→Flex、inline-grid→Grid，元素按块级参与布局（纵向堆叠无行盒），声明不丢弃、归一化发 tracing 告警（`style_engine::css` target）而非报告失败；inline 内容=文本叶承载（T5c 通路），styled inline 元素的行内参与列待办㉔后的 Pixel 文本批再评估）；calc 百分比扁平化=A·待办⑤（独立票）；margin auto 居中、box-sizing、shrink-to-fit、grid 轨道消费、margin collapse=已落地——第五批⑦评估证实 taffy 0.14 block 算法内置纵向折叠（兄弟取 max/负 margin 求和/父子穿透 strut/浮动与 clearance 机械齐全），引擎用内建 `taffy::TaffyTree` 直接获得、零额外代码；flex/grid 上下文不折叠与 CSS 一致；已知偏差（三期②随 absolute-anchor-jump 用例记录）：末子 margin-bottom 与父 margin-bottom 塌陷时 taffy 把塌陷量落在父盒上方（父.y 增大）而非父底缘之外（违 CSS 2.1 §8.3.1），用例规避中、B 级在案（重估条件=taffy 上游修复或引擎侧塌陷后处理）；测试 margin_collapse_block_siblings 块流 30（max）/flex 50（相加）双向锁定】：display:inline 缺席（统一块化）；calc 含百分比时百分比基按 0 扁平化——taffy 0.14 的 calc 为类型擦除指针 + 宿主回调求值（`CompactLength::calc(*const ())`、`traits.rs calc(val, basis)`，布局中以 parent_size 为基调用），接入需指针所有权约定与 unsafe 面，待 calc 正式特性票落地后以直通替代扁平化；vw/vh 已按视口解析。box-sizing（Numeric Channel box-model 用例驱动接入）：CSS 默认 content-box，taffy `BoxSizing` 直通换算（border-box 显式路径有对照用例）；边框计入布局——border 映射进 taffy border rect（style none → 0，与 used-width 语义一致），此前「边框仅绘制不占位」属语义偏差、由通道首战修正。shrink-to-fit（T5d 第三 pass 已落地）：absolute 叶按包含块可用宽夹紧——width = clamp(min_content, avail, max_content)，cb = 最近 positioned/transformed 祖先（三期②锚定跳走对齐；无 → 视口宽；近似：可用宽未扣自身 margin/静态位置），夹紧对象为内容宽（先扣自身水平 padding 与有效 border，CSS 10.3.7 约束式）；文本 min-content = `break_all_lines(Some(0.0))` 的最宽不可断原子（restyle 期随自动测量产出 `min_measures`，max-content 即无界测量）；非文本叶经 `set_leaf_intrinsic(key, min_w, min_h, max_w, max_h)` 提供固有区间，definite 首选尺寸仍走 `set_leaf_measure`（两者尺寸语义 = content-box，与 CSS width 一致）；块级流 width:auto 拉伸语义不变。合成视口根：taffy 根之上另有 ICB 节点，树根自身 margin 得以生效；taffy `location` 为父相对坐标，collect 沿树累计祖先偏移输出视口绝对坐标；margin 初始值为 0（CSS），显式 auto 才触发定宽块级盒居中。
+- 布局映射【display:inline=IFC 行内流已落地（F1 / ADR-0021，取代第五批⑧契约化决策）：inline→Display::Inline（连续性标记/组盒）、inline-block→Display::InlineBlock（原子盒）参与块容器行打包（settle_lines，见 T0 F1 条）；inline-flex→Flex、inline-grid→Grid、inline-table→Table 仍归一并发 tracing 告警（`style_engine::css` target）而非报告失败；inline 内容=文本叶承载（T5c 通路）；第五批⑧纵向堆叠语义由 F1 行盒并排取代（契约测试重写 display_inline_line_participation_f1）；calc 百分比扁平化=A·待办⑤（独立票）；margin auto 居中、box-sizing、shrink-to-fit、grid 轨道消费、margin collapse=已落地——第五批⑦评估证实 taffy 0.14 block 算法内置纵向折叠（兄弟取 max/负 margin 求和/父子穿透 strut/浮动与 clearance 机械齐全），引擎用内建 `taffy::TaffyTree` 直接获得、零额外代码；flex/grid 上下文不折叠与 CSS 一致；已知偏差（三期②随 absolute-anchor-jump 用例记录）：末子 margin-bottom 与父 margin-bottom 塌陷时 taffy 把塌陷量落在父盒上方（父.y 增大）而非父底缘之外（违 CSS 2.1 §8.3.1），用例规避中、B 级在案（重估条件=taffy 上游修复或引擎侧塌陷后处理）；测试 margin_collapse_block_siblings 块流 30（max）/flex 50（相加）双向锁定】：display:inline 缺席（统一块化）；calc 含百分比时百分比基按 0 扁平化——taffy 0.14 的 calc 为类型擦除指针 + 宿主回调求值（`CompactLength::calc(*const ())`、`traits.rs calc(val, basis)`，布局中以 parent_size 为基调用），接入需指针所有权约定与 unsafe 面，待 calc 正式特性票落地后以直通替代扁平化；vw/vh 已按视口解析。box-sizing（Numeric Channel box-model 用例驱动接入）：CSS 默认 content-box，taffy `BoxSizing` 直通换算（border-box 显式路径有对照用例）；边框计入布局——border 映射进 taffy border rect（style none → 0，与 used-width 语义一致），此前「边框仅绘制不占位」属语义偏差、由通道首战修正。shrink-to-fit（T5d 第三 pass 已落地）：absolute 叶按包含块可用宽夹紧——width = clamp(min_content, avail, max_content)，cb = 最近 positioned/transformed 祖先（三期②锚定跳走对齐；无 → 视口宽；近似：可用宽未扣自身 margin/静态位置），夹紧对象为内容宽（先扣自身水平 padding 与有效 border，CSS 10.3.7 约束式）；文本 min-content = `break_all_lines(Some(0.0))` 的最宽不可断原子（restyle 期随自动测量产出 `min_measures`，max-content 即无界测量）；非文本叶经 `set_leaf_intrinsic(key, min_w, min_h, max_w, max_h)` 提供固有区间，definite 首选尺寸仍走 `set_leaf_measure`（两者尺寸语义 = content-box，与 CSS width 一致）；块级流 width:auto 拉伸语义不变。合成视口根：taffy 根之上另有 ICB 节点，树根自身 margin 得以生效；taffy `location` 为父相对坐标，collect 沿树累计祖先偏移输出视口绝对坐标；margin 初始值为 0（CSS），显式 auto 才触发定宽块级盒居中。
 - 滚动：`PushScroll/PopScroll` 折叠为坐标平移；滚动语义归宿主（ADR-0005）。
-- Conformance（ADR-0003 双通道骨架已落地，`crates/style-engine-conformance`）：Numeric Channel——case（case.html + case.css + manifest.toml）单源，自动遍历 cases/（引擎盒 vs Chromium getBoundingClientRect golden 逐分量 0.5px），Playwright Chromium 生成 golden（含浏览器版本元数据）；基准版本化（第五批㉖）——golden meta.schema=1 钉格式/对比语义版本（dump_rects.py SCHEMA_VERSION 常量，13 用例全量重生成入档，diff 验证仅 schema 行新增零 rect 漂移），runner 校验不匹配即超差失败并提示重生成，重生成协议=browser_version（浏览器升级）或 schema（格式/语义变更）任一变化 → 全量重生成；现有 13 用例（block-flow-basic / box-model / box-model-borderbox / absolute-offset / cjk-kinsoku / flex-row-gap / grid-columns / relative-offset / sizing-constraints / text-wrap-latin / transform-cb / selector-structural / calc-width〔xfail〕），box-model 两用例首战即修正 box-sizing 与边框占位两处语义、grid-columns 用例暴露「grid 轨道解析入库但零消费」缺口后修复（见布局映射条），通道持续发挥缺口侦测作用；第五批㉓扩容——selector-structural（结构伪类 :first-child/:nth-child(odd)/:nth-child(3)/:last-child 驱动宽度差 + 同特异性源序级联，引擎与 Chromium 逐盒一致=⑮收敛验证）、calc-width（xfail 资产钉死含百分比 calc 布局 0 折算偏差，Chromium 400 vs 引擎 10，转正条件=自定义 LayoutPartialTree）；xfail 复核与转正（㉓复核→㉔落地）——㉔ normal 行高度量 Chromium 对齐（两遍法：探针取主 run RunMetrics，normal=round(asc)+round(desc) 不含 lineGap/leading；DejaVu 16px=12+4=16 对齐 Chromium 逐字体整数化，parley 浮点 normal=16.25，显式行高单遍不受影响）落地后 cjk-kinsoku 与 text-wrap-latin 双资产转正（96=96、64=64，此前残余=行高度量 93/96 与 65/64 + 文本叶不拉伸已由⑥契约消除），xfail 集合仅剩 calc-width；golden 重生成 `tools/dump_rects.py`，本地门禁 `run.ps1`（与 `.github/workflows/ci.yml` gate job 同步：fmt/clippy/test --all-features/hack 幂集，msrv job 钉 1.85）；文本用例字体注入（第四批⑥）：manifest.fonts 项 = "族名=相对仓库根路径"，dumper 以 data: URL @font-face 注入并等 `document.fonts.ready`，引擎 run_case 同字节 add_font——两侧字形度量同源；自定义禁则不可达属上游限制（parley `LineBreakOverrideFn` 仅 ASCII，见 DEPENDENCIES）；标准禁则断行选择两侧一致（UAX#14 已覆盖）；StateFlags/transition 用例：numeric 通道为静态对比、无状态注入与时间轴，暂不适配（记录）。Pixel Channel——PNG 连通域差异 + Error Class 0-5 启发式分类（几何/颜色/基元缺失零容忍）+ per-case manifest `[pixel]` 预算；二期④转正——manifest `[pixel]` 段声明即入通道（max_ratio 差异占比上限 + allowed 白名单，Class 3–5 恒零容忍），dumper 对声明用例追加整视口截图 golden/pixel.png（设备像素=视口×scale），引擎侧 render_case_png 与 Numeric 共享 build_case_engine——同 case 同一次布局驱动双通道（Numeric 盒与 Pixel 像素一致性即通道间同步验证），frame.paint 经软 Sink style-engine-soft 光栅化（白底=Chromium 默认画布），tests/pixel.rs 自动遍历预算校验；二期④启用 calc-width/multicol-basic/table-pixel 三用例（全整数矩形；table-pixel=table-basic 无文本变体——软 Sink v0 跳过 Text/Transform，含文本/变换用例不得声明 `[pixel]`，⑦ 转正后并入）；文本类用例（字形栅格化）：行高语义已由㉔对齐、具备接入条件，栅格化噪声仍需 per-case 预算校准后启用。
+- Conformance（ADR-0003 双通道骨架已落地，`crates/style-engine-conformance`）：Numeric Channel——case（case.html +
+- CSS Nesting 顶层裸声明【已契约（B3；预存在偏差升格为文档化契约）】：样式表顶层 `color: red;` 形裸声明经 cssparser StyleSheetParser 毒化下一规则（prelude 捕获吞至下一 `{`，选择器解析失败整条丢失）——浏览器按 decl 跳过恢复；重估条件：顶层规则表改 RuleBodyParser 驱动（嵌套语境 parse_value 守卫已就位，迁移成本集中在 StyleSheetParser 语义复核）。
+- :has() 失效粒度【表级升级=已落地（B3）；增量精准脏传播=暂缓】：`any_has_rules()` 命中 → 变更类失效一律全量重样式（正确性完备，与 @container 全量收敛先例同型）；插入/移除仅波及 :has 锚点子树的精准失效重估条件：大文档性能画像出现（十万节点级文档 + 高频 DOM 变更场景）。 case.css + manifest.toml）单源，自动遍历 cases/（引擎盒 vs Chromium getBoundingClientRect golden 逐分量 0.5px），Playwright Chromium 生成 golden（含浏览器版本元数据）；基准版本化（第五批㉖）——golden meta.schema=1 钉格式/对比语义版本（dump_rects.py SCHEMA_VERSION 常量，13 用例全量重生成入档，diff 验证仅 schema 行新增零 rect 漂移），runner 校验不匹配即超差失败并提示重生成，重生成协议=browser_version（浏览器升级）或 schema（格式/语义变更）任一变化 → 全量重生成；现有 13 用例（block-flow-basic / box-model / box-model-borderbox / absolute-offset / cjk-kinsoku / flex-row-gap / grid-columns / relative-offset / sizing-constraints / text-wrap-latin / transform-cb / selector-structural / calc-width〔xfail〕），box-model 两用例首战即修正 box-sizing 与边框占位两处语义、grid-columns 用例暴露「grid 轨道解析入库但零消费」缺口后修复（见布局映射条），通道持续发挥缺口侦测作用；第五批㉓扩容——selector-structural（结构伪类 :first-child/:nth-child(odd)/:nth-child(3)/:last-child 驱动宽度差 + 同特异性源序级联，引擎与 Chromium 逐盒一致=⑮收敛验证）、calc-width（xfail 资产钉死含百分比 calc 布局 0 折算偏差，Chromium 400 vs 引擎 10，转正条件=自定义 LayoutPartialTree）；xfail 复核与转正（㉓复核→㉔落地）——㉔ normal 行高度量 Chromium 对齐（两遍法：探针取主 run RunMetrics，normal=round(asc)+round(desc) 不含 lineGap/leading；DejaVu 16px=12+4=16 对齐 Chromium 逐字体整数化，parley 浮点 normal=16.25，显式行高单遍不受影响）落地后 cjk-kinsoku 与 text-wrap-latin 双资产转正（96=96、64=64，此前残余=行高度量 93/96 与 65/64 + 文本叶不拉伸已由⑥契约消除），xfail 集合仅剩 calc-width；golden 重生成 `tools/dump_rects.py`，本地门禁 `run.ps1`（与 `.github/workflows/ci.yml` gate job 同步：fmt/clippy/test --all-features/hack 幂集，msrv job 钉 1.85）；文本用例字体注入（第四批⑥）：manifest.fonts 项 = "族名=相对仓库根路径"，dumper 以 data: URL @font-face 注入并等 `document.fonts.ready`，引擎 run_case 同字节 add_font——两侧字形度量同源；自定义禁则不可达属上游限制（parley `LineBreakOverrideFn` 仅 ASCII，见 DEPENDENCIES）；标准禁则断行选择两侧一致（UAX#14 已覆盖）；StateFlags/transition 用例：numeric 通道为静态对比、无状态注入与时间轴，暂不适配（记录）。Pixel Channel——PNG 连通域差异 + Error Class 0-5 启发式分类（几何/颜色/基元缺失零容忍）+ per-case manifest `[pixel]` 预算；二期④转正——manifest `[pixel]` 段声明即入通道（max_ratio 差异占比上限 + allowed 白名单，Class 3–5 恒零容忍），dumper 对声明用例追加整视口截图 golden/pixel.png（设备像素=视口×scale），引擎侧 render_case_png 与 Numeric 共享 build_case_engine——同 case 同一次布局驱动双通道（Numeric 盒与 Pixel 像素一致性即通道间同步验证），frame.paint 经软 Sink style-engine-soft 光栅化（白底=Chromium 默认画布），tests/pixel.rs 自动遍历预算校验；二期④启用 calc-width/multicol-basic/table-pixel 三用例（全整数矩形；table-pixel=table-basic 无文本变体——软 Sink v0 跳过 Text/Transform，含文本/变换用例不得声明 `[pixel]`，⑦ 转正后并入）；文本类用例（字形栅格化）：行高语义已由㉔对齐、具备接入条件，栅格化噪声仍需 per-case 预算校准后启用；**vello 像素回归（实施期 Phase 0 前置⑤）**——Pixel 通道新增 vello sink 腿（conformance tests/pixel_vello.rs）：同一 [pixel] 用例经 style-engine-vello::render_offscreen 离屏渲染 vs Chromium golden（GPU 侧首次获得像素级回归保护，先于一切绘制特性建立——像素差异可归因引擎几何 vs vello 光栅化）；预算=manifest max_ratio×5（下限 0.005）、allowed∪{1,2}（AA 边缘/文本栅格化=两套光栅化器合法分歧），Class 3–5 恒零容忍不变；跳过语义=STYLE_ENGINE_NO_GPU_PROBE=1（CI windows WARP 段错误环境级短路，同 ㉕ 探针惯例）或无适配器（Ok(None)），真适配器在场的渲染/回读失败为 Err 上浮测试失败（错误双轨）；`render_offscreen(list, text, w, h, scale, base_color)` 为 vello sink 公共 API（DisplayList+VelloTextSystem→紧密 RGBA8 行主序；scale≠1 经 `Scene::append(&sub, Some(Affine::scale))` 注入缩放——vello 0.10 Scene 无场景级 push/pop_transform），wgpu 纹理 usage=RENDER_ATTACHMENT|STORAGE_BINDING|TEXTURE_BINDING|COPY_SRC；pollster 0.4 升入 vello crate [dependencies]（库内同步阻塞执行器）；conformance 对 style-engine-vello 仅 dev-dependency（wgpu 不进主依赖树，C4 纪律）

@@ -9,9 +9,10 @@
 //!   后展开，逐槽级联竞争。
 
 use crate::css::property::{
-    BorderStyle, ContainerType, DeclValue, PropertyId, parse_border_style, parse_border_width,
-    parse_color, parse_column_count, parse_column_rule_style, parse_column_rule_width,
-    parse_declaration, parse_flex_direction, parse_flex_wrap, parse_len, parse_len_auto,
+    BorderStyle, ContainerType, DeclValue, GridLineSpec, OutlineStyle, PropertyId, WideKeyword,
+    parse_border_style, parse_border_width, parse_color, parse_column_count,
+    parse_column_rule_style, parse_column_rule_width, parse_declaration, parse_flex_direction,
+    parse_flex_wrap, parse_len, parse_len_auto, parse_line_spec_value, parse_outline_style,
     parse_overflow,
 };
 use crate::css::value::{ColorValue, LengthPercentage, ValResult, parse_number};
@@ -214,6 +215,39 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationBlockParser {
 
         let shorthand = shorthand_exists(&name);
 
+        // B1：CSS 宽关键字整值拦截（css-values-4）——值恰为单个宽关键字
+        // ident（initial/inherit/unset/revert/revert-layer）。例外：flex
+        // 简写的 initial 是 flex 专属关键字（css-flexbox-1，= 0 1 auto），
+        // 走原简写路径。简写展开到长手全集（每长手独立回滚/物化）。
+        if !(shorthand && name.eq_ignore_ascii_case("flex"))
+            && let Some(kind) = try_parse_wide_keyword(input)
+        {
+            let targets = if shorthand {
+                shorthand_longhands(&name)
+            } else {
+                PropertyId::from_css_name(&name).map(|id| vec![id])
+            };
+            let Some(targets) = targets else {
+                warn(self, format!("unknown declaration '{name}'"));
+                return Err(cssparser::ParseError::unexpected_token());
+            };
+            let important = match finish_tail(input) {
+                Ok(imp) => imp,
+                Err(_) => {
+                    warn(self, format!("trailing tokens after '{name}'"));
+                    return Err(cssparser::ParseError::unexpected_token());
+                }
+            };
+            for pid in targets {
+                self.block.decls.push(Declaration {
+                    id: pid,
+                    important,
+                    value: DeclSource::Parsed(DeclValue::WideKeyword(kind)),
+                });
+            }
+            return Ok(());
+        }
+
         if contains_var(&buf) {
             if shorthand {
                 // 阶段2②：var() 简写不再拒绝——按简写长手全集落 N 条挂起
@@ -339,6 +373,30 @@ fn finish_tail(
     Ok(important)
 }
 
+/// B1：试探值是否恰为 CSS 宽关键字单 ident（css-values-4）。只消费
+/// ident token；尾部（`!important` 或耗尽）由调用方 finish_tail 处理。
+/// try_parse 失败自动回退输入位置（非宽关键字值走原路径）。
+pub(crate) fn try_parse_wide_keyword(input: &mut Parser<'_>) -> Option<WideKeyword> {
+    input
+        .try_parse(
+            |p| -> Result<WideKeyword, cssparser::ParseError<cssparser::BasicParseError>> {
+                let t = p.next()?.clone();
+                match &t {
+                    Token::Ident(id) => match id.to_ascii_lowercase().as_str() {
+                        "initial" => Ok(WideKeyword::Initial),
+                        "inherit" => Ok(WideKeyword::Inherit),
+                        "unset" => Ok(WideKeyword::Unset),
+                        "revert" => Ok(WideKeyword::Revert),
+                        "revert-layer" => Ok(WideKeyword::RevertLayer),
+                        _ => Err(cssparser::ParseError::unexpected_token()),
+                    },
+                    _ => Err(cssparser::ParseError::unexpected_token()),
+                }
+            },
+        )
+        .ok()
+}
+
 impl<'i> cssparser::AtRuleParser<'i> for DeclarationBlockParser {
     type Prelude = ();
     type AtRule = ();
@@ -365,6 +423,14 @@ impl<'i> cssparser::RuleBodyItemParser<'i, (), ()> for DeclarationBlockParser {
 pub fn parse_inline_declarations(source: &str) -> (DeclarationBlock, ParseReport) {
     let mut input = cssparser::Parser::new(source);
     parse_declaration_block(&mut input)
+}
+
+impl DeclarationBlockParser {
+    /// B3：取走累积声明块（嵌套体单声明直调 parse_value 后回收用——
+    /// block 字段私有，供 stylesheet.rs 嵌套隐式规则路径合并）。
+    pub(crate) fn take_block(&mut self) -> DeclarationBlock {
+        std::mem::take(&mut self.block)
+    }
 }
 
 /// 解析声明列表（内联 style 或规则体）。返回声明块 + 容错报告。
@@ -402,6 +468,26 @@ fn shorthand_exists(name: &str) -> bool {
             | "flex"
             | "flex-flow"
             | "container"
+            | "outline"
+            // A8 逻辑简写（css-logical-1）：双轴 1-2 值形 + border 逻辑集
+            | "margin-inline"
+            | "margin-block"
+            | "padding-inline"
+            | "padding-block"
+            | "inset-inline"
+            | "inset-block"
+            | "border-inline"
+            | "border-block"
+            // E5 grid 放置简写（ADR-0020）
+            | "grid-row"
+            | "grid-column"
+            | "grid-area"
+            | "text-decoration"
+            // F3b（ADR-0024）：background 简写（层化全集）
+            | "background"
+            // F3d（ADR-0026）：border-image 简写（<source> || <slice>
+            // [/ <width>? [/ <outset>?]?]? || <repeat>）
+            | "border-image"
     )
 }
 
@@ -409,7 +495,7 @@ fn shorthand_exists(name: &str) -> bool {
 /// shorthand_longhands_match_expand 用代表值展开防两表漂移；animation/
 /// flex-flow 展开可输出子集（未指定长手不重置=既有偏差），挂起路径下
 /// 子集成员取不到值 → IACVT 归初始，行为同既有子集语义。
-fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
+pub(crate) fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
     use PropertyId as P;
     Some(match name.to_ascii_lowercase().as_str() {
         "margin" => vec![P::MarginTop, P::MarginRight, P::MarginBottom, P::MarginLeft],
@@ -474,6 +560,68 @@ fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
         "flex" => vec![P::FlexGrow, P::FlexShrink, P::FlexBasis],
         "flex-flow" => vec![P::FlexDirection, P::FlexWrap],
         "container" => vec![P::ContainerName, P::ContainerType],
+        // outline（A2）：<'outline-width'> || <'outline-style'> ||
+        // <'outline-color'>；不重置 outline-offset（css-ui-4）
+        "outline" => vec![P::OutlineWidth, P::OutlineStyle, P::OutlineColor],
+        // A8 逻辑简写：双轴 1-2 值形（start end；1 值双侧）；border 逻辑
+        // 集展开 6 长hand（start+end × width/style/color）
+        // E5 grid 放置简写（ADR-0020）：grid-row/column = start+end；
+        // grid-area = 行起/列起/行止/列止
+        "grid-row" => vec![P::GridRowStart, P::GridRowEnd],
+        "text-decoration" => vec![
+            P::TextDecorationLine,
+            P::TextDecorationStyle,
+            P::TextDecorationColor,
+            P::TextDecorationThickness,
+        ],
+        // F3b（ADR-0024）：background 八长手（色 + 层化七列表）
+        "background" => vec![
+            P::BackgroundColor,
+            P::BackgroundImage,
+            P::BackgroundRepeat,
+            P::BackgroundAttachment,
+            P::BackgroundPosition,
+            P::BackgroundSize,
+            P::BackgroundOrigin,
+            P::BackgroundClip,
+        ],
+        // F3d（ADR-0026）：border-image 五长手（源/切片/宽/外扩/重复）
+        "border-image" => vec![
+            P::BorderImageSource,
+            P::BorderImageSlice,
+            P::BorderImageWidth,
+            P::BorderImageOutset,
+            P::BorderImageRepeat,
+        ],
+        "grid-column" => vec![P::GridColumnStart, P::GridColumnEnd],
+        "grid-area" => vec![
+            P::GridRowStart,
+            P::GridColumnStart,
+            P::GridRowEnd,
+            P::GridColumnEnd,
+        ],
+        "margin-inline" => vec![P::MarginInlineStart, P::MarginInlineEnd],
+        "margin-block" => vec![P::MarginBlockStart, P::MarginBlockEnd],
+        "padding-inline" => vec![P::PaddingInlineStart, P::PaddingInlineEnd],
+        "padding-block" => vec![P::PaddingBlockStart, P::PaddingBlockEnd],
+        "inset-inline" => vec![P::InsetInlineStart, P::InsetInlineEnd],
+        "inset-block" => vec![P::InsetBlockStart, P::InsetBlockEnd],
+        "border-inline" => vec![
+            P::BorderInlineStartWidth,
+            P::BorderInlineStartStyle,
+            P::BorderInlineStartColor,
+            P::BorderInlineEndWidth,
+            P::BorderInlineEndStyle,
+            P::BorderInlineEndColor,
+        ],
+        "border-block" => vec![
+            P::BorderBlockStartWidth,
+            P::BorderBlockStartStyle,
+            P::BorderBlockStartColor,
+            P::BorderBlockEndWidth,
+            P::BorderBlockEndStyle,
+            P::BorderBlockEndColor,
+        ],
         _ => return None,
     })
 }
@@ -541,6 +689,14 @@ fn sides_decls(ids: [PropertyId; 4], vals: [DeclValue; 4]) -> Vec<(PropertyId, D
     ids.into_iter().zip(vals).collect()
 }
 
+/// 斜杠分隔符消费（grid 放置简写 / grid-area 用；失败 = 声明无效）。
+fn expect_slash(p: &mut Parser<'_>) -> ValResult<()> {
+    match p.next() {
+        Ok(Token::Delim(d)) if *d == '/' => Ok(()),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
 /// 简写展开。名字非简写 → Ok(None)；文法错误 → Err（上层容错丢弃）。
 /// pub(crate)：computed.rs 在 var() 简写代换后复用（阶段2②）。
 pub(crate) fn expand_shorthand(
@@ -550,6 +706,373 @@ pub(crate) fn expand_shorthand(
 {
     use PropertyId as P;
     Ok(Some(match name.to_ascii_lowercase().as_str() {
+        // E5 grid 放置简写（ADR-0020，css-grid §7.4/7.5）：start [/ end]；
+        // end 缺省 = auto，但 start 为 <ident> 时 end 镜像同 ident。
+        // F2（ADR-0022 D4）：text-decoration 简写=『line* | style | color |
+        // thickness』任意序贪心；缺省部件回初始（line=none、style=solid、
+        // color=currentColor、thickness=auto）。
+        "text-decoration" => {
+            use crate::css::property::{
+                TextDecoStyleKind, TextDecoThickness, parse_td_color_component,
+                parse_td_line_component, parse_td_style_component, parse_td_thickness_component,
+            };
+            use crate::css::value::ColorValue;
+            let mut line: Option<u8> = None;
+            let mut style: Option<TextDecoStyleKind> = None;
+            let mut color: Option<ColorValue> = None;
+            let mut thickness: Option<TextDecoThickness> = None;
+            while !p.is_exhausted() {
+                if let Ok(b) = p.try_parse(parse_td_line_component) {
+                    line = Some(line.unwrap_or(0) | b);
+                    continue;
+                }
+                if let Ok(s) = p.try_parse(parse_td_style_component) {
+                    style = Some(s);
+                    continue;
+                }
+                if let Ok(t) = p.try_parse(parse_td_thickness_component) {
+                    thickness = Some(t);
+                    continue;
+                }
+                if let Ok(c) = p.try_parse(parse_td_color_component) {
+                    color = Some(c);
+                    continue;
+                }
+                return Err(p.new_error_for_next_token());
+            }
+            vec![
+                (
+                    P::TextDecorationLine,
+                    DeclValue::TextDecorationLine(line.unwrap_or(0)),
+                ),
+                (
+                    P::TextDecorationStyle,
+                    DeclValue::TextDecorationStyle(style.unwrap_or(TextDecoStyleKind::Solid)),
+                ),
+                (
+                    P::TextDecorationColor,
+                    DeclValue::Color(color.unwrap_or(ColorValue::CurrentColor)),
+                ),
+                (
+                    P::TextDecorationThickness,
+                    DeclValue::TextDecorationThickness(
+                        thickness.unwrap_or(TextDecoThickness::Auto),
+                    ),
+                ),
+            ]
+        }
+        // F3b（ADR-0024）：background 简写 = `[<bg-layer> ,]* <final-bg-layer>`。
+        // 层内组件无序互斥：<bg-image> / <bg-position>[ / <bg-size>] /
+        // <repeat-style> / <attachment> / <box>{1,2}（首=origin 次=clip，
+        // 单 box 双赋）/ <color>（仅末层；非末层出现 = 整条拒绝）。
+        // 缺省部件回初始（css-backgrounds-3 §2.2）。
+        "background" => {
+            use crate::css::property::{
+                Attachment, BackgroundBox, BackgroundClip, BackgroundImage, BgSize, Position2D,
+                RepeatAxis, RepeatXY, background_box_from, interpret_position,
+                parse_attachment_one, parse_background_image_one, parse_bg_size_one,
+                parse_pos_toks, parse_repeat_xy,
+            };
+            use crate::css::value::parse_color_value;
+            use peniko::color::AlphaColor;
+            let mut images: Vec<BackgroundImage> = Vec::new();
+            let mut repeats: Vec<RepeatXY> = Vec::new();
+            let mut attachments: Vec<Attachment> = Vec::new();
+            let mut positions: Vec<Position2D> = Vec::new();
+            let mut sizes: Vec<BgSize> = Vec::new();
+            let mut origins: Vec<BackgroundBox> = Vec::new();
+            let mut clips: Vec<BackgroundClip> = Vec::new();
+            let mut layer_colors: Vec<Option<ColorValue>> = Vec::new();
+            loop {
+                let mut img: Option<BackgroundImage> = None;
+                let mut rep: Option<RepeatXY> = None;
+                let mut att: Option<Attachment> = None;
+                let mut pos: Option<Position2D> = None;
+                let mut size: Option<BgSize> = None;
+                let mut origin: Option<BackgroundBox> = None;
+                let mut clip: Option<BackgroundClip> = None;
+                let mut col: Option<ColorValue> = None;
+                let mut boxes = 0usize;
+                // 层内组件贪心收集（关键字集互斥，序仅影响 try 次数；
+                // position 最后试——LP 读数最宽）
+                loop {
+                    if img.is_none()
+                        && let Ok(v) = p.try_parse(parse_background_image_one)
+                    {
+                        img = Some(v);
+                        continue;
+                    }
+                    if rep.is_none()
+                        && let Ok(v) = p.try_parse(parse_repeat_xy)
+                    {
+                        rep = Some(v);
+                        continue;
+                    }
+                    if att.is_none()
+                        && let Ok(v) = p.try_parse(parse_attachment_one)
+                    {
+                        att = Some(v);
+                        continue;
+                    }
+                    if boxes < 2
+                        && let Ok(b) = p.try_parse(|p| -> ValResult<BackgroundBox> {
+                            let t = p.next()?.clone();
+                            match &t {
+                                Token::Ident(name) => background_box_from(name)
+                                    .ok_or_else(|| p.new_error_for_next_token()),
+                                _ => Err(p.new_error_for_next_token()),
+                            }
+                        })
+                    {
+                        if boxes == 0 {
+                            origin = Some(b);
+                        }
+                        clip = Some(BackgroundClip::Box(b));
+                        boxes += 1;
+                        continue;
+                    }
+                    if col.is_none()
+                        && let Ok(c) = p.try_parse(parse_color_value)
+                    {
+                        col = Some(c);
+                        continue;
+                    }
+                    if pos.is_none()
+                        && let Ok((pp, ss)) =
+                            p.try_parse(|p| -> ValResult<(Position2D, Option<BgSize>)> {
+                                let toks = parse_pos_toks(p)?;
+                                let pp = interpret_position(&toks)
+                                    .ok_or_else(|| p.new_error_for_next_token())?;
+                                let ss = p
+                                    .try_parse(|p| {
+                                        expect_slash(p)?;
+                                        parse_bg_size_one(p)
+                                    })
+                                    .ok();
+                                Ok((pp, ss))
+                            })
+                    {
+                        pos = Some(pp);
+                        size = ss;
+                        continue;
+                    }
+                    // 无组件可消费 → 层尾
+                    break;
+                }
+                // 空层（尾逗号后无组件）= 非法
+                if img.is_none()
+                    && rep.is_none()
+                    && att.is_none()
+                    && pos.is_none()
+                    && origin.is_none()
+                    && col.is_none()
+                {
+                    return Err(p.new_error_for_next_token());
+                }
+                // 缺省部件回初始（镜像 computed initial 值）
+                images.push(img.unwrap_or(BackgroundImage::None));
+                repeats.push(rep.unwrap_or(RepeatXY {
+                    x: RepeatAxis::Repeat,
+                    y: RepeatAxis::Repeat,
+                }));
+                attachments.push(att.unwrap_or(Attachment::Scroll));
+                positions.push(pos.unwrap_or(Position2D {
+                    x: crate::css::property::PositionComp {
+                        base: LengthPercentage::Percent(0.0),
+                        offset: None,
+                    },
+                    y: crate::css::property::PositionComp {
+                        base: LengthPercentage::Percent(0.0),
+                        offset: None,
+                    },
+                }));
+                sizes.push(size.unwrap_or(BgSize::Auto));
+                origins.push(origin.unwrap_or(BackgroundBox::PaddingBox));
+                clips.push(clip.unwrap_or(BackgroundClip::Box(BackgroundBox::BorderBox)));
+                layer_colors.push(col);
+                if p.is_exhausted() {
+                    break;
+                }
+                // 层间必须以逗号续
+                match p.next() {
+                    Ok(Token::Comma) => continue,
+                    _ => return Err(p.new_error_for_next_token()),
+                }
+            }
+            // <color> 仅末层：非末层出现 = 整条拒绝
+            let last = layer_colors.len() - 1;
+            if layer_colors[..last].iter().any(|c| c.is_some()) {
+                return Err(p.new_error_for_next_token());
+            }
+            let color = layer_colors[last]
+                .unwrap_or(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 0.0])));
+            vec![
+                (P::BackgroundColor, DeclValue::Color(color)),
+                (P::BackgroundImage, DeclValue::BackgroundImage(images)),
+                (P::BackgroundRepeat, DeclValue::BackgroundRepeat(repeats)),
+                (
+                    P::BackgroundAttachment,
+                    DeclValue::BackgroundAttachment(attachments),
+                ),
+                (
+                    P::BackgroundPosition,
+                    DeclValue::BackgroundPosition(positions),
+                ),
+                (P::BackgroundSize, DeclValue::BackgroundSize(sizes)),
+                (P::BackgroundOrigin, DeclValue::BackgroundOrigin(origins)),
+                (P::BackgroundClip, DeclValue::BackgroundClip(clips)),
+            ]
+        }
+        // F3d（ADR-0026 D1）：border-image 简写 = <source> || <slice>
+        // [/ <width>? [/ <outset>?]?]? || <repeat>。|| 无序贪心：source
+        // （none|url|渐变）与 repeat（四关键字）在词面上不相交，slice
+        // （number/percentage）与两者亦不相交，单轮贪心即完备；斜杠链仅
+        // 紧跟 slice 合法（width/outset 是 slice 专属斜杠组件）。缺省部
+        // 件回各自初始值（css-backgrounds-3 §6）。
+        "border-image" => {
+            use crate::css::property::{
+                BackgroundImage, BorderImageOutset, BorderImageOutsetComp, BorderImageRepeatKind,
+                BorderImageRepeatXY, BorderImageSlice, BorderImageSliceComp, BorderImageWidth,
+                BorderImageWidthComp, parse_background_image_one, parse_bi_outset_value,
+                parse_bi_repeat_value, parse_bi_slice_value, parse_bi_width_value,
+            };
+            let mut source: Option<BackgroundImage> = None;
+            let mut slice: Option<BorderImageSlice> = None;
+            let mut width: Option<BorderImageWidth> = None;
+            let mut outset: Option<BorderImageOutset> = None;
+            let mut repeat: Option<BorderImageRepeatXY> = None;
+            loop {
+                if source.is_none()
+                    && let Ok(v) = p.try_parse(parse_background_image_one)
+                {
+                    source = Some(v);
+                    continue;
+                }
+                if slice.is_none()
+                    && let Ok(v) = p.try_parse(parse_bi_slice_value)
+                {
+                    slice = Some(v);
+                    // 斜杠链：/ width [/ outset]（仅此处合法）
+                    if let Ok(w) = p.try_parse(|p| -> ValResult<BorderImageWidth> {
+                        expect_slash(p)?;
+                        parse_bi_width_value(p)
+                    }) {
+                        width = Some(w);
+                        if let Ok(o) = p.try_parse(|p| -> ValResult<BorderImageOutset> {
+                            expect_slash(p)?;
+                            parse_bi_outset_value(p)
+                        }) {
+                            outset = Some(o);
+                        }
+                    }
+                    continue;
+                }
+                if repeat.is_none()
+                    && let Ok(v) = p.try_parse(parse_bi_repeat_value)
+                {
+                    repeat = Some(v);
+                    continue;
+                }
+                break;
+            }
+            if source.is_none() && slice.is_none() && repeat.is_none() {
+                // 空输入（`border-image: ;` 形）= 整条拒绝
+                return Err(p.new_error_for_next_token());
+            }
+            if !p.is_exhausted() {
+                // 未消费尽 = 未知组件 → 整条拒绝
+                return Err(p.new_error_for_next_token());
+            }
+            vec![
+                (
+                    P::BorderImageSource,
+                    DeclValue::BorderImageSource(source.unwrap_or(BackgroundImage::None)),
+                ),
+                (
+                    P::BorderImageSlice,
+                    DeclValue::BorderImageSlice(slice.unwrap_or(BorderImageSlice {
+                        slices: [BorderImageSliceComp::Percentage(100.0); 4],
+                        fill: false,
+                    })),
+                ),
+                (
+                    P::BorderImageWidth,
+                    DeclValue::BorderImageWidth(width.unwrap_or(BorderImageWidth {
+                        comps: std::array::from_fn(|_| BorderImageWidthComp::Auto),
+                    })),
+                ),
+                (
+                    P::BorderImageOutset,
+                    DeclValue::BorderImageOutset(outset.unwrap_or(BorderImageOutset {
+                        comps: std::array::from_fn(|_| {
+                            BorderImageOutsetComp::Length(LengthPercentage::Px(0.0))
+                        }),
+                    })),
+                ),
+                (
+                    P::BorderImageRepeat,
+                    DeclValue::BorderImageRepeat(repeat.unwrap_or(BorderImageRepeatXY {
+                        x: BorderImageRepeatKind::Stretch,
+                        y: BorderImageRepeatKind::Stretch,
+                    })),
+                ),
+            ]
+        }
+        "grid-row" | "grid-column" => {
+            let start = parse_line_spec_value(p)?;
+            let end = if p.is_exhausted() {
+                match &start {
+                    GridLineSpec::Name(n) => GridLineSpec::Name(n.clone()),
+                    _ => GridLineSpec::Auto,
+                }
+            } else {
+                expect_slash(p)?;
+                parse_line_spec_value(p)?
+            };
+            if name.eq_ignore_ascii_case("grid-row") {
+                vec![
+                    (P::GridRowStart, DeclValue::GridLine(start)),
+                    (P::GridRowEnd, DeclValue::GridLine(end)),
+                ]
+            } else {
+                vec![
+                    (P::GridColumnStart, DeclValue::GridLine(start)),
+                    (P::GridColumnEnd, DeclValue::GridLine(end)),
+                ]
+            }
+        }
+        // grid-area：row-start / col-start / row-end / col-end；缺省段按
+        // spec css-grid §7.4/7.5 镜像——row-end=row-start ident、
+        // col-end=col-start ident（ident 时），否则 auto。
+        "grid-area" => {
+            let rs = parse_line_spec_value(p)?;
+            let mirror = |v: &GridLineSpec| match v {
+                GridLineSpec::Name(n) => GridLineSpec::Name(n.clone()),
+                _ => GridLineSpec::Auto,
+            };
+            let mut cs = mirror(&rs);
+            let mut re = mirror(&rs);
+            let mut ce = mirror(&rs);
+            if !p.is_exhausted() {
+                expect_slash(p)?;
+                cs = parse_line_spec_value(p)?;
+                ce = mirror(&cs);
+                if !p.is_exhausted() {
+                    expect_slash(p)?;
+                    re = parse_line_spec_value(p)?;
+                    if !p.is_exhausted() {
+                        expect_slash(p)?;
+                        ce = parse_line_spec_value(p)?;
+                    }
+                }
+            }
+            vec![
+                (P::GridRowStart, DeclValue::GridLine(rs)),
+                (P::GridColumnStart, DeclValue::GridLine(cs)),
+                (P::GridRowEnd, DeclValue::GridLine(re)),
+                (P::GridColumnEnd, DeclValue::GridLine(ce)),
+            ]
+        }
         "margin" => {
             let v = collect_sides(p, |p| -> ValResult<Option<LengthPercentage>> {
                 as_len_auto(parse_len_auto(p)?).ok_or_else(|| p.new_error_for_next_token())
@@ -680,6 +1203,174 @@ pub(crate) fn expand_shorthand(
                     P::ColumnRuleColor,
                     color.unwrap_or(DeclValue::Color(ColorValue::CurrentColor)),
                 ),
+            ]
+        }
+        "outline" => {
+            // A2 outline 简写：<'outline-width'> || <'outline-style'> ||
+            // <'outline-color'>（任一顺序、至少一项；未指定长手重置初始
+            // ——width medium、style none、color currentcolor）。outline
+            // 不重置 outline-offset（css-ui-4）。
+            let mut width: Option<DeclValue> = None;
+            let mut style: Option<DeclValue> = None;
+            let mut color: Option<DeclValue> = None;
+            while !p.is_exhausted() {
+                let mut progressed = false;
+                if width.is_none()
+                    && let Ok(v) = p.try_parse(parse_border_width)
+                {
+                    width = Some(v);
+                    progressed = true;
+                }
+                if !progressed
+                    && style.is_none()
+                    && let Ok(v) = p.try_parse(parse_outline_style)
+                {
+                    style = Some(v);
+                    progressed = true;
+                }
+                if !progressed
+                    && color.is_none()
+                    && let Ok(v) = p.try_parse(parse_color)
+                {
+                    color = Some(v);
+                    progressed = true;
+                }
+                if !progressed {
+                    return Err(p.new_error_for_next_token());
+                }
+            }
+            if width.is_none() && style.is_none() && color.is_none() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![
+                (
+                    P::OutlineWidth,
+                    width.unwrap_or(DeclValue::BorderWidth(Some(LengthPercentage::Px(3.0)))),
+                ),
+                (
+                    P::OutlineStyle,
+                    style.unwrap_or(DeclValue::OutlineStyle(OutlineStyle::None)),
+                ),
+                (
+                    P::OutlineColor,
+                    color.unwrap_or(DeclValue::Color(ColorValue::CurrentColor)),
+                ),
+            ]
+        }
+        // A8 逻辑简写：双轴 1-2 值形（start end；1 值双侧同值）
+        "margin-inline" => {
+            let start = parse_len_auto(p)?;
+            let end = p.try_parse(parse_len_auto).unwrap_or(start.clone());
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![(P::MarginInlineStart, start), (P::MarginInlineEnd, end)]
+        }
+        "margin-block" => {
+            let start = parse_len_auto(p)?;
+            let end = p.try_parse(parse_len_auto).unwrap_or(start.clone());
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![(P::MarginBlockStart, start), (P::MarginBlockEnd, end)]
+        }
+        "padding-inline" => {
+            let start = parse_len(p)?;
+            let end = p.try_parse(parse_len).unwrap_or(start.clone());
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![(P::PaddingInlineStart, start), (P::PaddingInlineEnd, end)]
+        }
+        "padding-block" => {
+            let start = parse_len(p)?;
+            let end = p.try_parse(parse_len).unwrap_or(start.clone());
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![(P::PaddingBlockStart, start), (P::PaddingBlockEnd, end)]
+        }
+        "inset-inline" => {
+            let start = parse_len_auto(p)?;
+            let end = p.try_parse(parse_len_auto).unwrap_or(start.clone());
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![(P::InsetInlineStart, start), (P::InsetInlineEnd, end)]
+        }
+        "inset-block" => {
+            let start = parse_len_auto(p)?;
+            let end = p.try_parse(parse_len_auto).unwrap_or(start.clone());
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![(P::InsetBlockStart, start), (P::InsetBlockEnd, end)]
+        }
+        "border-inline" | "border-block" => {
+            // A8 border 逻辑集：<'border-width'> || <'border-style'> ||
+            // <'border-color'>（任一顺序、至少一项；未指定长手重置初始
+            // ——width medium、style none、color currentcolor）；start/end
+            // 同值展开 6 长hand。
+            let mut width: Option<DeclValue> = None;
+            let mut style: Option<DeclValue> = None;
+            let mut color: Option<DeclValue> = None;
+            while !p.is_exhausted() {
+                let mut progressed = false;
+                if width.is_none()
+                    && let Ok(v) = p.try_parse(parse_border_width)
+                {
+                    width = Some(v);
+                    progressed = true;
+                }
+                if !progressed
+                    && style.is_none()
+                    && let Ok(v) = p.try_parse(parse_border_style)
+                {
+                    style = Some(v);
+                    progressed = true;
+                }
+                if !progressed
+                    && color.is_none()
+                    && let Ok(v) = p.try_parse(parse_color)
+                {
+                    color = Some(v);
+                    progressed = true;
+                }
+                if !progressed {
+                    return Err(p.new_error_for_next_token());
+                }
+            }
+            if width.is_none() && style.is_none() && color.is_none() {
+                return Err(p.new_error_for_next_token());
+            }
+            let (sw, ss, sc, ew, es, ec) = match name.to_ascii_lowercase().as_str() {
+                "border-inline" => (
+                    P::BorderInlineStartWidth,
+                    P::BorderInlineStartStyle,
+                    P::BorderInlineStartColor,
+                    P::BorderInlineEndWidth,
+                    P::BorderInlineEndStyle,
+                    P::BorderInlineEndColor,
+                ),
+                _ => (
+                    P::BorderBlockStartWidth,
+                    P::BorderBlockStartStyle,
+                    P::BorderBlockStartColor,
+                    P::BorderBlockEndWidth,
+                    P::BorderBlockEndStyle,
+                    P::BorderBlockEndColor,
+                ),
+            };
+            let w = width.unwrap_or(DeclValue::BorderWidth(Some(LengthPercentage::Px(3.0))));
+            let s = style.unwrap_or(DeclValue::BorderStyle(BorderStyle::None));
+            let c = color.unwrap_or(DeclValue::Color(ColorValue::CurrentColor));
+            vec![
+                (sw, w.clone()),
+                (ss, s.clone()),
+                (sc, c.clone()),
+                (ew, w),
+                (es, s),
+                (ec, c),
             ]
         }
         "animation" => {
@@ -1535,6 +2226,20 @@ mod tests {
             ("flex", "1 2 30px"),
             ("flex-flow", "row wrap"),
             ("container", "panel / size"),
+            // E5 grid 放置简写（ADR-0020）
+            ("grid-row", "2 / span 3"),
+            ("grid-column", "a / b"),
+            ("grid-area", "1 / 2 / 3 / 4"),
+            // F3b（ADR-0024）background 层化简写代表值（全组件覆盖）
+            (
+                "background",
+                "url(a.png) center / cover no-repeat fixed padding-box red",
+            ),
+            // F3d（ADR-0026）border-image 简写代表值（斜杠链+重复全覆盖）
+            (
+                "border-image",
+                "url(a.png) 30% fill / 10px / 5px round space",
+            ),
         ];
         for (name, val) in cases {
             let mut p = cssparser::Parser::new(val);
@@ -1636,7 +2341,11 @@ mod tests {
         );
         assert!(r.is_clean());
         match parsed(&b.decls[0]) {
-            DeclValue::BackgroundImage(crate::css::property::BackgroundImage::Gradient(g)) => {
+            DeclValue::BackgroundImage(images) => {
+                let Some(crate::css::property::BackgroundImage::Gradient(g)) = images.first()
+                else {
+                    panic!("expected gradient layer, got {images:?}");
+                };
                 assert_eq!(
                     g.kind,
                     crate::css::property::GradientKind::Linear(crate::css::value::Angle(90.0))
@@ -1649,6 +2358,203 @@ mod tests {
             DeclValue::BoxShadows(list) => assert_eq!(list.len(), 2),
             other => panic!("expected shadows, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn background_shorthand_full_decode() {
+        // F3b（ADR-0024）：简写全组件解码锁（层内无序 + position/size 斜杠对
+        // + 八长手声明序 = 色/图/repeat/attachment/position/size/origin/clip）
+        let (b, r) = block("background: url(a.png) center / cover no-repeat fixed padding-box red");
+        assert!(r.is_clean(), "report: {r:?}");
+        assert_eq!(b.decls.len(), 8);
+        match parsed(&b.decls[0]) {
+            DeclValue::Color(ColorValue::Absolute(c)) => {
+                assert!(c.components[0] > 0.99 && c.components[3] > 0.99, "red");
+            }
+            other => panic!("color: {other:?}"),
+        }
+        match parsed(&b.decls[1]) {
+            DeclValue::BackgroundImage(images) => {
+                assert_eq!(images.len(), 1);
+                assert!(matches!(
+                    images[0],
+                    crate::css::property::BackgroundImage::Url(ref u) if u == "a.png"
+                ));
+            }
+            other => panic!("image: {other:?}"),
+        }
+        match parsed(&b.decls[2]) {
+            DeclValue::BackgroundRepeat(rs) => assert_eq!(
+                rs,
+                &vec![crate::css::property::RepeatXY {
+                    x: crate::css::property::RepeatAxis::NoRepeat,
+                    y: crate::css::property::RepeatAxis::NoRepeat,
+                }]
+            ),
+            other => panic!("repeat: {other:?}"),
+        }
+        match parsed(&b.decls[3]) {
+            DeclValue::BackgroundAttachment(a) => {
+                assert_eq!(a, &vec![crate::css::property::Attachment::Fixed])
+            }
+            other => panic!("attachment: {other:?}"),
+        }
+        match parsed(&b.decls[4]) {
+            DeclValue::BackgroundPosition(ps) => {
+                assert_eq!(ps.len(), 1);
+                let p0 = &ps[0];
+                // center / center = 50% / 50%
+                assert!(
+                    matches!(p0.x.base, LengthPercentage::Percent(v) if (v - 0.5).abs() < 1e-6)
+                );
+                assert!(
+                    matches!(p0.y.base, LengthPercentage::Percent(v) if (v - 0.5).abs() < 1e-6)
+                );
+            }
+            other => panic!("position: {other:?}"),
+        }
+        match parsed(&b.decls[5]) {
+            DeclValue::BackgroundSize(s) => {
+                assert_eq!(s, &vec![crate::css::property::BgSize::Cover])
+            }
+            other => panic!("size: {other:?}"),
+        }
+        match parsed(&b.decls[6]) {
+            DeclValue::BackgroundOrigin(o) => {
+                assert_eq!(o, &vec![crate::css::property::BackgroundBox::PaddingBox])
+            }
+            other => panic!("origin: {other:?}"),
+        }
+        match parsed(&b.decls[7]) {
+            DeclValue::BackgroundClip(c) => assert_eq!(
+                c,
+                &vec![crate::css::property::BackgroundClip::Box(
+                    crate::css::property::BackgroundBox::PaddingBox
+                )]
+            ),
+            other => panic!("clip: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn background_shorthand_multi_layer() {
+        // 三层：层内组件无序；缺省部件回初始；color 仅末层合法
+        let (b, r) = block("background: url(a.png) top left, no-repeat url(b.png) local, blue");
+        assert!(r.is_clean(), "report: {r:?}");
+        assert_eq!(b.decls.len(), 8);
+        match parsed(&b.decls[1]) {
+            DeclValue::BackgroundImage(images) => {
+                assert_eq!(images.len(), 3);
+                assert!(matches!(
+                    images[0],
+                    crate::css::property::BackgroundImage::Url(ref u) if u == "a.png"
+                ));
+                assert!(matches!(
+                    images[1],
+                    crate::css::property::BackgroundImage::Url(ref u) if u == "b.png"
+                ));
+                assert_eq!(images[2], crate::css::property::BackgroundImage::None);
+            }
+            other => panic!("image: {other:?}"),
+        }
+        // 每层 repeat 列表对齐（缺省回 Repeat/Repeat）
+        match parsed(&b.decls[2]) {
+            DeclValue::BackgroundRepeat(rs) => {
+                assert_eq!(rs.len(), 3);
+                assert_eq!(
+                    rs[0],
+                    crate::css::property::RepeatXY {
+                        x: crate::css::property::RepeatAxis::Repeat,
+                        y: crate::css::property::RepeatAxis::Repeat,
+                    }
+                );
+                assert_eq!(
+                    rs[1],
+                    crate::css::property::RepeatXY {
+                        x: crate::css::property::RepeatAxis::NoRepeat,
+                        y: crate::css::property::RepeatAxis::NoRepeat,
+                    }
+                );
+            }
+            other => panic!("repeat: {other:?}"),
+        }
+        match parsed(&b.decls[3]) {
+            DeclValue::BackgroundAttachment(a) => {
+                assert_eq!(a[0], crate::css::property::Attachment::Scroll); // 缺省
+                assert_eq!(a[1], crate::css::property::Attachment::Local);
+                assert_eq!(a[2], crate::css::property::Attachment::Scroll); // 末层缺省
+            }
+            other => panic!("attachment: {other:?}"),
+        }
+        match parsed(&b.decls[4]) {
+            DeclValue::BackgroundPosition(ps) => {
+                assert_eq!(ps.len(), 3);
+                // top left = x 0% / y 0%
+                assert!(matches!(ps[0].x.base, LengthPercentage::Percent(v) if v == 0.0));
+                assert!(matches!(ps[0].y.base, LengthPercentage::Percent(v) if v == 0.0));
+            }
+            other => panic!("position: {other:?}"),
+        }
+        // color 只发一条：末层 blue
+        match parsed(&b.decls[0]) {
+            DeclValue::Color(ColorValue::Absolute(c)) => {
+                assert!(c.components[2] > 0.99 && c.components[3] > 0.99, "blue");
+            }
+            other => panic!("color: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn background_box_single_sets_both() {
+        // 单 <box> = origin 与 clip 双赋；双 <box> 首=origin 次=clip
+        let (b, r) = block("background: content-box");
+        assert!(r.is_clean(), "report: {r:?}");
+        match parsed(&b.decls[6]) {
+            DeclValue::BackgroundOrigin(o) => {
+                assert_eq!(o, &vec![crate::css::property::BackgroundBox::ContentBox])
+            }
+            other => panic!("origin: {other:?}"),
+        }
+        match parsed(&b.decls[7]) {
+            DeclValue::BackgroundClip(c) => assert_eq!(
+                c,
+                &vec![crate::css::property::BackgroundClip::Box(
+                    crate::css::property::BackgroundBox::ContentBox
+                )]
+            ),
+            other => panic!("clip: {other:?}"),
+        }
+        let (b, r) = block("background: content-box border-box");
+        assert!(r.is_clean(), "report: {r:?}");
+        match parsed(&b.decls[6]) {
+            DeclValue::BackgroundOrigin(o) => {
+                assert_eq!(o, &vec![crate::css::property::BackgroundBox::ContentBox])
+            }
+            other => panic!("origin2: {other:?}"),
+        }
+        match parsed(&b.decls[7]) {
+            DeclValue::BackgroundClip(c) => assert_eq!(
+                c,
+                &vec![crate::css::property::BackgroundClip::Box(
+                    crate::css::property::BackgroundBox::BorderBox
+                )]
+            ),
+            other => panic!("clip2: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn background_shorthand_rejects() {
+        // 非末层 color = 整条拒绝；尾逗号空层 = 拒绝；重复组件 = 拒绝
+        let (b, r) = block("background: red, url(a.png)");
+        assert!(!r.is_clean(), "non-final color must reject: {r:?}");
+        assert!(b.decls.is_empty());
+        let (b, r) = block("background: red,");
+        assert!(!r.is_clean(), "trailing empty layer must reject: {r:?}");
+        assert!(b.decls.is_empty());
+        let (b, r) = block("background: url(a.png) url(b.png)");
+        assert!(!r.is_clean(), "duplicate image must reject: {r:?}");
+        assert!(b.decls.is_empty());
     }
 
     #[test]
@@ -1699,5 +2605,331 @@ mod tests {
         assert!(
             matches!(parsed(&b.decls[2]), DeclValue::AspectRatio(Some(r)) if (r - 16.0 / 9.0).abs() < 1e-6)
         );
+    }
+
+    #[test]
+    fn clip_path_parse_inset_forms() {
+        // F3c（ADR-0025）：inset 全形态——零值/多值展开/圆角单集/斜杠双集
+        let (b, r) = block("clip-path: inset(0)");
+        assert!(r.is_clean(), "report: {r:?}");
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Inset {
+                insets,
+                radius,
+                reference,
+            }) => {
+                assert!(
+                    insets
+                        .iter()
+                        .all(|lp| matches!(lp, LengthPercentage::Px(v) if *v == 0.0))
+                );
+                assert!(radius.is_none());
+                assert_eq!(*reference, crate::css::property::BackgroundBox::BorderBox);
+            }
+            other => panic!("inset(0): {other:?}"),
+        }
+        let (b, r) = block("clip-path: inset(10px 20px round 5px)");
+        assert!(r.is_clean());
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Inset {
+                insets, radius, ..
+            }) => {
+                assert!(matches!(insets[0], LengthPercentage::Px(v) if v == 10.0));
+                assert!(matches!(insets[1], LengthPercentage::Px(v) if v == 20.0));
+                assert!(matches!(insets[2], LengthPercentage::Px(v) if v == 10.0));
+                assert!(matches!(insets[3], LengthPercentage::Px(v) if v == 20.0));
+                let Some((hs, vs)) = radius else {
+                    panic!("radius 缺失")
+                };
+                assert!(
+                    hs.iter()
+                        .all(|lp| matches!(lp, LengthPercentage::Px(v) if *v == 5.0))
+                );
+                assert!(
+                    vs.iter()
+                        .all(|lp| matches!(lp, LengthPercentage::Px(v) if *v == 5.0))
+                );
+            }
+            other => panic!("inset round: {other:?}"),
+        }
+        // 斜杠双集：水平集 5px、垂直集 10px
+        let (b, r) = block("clip-path: inset(10px round 5px / 10px)");
+        assert!(r.is_clean());
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Inset { radius, .. }) => {
+                let Some((hs, vs)) = radius else {
+                    panic!("radius 缺失")
+                };
+                assert!(
+                    hs.iter()
+                        .all(|lp| matches!(lp, LengthPercentage::Px(v) if *v == 5.0))
+                );
+                assert!(
+                    vs.iter()
+                        .all(|lp| matches!(lp, LengthPercentage::Px(v) if *v == 10.0))
+                );
+            }
+            other => panic!("inset slash: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_path_parse_circle_ellipse() {
+        // F3c：circle/ellipse——LP 半径 + corner 关键字 + at 点位缺省中心
+        let (b, r) = block("clip-path: circle(10px)");
+        assert!(r.is_clean());
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Circle {
+                radius,
+                at,
+                reference,
+            }) => {
+                assert_eq!(
+                    radius,
+                    &crate::css::property::ClipRadius::Length(LengthPercentage::Px(10.0))
+                );
+                assert!(
+                    matches!(at.x.base, LengthPercentage::Percent(v) if (v - 0.5).abs() < 1e-6)
+                        && at.x.offset.is_none()
+                );
+                assert!(
+                    matches!(at.y.base, LengthPercentage::Percent(v) if (v - 0.5).abs() < 1e-6)
+                        && at.y.offset.is_none()
+                );
+                assert_eq!(*reference, crate::css::property::BackgroundBox::BorderBox);
+            }
+            other => panic!("circle: {other:?}"),
+        }
+        for kw in [
+            "closest-side",
+            "farthest-side",
+            "closest-corner",
+            "farthest-corner",
+        ] {
+            let (b, r) = block(&format!("clip-path: circle({kw} at 25% 75%)"));
+            assert!(r.is_clean(), "{kw}: {r:?}");
+            match parsed(&b.decls[0]) {
+                DeclValue::ClipPath(crate::css::property::ClipShape::Circle {
+                    radius, at, ..
+                }) => {
+                    let want = match kw {
+                        "closest-side" => crate::css::property::ClipRadius::ClosestSide,
+                        "farthest-side" => crate::css::property::ClipRadius::FarthestSide,
+                        "closest-corner" => crate::css::property::ClipRadius::ClosestCorner,
+                        _ => crate::css::property::ClipRadius::FarthestCorner,
+                    };
+                    assert_eq!(radius, &want);
+                    assert!(
+                        matches!(at.x.base, LengthPercentage::Percent(v) if (v - 0.25).abs() < 1e-6)
+                    );
+                    assert!(
+                        matches!(at.y.base, LengthPercentage::Percent(v) if (v - 0.75).abs() < 1e-6)
+                    );
+                }
+                other => panic!("{kw}: {other:?}"),
+            }
+        }
+        let (b, r) = block("clip-path: ellipse(10px 20px)");
+        assert!(r.is_clean());
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Ellipse { rx, ry, .. }) => {
+                assert_eq!(
+                    rx,
+                    &crate::css::property::ClipRadius::Length(LengthPercentage::Px(10.0))
+                );
+                assert_eq!(
+                    ry,
+                    &crate::css::property::ClipRadius::Length(LengthPercentage::Px(20.0))
+                );
+            }
+            other => panic!("ellipse: {other:?}"),
+        }
+        // circle 百分比半径：css-shapes-1 §3.2.1 基准 √(w²+h²)/√2 → 合法
+        // （F3e 修正：原"轴歧义拒绝"误读 spec，且遗留 token 曾致整条丢弃）
+        let (b, r) = block("clip-path: circle(50% at 50% 50%)");
+        assert!(r.is_clean(), "circle 百分比应合法: {r:?}");
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Circle { radius, .. }) => {
+                assert_eq!(
+                    radius,
+                    &crate::css::property::ClipRadius::Length(LengthPercentage::Percent(0.5))
+                );
+            }
+            other => panic!("circle %: {other:?}"),
+        }
+        // 负半径仍整条拒绝（css-shapes-1 "negative values are invalid"：
+        // 回落 token 留存 → parse_entirely 整块改判 Err）
+        let (_, r) = block("clip-path: circle(-5px)");
+        assert!(!r.is_clean(), "负半径应拒绝");
+    }
+
+    #[test]
+    fn clip_path_parse_polygon() {
+        // F3c：polygon——fill-rule 缺省 nonzero / evenodd 关键字 / <3 对拒绝
+        let (b, r) = block("clip-path: polygon(0 0, 100% 0, 50% 100%)");
+        assert!(r.is_clean(), "report: {r:?}");
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Polygon {
+                nonzero,
+                points,
+                reference,
+            }) => {
+                assert!(*nonzero);
+                assert_eq!(points.len(), 3);
+                assert!(matches!(points[0].0, LengthPercentage::Px(v) if v == 0.0));
+                assert!(
+                    matches!(points[1].0, LengthPercentage::Percent(v) if (v - 1.0).abs() < 1e-6)
+                );
+                assert!(
+                    matches!(points[2].0, LengthPercentage::Percent(v) if (v - 0.5).abs() < 1e-6)
+                );
+                assert!(
+                    matches!(points[2].1, LengthPercentage::Percent(v) if (v - 1.0).abs() < 1e-6)
+                );
+                assert_eq!(*reference, crate::css::property::BackgroundBox::BorderBox);
+            }
+            other => panic!("polygon: {other:?}"),
+        }
+        let (_, r) = block("clip-path: polygon(evenodd, 0 0, 0 100%, 100% 100%)");
+        assert!(r.is_clean());
+        let (b, _) = block("clip-path: polygon(evenodd, 0 0, 0 100%, 100% 100%)");
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Polygon { nonzero, .. }) => {
+                assert!(!nonzero);
+            }
+            other => panic!("evenodd: {other:?}"),
+        }
+        // 少于 3 个坐标对 = 整条 Err；fill-rule 后必须逗号
+        let (_, r) = block("clip-path: polygon(0 0, 10px 10px)");
+        assert!(!r.is_clean(), "两对坐标应拒绝");
+        let (_, r) = block("clip-path: polygon(nonzero 0 0, 0 100%, 100% 100%)");
+        assert!(!r.is_clean(), "fill-rule 后缺逗号应拒绝");
+    }
+
+    #[test]
+    fn clip_path_parse_geometry_box_both_orders() {
+        // F3c（css-masking-1 §5.1）：`<geometry-box> || <basic-shape>` 次序不限；
+        // 单独 geometry-box = inset(0) 基准该盒
+        for css in [
+            "clip-path: circle(10px) content-box",
+            "clip-path: content-box circle(10px)",
+        ] {
+            let (b, r) = block(css);
+            assert!(r.is_clean(), "{css}: {r:?}");
+            match parsed(&b.decls[0]) {
+                DeclValue::ClipPath(crate::css::property::ClipShape::Circle {
+                    radius,
+                    reference,
+                    ..
+                }) => {
+                    assert_eq!(
+                        radius,
+                        &crate::css::property::ClipRadius::Length(LengthPercentage::Px(10.0))
+                    );
+                    assert_eq!(*reference, crate::css::property::BackgroundBox::ContentBox);
+                }
+                other => panic!("{css}: {other:?}"),
+            }
+        }
+        let (b, r) = block("clip-path: border-box");
+        assert!(r.is_clean());
+        match parsed(&b.decls[0]) {
+            DeclValue::ClipPath(crate::css::property::ClipShape::Inset {
+                insets,
+                radius,
+                reference,
+            }) => {
+                assert!(
+                    insets
+                        .iter()
+                        .all(|lp| matches!(lp, LengthPercentage::Px(v) if *v == 0.0))
+                );
+                assert!(radius.is_none());
+                assert_eq!(*reference, crate::css::property::BackgroundBox::BorderBox);
+            }
+            other => panic!("border-box: {other:?}"),
+        }
+        // margin-box 未收束（B 级在案）：降 border-box + tracing 警告
+        // （B 级降级记录在 FEATURES/ADR，不进 ParseReport）
+        let (b, r) = block("clip-path: margin-box");
+        assert!(r.is_clean(), "margin-box 降级为可解析值：{r:?}");
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ClipPath(crate::css::property::ClipShape::Inset { .. })
+        ));
+    }
+
+    #[test]
+    fn clip_path_parse_lenient_and_reject() {
+        // F3c：url()/path() 宽容收容 Other（SVG 资源 = T2）；none 快路径；
+        // 非法值整条拒绝
+        let (b, r) = block("clip-path: url(#c)");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ClipPath(crate::css::property::ClipShape::Other)
+        ));
+        let (b, r) = block("clip-path: path(\"M0 0 L1 1 Z\")");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ClipPath(crate::css::property::ClipShape::Other)
+        ));
+        let (b, r) = block("clip-path: none");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::ClipPath(crate::css::property::ClipShape::None)
+        ));
+        let (_, r) = block("clip-path: 10px");
+        assert!(!r.is_clean(), "非法形状应整条拒绝");
+    }
+
+    #[test]
+    fn hyphens_parse_modes() {
+        // F4（ADR-0028 D2）：none|manual|auto 三关键字 + 非法值整条拒绝
+        for (src, want) in [
+            ("hyphens: none", crate::css::property::HyphensKind::None),
+            ("hyphens: manual", crate::css::property::HyphensKind::Manual),
+            ("hyphens: auto", crate::css::property::HyphensKind::Auto),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            match parsed(&b.decls[0]) {
+                DeclValue::Hyphens(k) => assert_eq!(*k, want, "{src}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        let (_, r) = block("hyphens: always");
+        assert!(!r.is_clean(), "非法关键字应整条拒绝");
+        // initial=manual（css-text-3 §5.4）
+        assert_eq!(
+            crate::computed::initial_value(crate::css::property::PropertyId::Hyphens),
+            DeclValue::Hyphens(crate::css::property::HyphensKind::Manual)
+        );
+    }
+
+    #[test]
+    fn backdrop_filter_parse_presence() {
+        // F4（ADR-0028 D1）：值 ≠ none → Effect(true) 存在；none → Effect(false)
+        // 缺席（与 filter 同型，parse_sc_effect 复用）；函数块宽容吞咽
+        for (src, want) in [
+            ("backdrop-filter: none", false),
+            ("backdrop-filter: blur(2px)", true),
+            ("backdrop-filter: blur(4px) saturate(1.5)", true),
+            ("backdrop-filter: brightness(1.2)", true),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            match parsed(&b.decls[0]) {
+                DeclValue::Effect(present) => assert_eq!(*present, want, "{src}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // 宽容存在性契约（与 filter 同型）：任意非 none 值=存在（css 文法
+        // 严格性不作校验，parse_sc_effect 设计如此——ADR-0028 D1）
+        let (b, r) = block("backdrop-filter: 10px junk(");
+        assert!(r.is_clean(), "宽容存在性：{r:?}");
+        assert!(matches!(parsed(&b.decls[0]), DeclValue::Effect(true)));
     }
 }

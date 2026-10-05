@@ -5,7 +5,9 @@
 //! 此层出现。
 
 pub mod decl;
+pub(crate) mod fontprobe;
 pub mod property;
+pub mod property_rule;
 pub mod stylesheet;
 pub mod value;
 

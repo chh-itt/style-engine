@@ -187,13 +187,17 @@ impl NonTSPseudoClass for PseudoClass {
 }
 
 /// 伪元素（T0 仅解析接受；匹配恒 false，生成内容随 T5 落地）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PseudoElement {
     /// ::before。
     Before,
     /// ::after。
     After,
+    /// ::selection（C4/ADR-0018：非盒生成——选区文本样式通道）。
+    Selection,
+    /// ::placeholder（C4/ADR-0018：非盒生成——占位文本样式通道）。
+    Placeholder,
 }
 
 impl sel_css::ToCss for PseudoElement {
@@ -201,6 +205,8 @@ impl sel_css::ToCss for PseudoElement {
         dest.write_str(match self {
             Self::Before => "::before",
             Self::After => "::after",
+            Self::Selection => "::selection",
+            Self::Placeholder => "::placeholder",
         })
     }
 }
@@ -221,6 +227,13 @@ impl<'i> SelectorParserTrait<'i> for SelectorParser {
         true
     }
 
+    /// B3：启用 :has() 相对选择器（selectors 0.40 自带解析与匹配——
+    /// matching.rs relative_selector 模块走同一 Element trait 遍历；
+    /// 失效模型=引擎侧 any_has_rules() 全量重样式升级）。
+    fn parse_has(&self) -> bool {
+        true
+    }
+
     fn parse_non_ts_pseudo_class(
         &self,
         location: sel_css::SourceLocation,
@@ -231,6 +244,33 @@ impl<'i> SelectorParserTrait<'i> for SelectorParser {
                 name,
             ))
         })
+    }
+
+    /// C1（ADR-0015）：盒生成伪元素 ::before/::after；C4（ADR-0018）：
+    /// 非盒生成伪元素 ::selection/::placeholder。selectors 0.40 的
+    /// `is_css2_pseudo_element` legacy 路由使 `:before` 单冒号形自动同路
+    /// （CSS2 集不含 selection/placeholder → 单冒号形自然拒绝，spec 一致）；
+    /// first-line/first-letter 等其余伪元素不在目标范围，拒绝。
+    fn parse_pseudo_element(
+        &self,
+        location: sel_css::SourceLocation,
+        name: sel_css::CowRcStr<'i>,
+    ) -> Result<PseudoElement, sel_css::ParseError<'i, Self::Error>> {
+        if name.eq_ignore_ascii_case("before") {
+            Ok(PseudoElement::Before)
+        } else if name.eq_ignore_ascii_case("after") {
+            Ok(PseudoElement::After)
+        } else if name.eq_ignore_ascii_case("selection") {
+            Ok(PseudoElement::Selection)
+        } else if name.eq_ignore_ascii_case("placeholder") {
+            Ok(PseudoElement::Placeholder)
+        } else {
+            Err(
+                location.new_custom_error(SelectorParseErrorKind::UnsupportedPseudoClassOrElement(
+                    name,
+                )),
+            )
+        }
     }
 }
 
@@ -270,6 +310,16 @@ impl<'a> TreeNode<'a> {
             _ => a.eq_ignore_ascii_case(b),
         }
     }
+
+    /// 结构遍历跳过伪节点（ADR-0015）：宿主 :first-child/:nth-child/兄弟
+    /// 组合器计数与伪元素实体化前后逐位不变。
+    fn first_host_child(&self) -> Option<crate::tree::NodeId> {
+        self.0
+            .children(self.1)
+            .iter()
+            .find(|c| !self.0.is_pseudo(**c))
+            .copied()
+    }
 }
 
 impl<'a> ElementTrait for TreeNode<'a> {
@@ -293,32 +343,32 @@ impl<'a> ElementTrait for TreeNode<'a> {
     }
 
     fn is_pseudo_element(&self) -> bool {
-        false
+        self.0.node(self.1).pseudo.is_some()
     }
 
     fn prev_sibling_element(&self) -> Option<Self> {
         let parent = self.0.parent(self.1)?;
         let list = self.0.children(parent);
         let pos = list.iter().position(|c| *c == self.1)?;
-        if pos == 0 {
-            None
-        } else {
-            Some(TreeNode(self.0, list[pos - 1]))
-        }
+        list[..pos]
+            .iter()
+            .rev()
+            .find(|c| !self.0.is_pseudo(**c))
+            .map(|id| TreeNode(self.0, *id))
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
         let parent = self.0.parent(self.1)?;
         let list = self.0.children(parent);
         let pos = list.iter().position(|c| *c == self.1)?;
-        list.get(pos + 1).map(|id| TreeNode(self.0, *id))
+        list[pos + 1..]
+            .iter()
+            .find(|c| !self.0.is_pseudo(**c))
+            .map(|id| TreeNode(self.0, *id))
     }
 
     fn first_element_child(&self) -> Option<Self> {
-        self.0
-            .children(self.1)
-            .first()
-            .map(|id| TreeNode(self.0, *id))
+        self.first_host_child().map(|id| TreeNode(self.0, id))
     }
 
     fn is_html_element_in_html_document(&self) -> bool {
@@ -366,11 +416,35 @@ impl<'a> ElementTrait for TreeNode<'a> {
 
     fn match_pseudo_element(
         &self,
-        _pe: &PseudoElement,
+        pe: &PseudoElement,
         _context: &mut MatchingContext<Self::Impl>,
     ) -> bool {
-        // 伪元素规则暂不匹配（生成内容 T5 落地）
-        false
+        // C1（ADR-0015）：伪元素节点命中——引擎实体化的伪节点携带
+        // PseudoWhich 标记；宿主节点恒 None 恒不命中。
+        // C4（ADR-0018）：非盒生成伪元素 ::selection/::placeholder ——
+        // origin 节点直配（pseudo == None 即命中；通道级联专用），实体化
+        // 伪节点 pseudo == Some 恒不命中。match_specificity/match_rules
+        // 原样可用（尾伪元素无需截断匹配）。
+        let which = match pe {
+            PseudoElement::Before => crate::tree::PseudoWhich::Before,
+            PseudoElement::After => crate::tree::PseudoWhich::After,
+            PseudoElement::Selection | PseudoElement::Placeholder => {
+                return self.0.node(self.1).pseudo.is_none();
+            }
+        };
+        self.0.node(self.1).pseudo == Some(which)
+    }
+
+    /// C4（ADR-0018）：伪元素组合器回溯目标。C1 实体化伪节点维持默认
+    /// 父链（宿主节点）；::selection/::placeholder 于 origin 节点直配
+    ///（通道匹配）——伪元素主题复合命中后，前缀复合仍在 origin 节点
+    /// 自身求值（originating element = 节点自身）。
+    fn pseudo_element_originating_element(&self) -> Option<Self> {
+        if self.0.node(self.1).pseudo.is_some() {
+            self.parent_element()
+        } else {
+            Some(self.clone())
+        }
     }
 
     fn apply_selector_flags(&self, _flags: ElementSelectorFlags) {
@@ -414,7 +488,13 @@ impl<'a> ElementTrait for TreeNode<'a> {
     }
 
     fn is_empty(&self) -> bool {
-        self.0.node(self.1).is_empty() && self.0.children(self.1).is_empty()
+        // ADR-0015：伪节点不影响 :empty（spec——伪元素非元素子节点）
+        self.0.node(self.1).is_empty()
+            && !self
+                .0
+                .children(self.1)
+                .iter()
+                .any(|c| !self.0.is_pseudo(*c))
     }
 
     fn is_root(&self) -> bool {
@@ -470,6 +550,27 @@ mod tests {
     fn matched(tree: &StyleTree, id: crate::tree::NodeId, selector: &str) -> bool {
         let list = parse_selector_list(selector).expect("selector should parse");
         matches(tree, id, &list)
+    }
+
+    #[test]
+    fn probe_pseudo_element_origin_match() {
+        // C4 探针：::selection 于树根与子节点的直配（区分匹配层/引擎层）。
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let a = tree.insert_child(root, node("div", &[]));
+        tree.node_mut(a).id = Some("root".into());
+        let b = tree.insert_child(a, node("div", &[]));
+        tree.node_mut(b).id = Some("t".into());
+        let l_root = parse_selector_list("#root::selection").expect("parse");
+        let l_t = parse_selector_list("#t::selection").expect("parse");
+        assert!(
+            match_specificity(&tree, a, &l_root).is_some(),
+            "根节点 #root::selection 应命中"
+        );
+        assert!(
+            match_specificity(&tree, b, &l_t).is_some(),
+            "子节点 #t::selection 应命中"
+        );
     }
 
     #[test]

@@ -18,11 +18,20 @@ smallvec = { workspace = true }
 tracing = { workspace = true }
 taffy = { workspace = true, optional = true }
 parley = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 
 [features]
 default = ["layout", "text"]
 layout = ["dep:taffy"]
 text = ["dep:parley"]
+serde = ["dep:serde"]
+
+[dev-dependencies]
+# 差分测试基座（实施期 Phase 0 前置⑥）：增量链 ≡ 全量重建等价。
+# 仅 dev-dep——C4 纪律：proptest 不进主依赖树。
+proptest = "1.11"
+# F3a2（ADR-0023）serde 往返锁：JSON 通道真格式验证（仅 dev-dep）。
+serde_json = "1"
 
 [lints]
 workspace = true

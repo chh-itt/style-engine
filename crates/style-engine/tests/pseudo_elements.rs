@@ -1,0 +1,233 @@
+//! C1 伪元素 ::before/::after + content 锁测试（ADR-0015）。
+//!
+//! 语义：伪节点 = 引擎实体化的真实树子节点（::before 首子 / ::after 末子，
+//! 裸 StyleNode 无身份）；选择器匹配经 selectors originating_element 回
+//! origin 左复合；content none/normal（宿主节点恒 Normal）→ map_style
+//! Display::None 无盒；content <string> → sync_pseudo_text 供文本测量
+//!（T5c-2 同帧布局）。几何断言 = 度量尺（对齐 Chrome 盒模型行为）。
+
+#![cfg(feature = "text")]
+
+use style_engine::StyleEngine;
+use style_engine::tree::StyleNode;
+
+const FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../style-engine-demo/assets/fonts/DejaVuSans.ttf"
+));
+
+/// 双节点骨架：#root(1) → #t(2)。字体度量基准：伪节点经继承取得
+/// font-family（未注册泛族测量 0，FEATURES.md 契约）。
+fn engine_pseudo(sheet: &str) -> StyleEngine<u64> {
+    let mut engine: StyleEngine<u64> = StyleEngine::new();
+    engine.add_font(FONT.to_vec());
+    engine.set_stylesheet(sheet);
+    let mut root = StyleNode::default();
+    root.id = Some("root".to_string());
+    engine.insert(None, 1, root).unwrap();
+    let mut leaf = StyleNode::default();
+    leaf.id = Some("t".to_string());
+    engine.insert(Some(1), 2, leaf).unwrap();
+    engine
+}
+
+/// 节点盒 (x, y, width, height)。
+fn box_of(e: &mut StyleEngine<u64>, key: u64) -> (f32, f32, f32, f32) {
+    let f = e.frame((800.0, 600.0), 1.0, 0.0);
+    let b = f.boxes.iter().find(|b| b.key == key).unwrap();
+    (b.x, b.y, b.width, b.height)
+}
+
+/// 节点 color（Absolute RGB 0..1）。
+fn color_of(e: &mut StyleEngine<u64>, key: u64) -> (f32, f32, f32) {
+    use style_engine::css::property::PropertyId;
+    use style_engine::css::value::ColorValue;
+    let f = e.frame((800.0, 600.0), 1.0, 0.0);
+    let _ = f;
+    let cs = e.computed_style(key).unwrap();
+    match cs.value(PropertyId::Color) {
+        Some(style_engine::css::property::DeclValue::Color(ColorValue::Absolute(c))) => {
+            let cc = c.components;
+            (cc[0], cc[1], cc[2])
+        }
+        _ => panic!("期望 color 绝对值"),
+    }
+}
+
+#[test]
+fn before_content_creates_box() {
+    let mut e0 = engine_pseudo("#t { font-size: 16px; font-family: \"DejaVu Sans\"; }");
+    let h0 = box_of(&mut e0, 2).3;
+    let mut e1 = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: \"Hi\"; }",
+    );
+    let h1 = box_of(&mut e1, 2).3;
+    assert!(
+        h0 == 0.0 && h1 > 0.0,
+        "content 串应生成文本盒（h0={h0} h1={h1}）"
+    );
+}
+
+#[test]
+fn after_content_appends_box() {
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::after { content: \"Yo\"; }",
+    );
+    let h = box_of(&mut e, 2).3;
+    assert!(h > 0.0, "::after content 应生成文本盒（h={h}）");
+}
+
+#[test]
+fn content_none_no_box() {
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: \"Hi\"; content: none; }",
+    );
+    let h = box_of(&mut e, 2).3;
+    assert_eq!(h, 0.0, "content:none 覆盖后应无盒（h={h}）");
+}
+
+#[test]
+fn content_normal_no_box() {
+    // 无 content 声明 = normal 初始 → 无盒（字体声明不应凭空造盒）
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { font-size: 24px; }",
+    );
+    let h = box_of(&mut e, 2).3;
+    assert_eq!(h, 0.0, "content:normal 应无盒（h={h}）");
+}
+
+#[test]
+fn before_pushes_host_child_down() {
+    let mut e = engine_pseudo(
+        "#root { font-family: \"DejaVu Sans\"; } #root::before { content: \"P\"; font-size: 20px; }",
+    );
+    let y = box_of(&mut e, 2).1;
+    assert!(y > 0.0, "::before 有盒应下推宿主子（y={y}）");
+    let mut e2 = engine_pseudo(
+        "#root { font-family: \"DejaVu Sans\"; } #root::before { content: none; font-size: 20px; }",
+    );
+    let y2 = box_of(&mut e2, 2).1;
+    assert_eq!(y2, 0.0, "content:none 伪节点无盒不下推（y={y2}）");
+}
+
+#[test]
+fn single_colon_legacy_form() {
+    // CSS2 单冒号形 —— selectors is_css2_pseudo_element 路由
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t:before { content: \"Hi\"; }",
+    );
+    let h = box_of(&mut e, 2).3;
+    assert!(h > 0.0, "单冒号 :before 应等价解析（h={h}）");
+}
+
+#[test]
+fn first_child_excludes_pseudo() {
+    // 结构伪类只看宿主子：若伪节点被计入 first-child，#t 不中 :first-child
+    // → 蓝色（规则序让 :first-child 胜 specificity (0,1,1) > (0,1,0)）
+    let mut e = engine_pseudo(
+        "#root { font-family: \"DejaVu Sans\"; } #root > :first-child { color: red; } #t { color: blue; } #root::before { content: \"P\"; font-size: 16px; }",
+    );
+    let c = color_of(&mut e, 2);
+    assert_rgb(c, (1.0, 0.0, 0.0), "first-child 应仍匹配宿主首子 #t");
+}
+
+#[test]
+fn empty_not_affected_by_pseudo() {
+    // :empty 只看宿主子与文本；伪节点不影响判定
+    let mut e = engine_pseudo(
+        "#t:empty { color: red; } #t { color: blue; } #t::before { content: \"x\"; font-size: 16px; font-family: \"DejaVu Sans\"; }",
+    );
+    let c = color_of(&mut e, 2);
+    assert_rgb(c, (1.0, 0.0, 0.0), ":empty 应不受伪节点实体化影响");
+}
+
+#[test]
+fn origin_pseudo_class_gates_content() {
+    // 伪类挂在 origin 复合上：未 hover 无盒，hover 后生成
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t:hover::before { content: \"H\"; font-size: 16px; }",
+    );
+    let h0 = box_of(&mut e, 2).3;
+    assert_eq!(h0, 0.0, "未 hover 不应生成盒（h={h0}）");
+    e.set_state(2, style_engine::tree::NodeState::HOVER)
+        .unwrap();
+    let h1 = box_of(&mut e, 2).3;
+    assert!(h1 > 0.0, "hover 后应生成盒（h={h1}）");
+}
+
+#[test]
+fn font_inherits_from_origin() {
+    let mut e16 = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: \"x\"; }",
+    );
+    let h16 = box_of(&mut e16, 2).3;
+    let mut e32 = engine_pseudo(
+        "#t { font-size: 32px; font-family: \"DejaVu Sans\"; } #t::before { content: \"x\"; }",
+    );
+    let h32 = box_of(&mut e32, 2).3;
+    assert!(
+        h32 > h16,
+        "伪节点应继承 origin 字号（16px→{h16} 32px→{h32}）"
+    );
+}
+
+#[test]
+fn later_rule_overrides_content() {
+    // 收窄容器（100px）使长串折行——伪盒 auto 宽 stretch 容器，800px 下
+    // 短句不折行则两者同高（度量尺：块级盒宽度解析）。
+    let mut a = engine_pseudo(
+        "#root { width: 100px; } #t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: \"wrap wrap wrap wrap\"; }",
+    );
+    let ha = box_of(&mut a, 2).3;
+    let mut b = engine_pseudo(
+        "#root { width: 100px; } #t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: \"wrap wrap wrap wrap\"; } #t::before { content: \"x\"; }",
+    );
+    let hb = box_of(&mut b, 2).3;
+    assert!(
+        hb < ha,
+        "后规则 content 应覆盖（短串 hb={hb} < 长串 ha={ha}）"
+    );
+}
+
+#[test]
+fn sheet_flip_clears_pseudos() {
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: \"Hi\"; }",
+    );
+    assert!(box_of(&mut e, 2).3 > 0.0);
+    e.set_stylesheet("#t { font-size: 16px; font-family: \"DejaVu Sans\"; }");
+    let h = box_of(&mut e, 2).3;
+    assert_eq!(h, 0.0, "换表后无伪规则应清除全部伪节点（h={h}）");
+}
+
+#[test]
+fn multi_sheet_rule_applies() {
+    let mut e = engine_pseudo("#t { font-size: 16px; font-family: \"DejaVu Sans\"; }");
+    e.add_stylesheet("#t::after { content: \"S\"; font-size: 16px; }");
+    let h = box_of(&mut e, 2).3;
+    assert!(h > 0.0, "附加表伪规则应生效（h={h}）");
+}
+
+#[test]
+fn class_selector_origin() {
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } .card::before { content: \"C\"; font-size: 16px; }",
+    );
+    // 无 class：无盒
+    let h0 = box_of(&mut e, 2).3;
+    assert_eq!(h0, 0.0);
+    // 挂 class 后：生成
+    e.set_classes(2, &["card".to_string()]).unwrap();
+    let h1 = box_of(&mut e, 2).3;
+    assert!(h1 > 0.0, "class 命中 origin 后应生成盒（h={h1}）");
+}
+
+/// RGB 断言（容差 0.01，克隆 imports_supports.rs 惯例）。
+fn assert_rgb(got: (f32, f32, f32), want: (f32, f32, f32), what: &str) {
+    assert!(
+        (got.0 - want.0).abs() < 0.01
+            && (got.1 - want.1).abs() < 0.01
+            && (got.2 - want.2).abs() < 0.01,
+        "{what}：期望 {want:?} 实得 {got:?}"
+    );
+}

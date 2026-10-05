@@ -21,7 +21,13 @@ pub enum ContractError {
     /// 父子操作会构成环（节点成为自己的后代）。
     Cycle,
     /// 引擎已有根节点，再次 `insert(None, ..)` 冲突。
+    ///
+    /// ADR-0010 起不再返回：多根受支持，后续 `insert(None, ..)` 成为
+    /// overlay 根。变体保留以维持公共 API 稳定。
     RootExists,
+    /// ADR-0010：对文档根调用 `set_top_layer(key, true)`——文档根本身是
+    /// 页面，不属于弹窗层。
+    NotOverlayRoot,
     /// `insert` 携带的 span 字节区间非法（越界、倒置或落在 UTF-8 字符内部；
     /// 无文本节点的 span 一律非法）。
     InvalidSpan,
@@ -34,6 +40,7 @@ impl fmt::Display for ContractError {
             Self::DuplicateNode => "node key already exists",
             Self::Cycle => "operation would create a cycle",
             Self::RootExists => "the engine already has a root node",
+            Self::NotOverlayRoot => "the node is the document root and cannot enter the top layer",
             Self::InvalidSpan => {
                 "text span byte range is invalid (out of bounds, inverted, or not a char boundary)"
             }
@@ -125,6 +132,7 @@ mod tests {
             ContractError::DuplicateNode,
             ContractError::Cycle,
             ContractError::RootExists,
+            ContractError::NotOverlayRoot,
             ContractError::InvalidSpan,
         ] {
             let boxed: Box<dyn Error> = Box::new(e);

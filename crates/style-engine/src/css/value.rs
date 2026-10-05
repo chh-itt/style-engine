@@ -13,7 +13,8 @@ pub type ValError = ParseError<BasicParseError>;
 /// 带值解析错误的 `Result` 别名。
 pub type ValResult<T> = Result<T, ValError>;
 
-/// 值定值上下文：字号、根字号与视口（全部由引擎/宿主提供，crate 无副作用）。
+/// 值定值上下文：字号、根字号、视口与容器/字体度量（全部由引擎/宿主提供，
+/// crate 无副作用）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolveCtx {
     /// 当前节点字号（em 基准）。
@@ -24,6 +25,57 @@ pub struct ResolveCtx {
     pub viewport_w: f32,
     /// 视口高度（vh 基准）。
     pub viewport_h: f32,
+    /// 容器查询基准宽（cqw/cqi；无容器祖先=small viewport 回落）。
+    pub cq_w: f32,
+    /// 容器查询基准高（cqh/cqb；无容器祖先=small viewport 回落）。
+    pub cq_h: f32,
+    /// ch 基准：数字 0 字形 advance（每 em；未注册字体=0.5 近似）。
+    pub ch_per_em: f32,
+    /// ex 基准：x 字形 yMax（每 em；未注册字体=0.5 近似）。
+    pub ex_per_em: f32,
+    /// ic 基准：表意字 U+6C34 advance（每 em；缺字=1.0）。
+    pub ic_per_em: f32,
+}
+
+impl ResolveCtx {
+    /// 基础上下文（容器查询回落视口、字体度量近似缺省）——既有调用点的
+    /// 便捷构造；引擎在拥有容器/字体信息处以字段覆写。
+    pub fn base(em: f32, rem: f32, viewport_w: f32, viewport_h: f32) -> Self {
+        Self {
+            em,
+            rem,
+            viewport_w,
+            viewport_h,
+            cq_w: viewport_w,
+            cq_h: viewport_h,
+            ch_per_em: 0.5,
+            ex_per_em: 0.5,
+            ic_per_em: 1.0,
+        }
+    }
+}
+
+/// 字体相对单位度量（每 em 归一；A9）。真实值由引擎在注册字体时探测
+///（css::fontprobe）；未注册族按 CSS 近似惯例回落（ch=0.5em、ex=0.5em、
+/// ic=1em，偏差在案 FEATURES.md）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontMetrics {
+    /// 数字 0 字形 advance（ch 基准）。
+    pub ch_per_em: f32,
+    /// x 字形 yMax（ex 基准）。
+    pub ex_per_em: f32,
+    /// 表意字 U+6C34 advance（ic 基准；缺字=1.0）。
+    pub ic_per_em: f32,
+}
+
+impl Default for FontMetrics {
+    fn default() -> Self {
+        Self {
+            ch_per_em: 0.5,
+            ex_per_em: 0.5,
+            ic_per_em: 1.0,
+        }
+    }
 }
 
 /// `<length-percentage>`：px/em/rem/%/vw/vh/calc()。
@@ -42,6 +94,20 @@ pub enum LengthPercentage {
     Vw(f32),
     /// 视口高度小数（50vh → 0.5）。
     Vh(f32),
+    /// 容器查询宽小数（50cqw → 0.5；A9）。
+    Cqw(f32),
+    /// 容器查询高小数（50cqh → 0.5；A9）。
+    Cqh(f32),
+    /// 容器行内轴小数（50cqi → 0.5；水平书写=cqw；A9）。
+    Cqi(f32),
+    /// 容器块轴小数（50cqb → 0.5；水平书写=cqh；A9）。
+    Cqb(f32),
+    /// 数字 0 字形 advance 倍数（2ch；A9，字体相对）。
+    Ch(f32),
+    /// x 字形 yMax（x-height）倍数（2ex；A9，字体相对）。
+    Ex(f32),
+    /// 表意字 U+6C34 advance 倍数（2ic；A9，字体相对；缺字=1em）。
+    Ic(f32),
     /// calc() 表达式（CSS Values 4 子集）。
     Calc(Box<CalcNode>),
 }
@@ -61,7 +127,24 @@ impl LengthPercentage {
             Self::Percent(v) => Some(v * percent_basis),
             Self::Vw(v) => Some(v * ctx.viewport_w),
             Self::Vh(v) => Some(v * ctx.viewport_h),
+            // A9：容器查询单位（cqi/cqb 水平书写=cqw/cqh；纵向书写不支持在案）
+            Self::Cqw(v) | Self::Cqi(v) => Some(v * ctx.cq_w),
+            Self::Cqh(v) | Self::Cqb(v) => Some(v * ctx.cq_h),
+            // A9：字体相对单位（度量按节点字号缩放）
+            Self::Ch(v) => Some(v * ctx.ch_per_em * ctx.em),
+            Self::Ex(v) => Some(v * ctx.ex_per_em * ctx.em),
+            Self::Ic(v) => Some(v * ctx.ic_per_em * ctx.em),
             Self::Calc(node) => node.resolve(ctx, percent_basis),
+        }
+    }
+
+    /// A9：是否含容器查询单位叶子（映射期判定是否延迟结算——容器基值
+    /// 布局期才稳定，与百分比 calc 同病同治）。
+    pub fn has_cq(&self) -> bool {
+        match self {
+            Self::Cqw(_) | Self::Cqh(_) | Self::Cqi(_) | Self::Cqb(_) => true,
+            Self::Calc(node) => node.has_cq(),
+            _ => false,
         }
     }
 }
@@ -84,6 +167,20 @@ pub enum CalcUnit {
     Vw,
     /// 视口高度小数（50vh → 0.5）。
     Vh,
+    /// 容器查询宽小数（50cqw → 0.5；A9）。
+    Cqw,
+    /// 容器查询高小数（50cqh → 0.5；A9）。
+    Cqh,
+    /// 容器行内轴小数（50cqi → 0.5；水平书写=cqw；A9）。
+    Cqi,
+    /// 容器块轴小数（50cqb → 0.5；水平书写=cqh；A9）。
+    Cqb,
+    /// 数字 0 字形 advance 倍数（A9，字体相对）。
+    Ch,
+    /// x 字形 yMax（x-height）倍数（A9，字体相对）。
+    Ex,
+    /// 表意字 U+6C34 advance 倍数（A9，字体相对；缺字=1em）。
+    Ic,
 }
 
 /// `calc()` 表达式树（CSS Values 4 子集：四则运算、嵌套 calc、括号）。
@@ -100,6 +197,12 @@ pub enum CalcNode {
     Product(Box<CalcNode>, Box<CalcNode>),
     /// 除以非零数字（CSS 约束）。
     Divide(Box<CalcNode>, f32),
+    /// min(a, b, …)（A6：多参二元折叠；任一参可定值则整体可定值）。
+    Min(Box<CalcNode>, Box<CalcNode>),
+    /// max(a, b, …)（A6，二元折叠）。
+    Max(Box<CalcNode>, Box<CalcNode>),
+    /// clamp(min, val, max)（A6）= max(min, min(val, max))。
+    Clamp(Box<CalcNode>, Box<CalcNode>, Box<CalcNode>),
 }
 
 impl CalcNode {
@@ -107,11 +210,15 @@ impl CalcNode {
     pub fn has_percent(&self) -> bool {
         match self {
             Self::Value(_, CalcUnit::Percent) => true,
-            Self::Sum(a, b) | Self::Sub(a, b) | Self::Product(a, b) => {
-                a.has_percent() || b.has_percent()
-            }
+            // 非百分比定值叶
+            Self::Value(_, _) => false,
+            Self::Sum(a, b)
+            | Self::Sub(a, b)
+            | Self::Product(a, b)
+            | Self::Min(a, b)
+            | Self::Max(a, b) => a.has_percent() || b.has_percent(),
             Self::Divide(a, _) => a.has_percent(),
-            _ => false,
+            Self::Clamp(mn, v, mx) => mn.has_percent() || v.has_percent() || mx.has_percent(),
         }
     }
 
@@ -127,6 +234,12 @@ impl CalcNode {
                 CalcUnit::Percent => v * percent_basis,
                 CalcUnit::Vw => v * ctx.viewport_w,
                 CalcUnit::Vh => v * ctx.viewport_h,
+                // A9：容器查询/字体相对单位（与 LengthPercentage 直变体同式）
+                CalcUnit::Cqw | CalcUnit::Cqi => v * ctx.cq_w,
+                CalcUnit::Cqh | CalcUnit::Cqb => v * ctx.cq_h,
+                CalcUnit::Ch => v * ctx.ch_per_em * ctx.em,
+                CalcUnit::Ex => v * ctx.ex_per_em * ctx.em,
+                CalcUnit::Ic => v * ctx.ic_per_em * ctx.em,
             }),
             Self::Sum(a, b) => {
                 Some(a.resolve(ctx, percent_basis)? + b.resolve(ctx, percent_basis)?)
@@ -144,6 +257,21 @@ impl CalcNode {
                 Some(v)
             }
             Self::Divide(a, n) => Some(a.resolve(ctx, percent_basis)? / n),
+            Self::Min(a, b) => Some(
+                a.resolve(ctx, percent_basis)?
+                    .min(b.resolve(ctx, percent_basis)?),
+            ),
+            Self::Max(a, b) => Some(
+                a.resolve(ctx, percent_basis)?
+                    .max(b.resolve(ctx, percent_basis)?),
+            ),
+            // CSS：clamp(MIN, VAL, MAX) = max(MIN, min(VAL, MAX))
+            Self::Clamp(mn, v, mx) => Some(
+                mn.resolve(ctx, percent_basis)?.max(
+                    v.resolve(ctx, percent_basis)?
+                        .min(mx.resolve(ctx, percent_basis)?),
+                ),
+            ),
         }
     }
 
@@ -158,11 +286,33 @@ impl CalcNode {
     fn is_pure_number(&self) -> bool {
         match self {
             Self::Value(_, CalcUnit::Number) => true,
-            Self::Sum(a, b) | Self::Sub(a, b) | Self::Product(a, b) => {
-                a.is_pure_number() && b.is_pure_number()
-            }
+            Self::Sum(a, b)
+            | Self::Sub(a, b)
+            | Self::Product(a, b)
+            | Self::Min(a, b)
+            | Self::Max(a, b) => a.is_pure_number() && b.is_pure_number(),
             Self::Divide(a, _) => a.is_pure_number(),
+            Self::Clamp(mn, v, mx) => {
+                mn.is_pure_number() && v.is_pure_number() && mx.is_pure_number()
+            }
             Self::Value(..) => false,
+        }
+    }
+
+    /// A9：是否含容器查询单位叶子（递归；LengthPercentage::has_cq 的 calc 体）。
+    pub fn has_cq(&self) -> bool {
+        match self {
+            Self::Value(_, u) => matches!(
+                u,
+                CalcUnit::Cqw | CalcUnit::Cqh | CalcUnit::Cqi | CalcUnit::Cqb
+            ),
+            Self::Sum(a, b)
+            | Self::Sub(a, b)
+            | Self::Product(a, b)
+            | Self::Min(a, b)
+            | Self::Max(a, b) => a.has_cq() || b.has_cq(),
+            Self::Divide(a, _) => a.has_cq(),
+            Self::Clamp(mn, v, mx) => mn.has_cq() || v.has_cq() || mx.has_cq(),
         }
     }
 }
@@ -216,6 +366,22 @@ pub fn parse_length_percentage(p: &mut Parser<'_>) -> ValResult<LengthPercentage
                 Ok(LengthPercentage::Vw(value / 100.0))
             } else if unit.eq_ignore_ascii_case("vh") {
                 Ok(LengthPercentage::Vh(value / 100.0))
+            // A9：容器查询单位（按小数存，同 vw/vh 惯例）
+            } else if unit.eq_ignore_ascii_case("cqw") {
+                Ok(LengthPercentage::Cqw(value / 100.0))
+            } else if unit.eq_ignore_ascii_case("cqh") {
+                Ok(LengthPercentage::Cqh(value / 100.0))
+            } else if unit.eq_ignore_ascii_case("cqi") {
+                Ok(LengthPercentage::Cqi(value / 100.0))
+            } else if unit.eq_ignore_ascii_case("cqb") {
+                Ok(LengthPercentage::Cqb(value / 100.0))
+            // A9：字体相对单位（按倍数存，同 em 惯例）
+            } else if unit.eq_ignore_ascii_case("ch") {
+                Ok(LengthPercentage::Ch(value))
+            } else if unit.eq_ignore_ascii_case("ex") {
+                Ok(LengthPercentage::Ex(value))
+            } else if unit.eq_ignore_ascii_case("ic") {
+                Ok(LengthPercentage::Ic(value))
             } else {
                 Err(p.new_error_for_next_token())
             }
@@ -225,6 +391,20 @@ pub fn parse_length_percentage(p: &mut Parser<'_>) -> ValResult<LengthPercentage
         Token::Number { value: 0.0, .. } => Ok(LengthPercentage::Px(0.0)),
         Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {
             Ok(LengthPercentage::Calc(Box::new(parse_calc_body(p)?)))
+        }
+        // A6：min()/max()/clamp() 与 calc() 同为长度语境可定值数学函数
+        //（结果须量纲值——纯数字拒绝同 calc 体）。
+        Token::Function(ref name)
+            if name.eq_ignore_ascii_case("min")
+                || name.eq_ignore_ascii_case("max")
+                || name.eq_ignore_ascii_case("clamp") =>
+        {
+            let name = name.clone();
+            let node = parse_math_body(p, &name)?;
+            if node.is_pure_number() {
+                return Err(p.new_error_for_next_token());
+            }
+            Ok(LengthPercentage::Calc(Box::new(node)))
         }
         _ => Err(p.new_error_for_next_token()),
     }
@@ -307,11 +487,34 @@ fn parse_calc_value(p: &mut Parser<'_>) -> ValResult<CalcNode> {
                 CalcUnit::Vw
             } else if unit.eq_ignore_ascii_case("vh") {
                 CalcUnit::Vh
+            // A9：容器查询/字体相对单位（calc 体同链路）
+            } else if unit.eq_ignore_ascii_case("cqw") {
+                CalcUnit::Cqw
+            } else if unit.eq_ignore_ascii_case("cqh") {
+                CalcUnit::Cqh
+            } else if unit.eq_ignore_ascii_case("cqi") {
+                CalcUnit::Cqi
+            } else if unit.eq_ignore_ascii_case("cqb") {
+                CalcUnit::Cqb
+            } else if unit.eq_ignore_ascii_case("ch") {
+                CalcUnit::Ch
+            } else if unit.eq_ignore_ascii_case("ex") {
+                CalcUnit::Ex
+            } else if unit.eq_ignore_ascii_case("ic") {
+                CalcUnit::Ic
             } else {
                 return Err(p.new_error_for_next_token());
             };
-            // vw/vh 与百分比一样按小数存（50vw → 0.5）
-            let v = if matches!(u, CalcUnit::Vw | CalcUnit::Vh) {
+            // vw/vh/cqw/cqh/cqi/cqb 与百分比一样按小数存（50vw → 0.5）
+            let v = if matches!(
+                u,
+                CalcUnit::Vw
+                    | CalcUnit::Vh
+                    | CalcUnit::Cqw
+                    | CalcUnit::Cqh
+                    | CalcUnit::Cqi
+                    | CalcUnit::Cqb
+            ) {
                 value / 100.0
             } else {
                 value
@@ -322,8 +525,45 @@ fn parse_calc_value(p: &mut Parser<'_>) -> ValResult<CalcNode> {
         Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {
             p.parse_nested_block(parse_calc_sum)
         }
+        // A6 数学函数：min/max 逗号参数二元折叠；clamp 恰三参；嵌套数学
+        // 函数经 parse_calc_value 递归支持。
+        Token::Function(ref name)
+            if name.eq_ignore_ascii_case("min")
+                || name.eq_ignore_ascii_case("max")
+                || name.eq_ignore_ascii_case("clamp") =>
+        {
+            parse_math_body(p, name)
+        }
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+/// min()/max()/clamp() 参数体（Function 名已由调用方消费）。
+fn parse_math_body(p: &mut Parser<'_>, name: &str) -> ValResult<CalcNode> {
+    if name.eq_ignore_ascii_case("clamp") {
+        let args = p.parse_nested_block(|p| p.parse_comma_separated(parse_calc_sum))?;
+        if args.len() != 3 {
+            return Err(p.new_error_for_next_token());
+        }
+        let mut it = args.into_iter();
+        let mn = it.next().unwrap();
+        let v = it.next().unwrap();
+        let mx = it.next().unwrap();
+        return Ok(CalcNode::Clamp(Box::new(mn), Box::new(v), Box::new(mx)));
+    }
+    let is_min = name.eq_ignore_ascii_case("min");
+    let args = p.parse_nested_block(|p| p.parse_comma_separated(parse_calc_sum))?;
+    let mut it = args.into_iter();
+    let first = it.next().ok_or_else(|| p.new_error_for_next_token())?;
+    let mut acc = first;
+    for b in it {
+        acc = if is_min {
+            CalcNode::Min(Box::new(acc), Box::new(b))
+        } else {
+            CalcNode::Max(Box::new(acc), Box::new(b))
+        };
+    }
+    Ok(acc)
 }
 
 /// 解析 `<angle>`（deg/grad/rad/turn，归一为度；无单位数字视为 deg）。
@@ -452,6 +692,7 @@ mod tests {
             rem: 16.0,
             viewport_w: 800.0,
             viewport_h: 600.0,
+            ..ResolveCtx::base(16.0, 16.0, 800.0, 600.0)
         }
     }
 

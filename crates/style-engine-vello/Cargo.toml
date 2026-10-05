@@ -11,8 +11,7 @@ style-engine = { path = "../style-engine", version = "0.1.0" }
 vello = { workspace = true }
 wgpu = { workspace = true }
 parley = { workspace = true }
-
-[dev-dependencies]
+# render_offscreen（像素回归/快照通路）为库内同步阻塞执行器
 pollster = "0.4"
 
 [lints]

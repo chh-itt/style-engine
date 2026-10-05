@@ -14,7 +14,9 @@ use style_engine::{DisplayList, PaintOp};
 use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point, Stroke, Vec2};
 use vello::peniko::color::{AlphaColor, Srgb};
-use vello::peniko::{Brush, Extend, Fill, Gradient, GradientKind, Mix, RadialGradientPosition};
+use vello::peniko::{
+    Brush, Extend, Fill, Gradient, GradientKind, Mix, RadialGradientPosition, SweepGradientPosition,
+};
 
 #[cfg(test)]
 mod tests {
@@ -188,6 +190,14 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             line_height,
             letter_spacing,
             text_align,
+            word_break,
+            overflow_wrap,
+            decorations,
+            shadows,
+            font_stretch,
+            word_spacing,
+            font_features,
+            font_variations,
         } = op
         {
             // 字形为局部簇坐标（positioned_glyphs 已含 advance 与基线）：
@@ -197,6 +207,36 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             let origin = top * Point::new(f64::from(*x), f64::from(*y));
             let run_transform =
                 Affine::translate((state.offset.x + origin.x, state.offset.y + origin.y)) * top;
+            // F2（ADR-0022 D5）：影字先绘（transform 平移重发；spans 置
+            // 空表=全字影色；blur=B 级在案——逐 run 模糊未启）。
+            for s in shadows.iter() {
+                let shadow_transform = Affine::translate((
+                    state.offset.x + origin.x + f64::from(s.dx),
+                    state.offset.y + origin.y + f64::from(s.dy),
+                )) * top;
+                text.draw_text(
+                    scene,
+                    shadow_transform,
+                    content,
+                    s.color,
+                    &[],
+                    *font_size,
+                    font_family,
+                    *font_weight,
+                    *italic,
+                    *max_advance,
+                    *line_height,
+                    *letter_spacing,
+                    *text_align,
+                    *word_break,
+                    *overflow_wrap,
+                    decorations,
+                    *font_stretch,
+                    *word_spacing,
+                    font_features,
+                    font_variations,
+                );
+            }
             text.draw_text(
                 scene,
                 run_transform,
@@ -211,6 +251,13 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
                 *line_height,
                 *letter_spacing,
                 *text_align,
+                *word_break,
+                *overflow_wrap,
+                decorations,
+                *font_stretch,
+                *word_spacing,
+                font_features,
+                font_variations,
             );
             continue;
         }
@@ -301,6 +348,13 @@ impl VelloTextSystem {
         line_height: Option<f32>,
         letter_spacing: f32,
         text_align: style_engine::css::property::TextAlign,
+        word_break: style_engine::css::property::WordBreakKind,
+        overflow_wrap: style_engine::css::property::OverflowWrapKind,
+        decorations: &[style_engine::paint::TextDecorationPaint],
+        font_stretch: f32,
+        word_spacing: Option<f32>,
+        font_features: &[([u8; 4], u16)],
+        font_variations: &[([u8; 4], f32)],
     ) {
         if content.is_empty() {
             return;
@@ -326,6 +380,63 @@ impl VelloTextSystem {
         }
         if letter_spacing != 0.0 {
             builder.push_default(parley::style::StyleProperty::LetterSpacing(letter_spacing));
+        }
+        // C2（ADR-0016）：word-break/overflow-wrap 与测量侧同参（parley
+        // 断行器消费；断行一致性契约同 max_advance/行高/字距通道）。
+        builder.push_default(parley::style::StyleProperty::WordBreak(match word_break {
+            style_engine::css::property::WordBreakKind::Normal => parley::style::WordBreak::Normal,
+            style_engine::css::property::WordBreakKind::BreakAll => {
+                parley::style::WordBreak::BreakAll
+            }
+            style_engine::css::property::WordBreakKind::KeepAll => {
+                parley::style::WordBreak::KeepAll
+            }
+            // 枚举 non_exhaustive（外部 crate 匹配须兜底）
+            _ => parley::style::WordBreak::Normal,
+        }));
+        builder.push_default(parley::style::StyleProperty::OverflowWrap(
+            match overflow_wrap {
+                style_engine::css::property::OverflowWrapKind::Normal => {
+                    parley::style::OverflowWrap::Normal
+                }
+                style_engine::css::property::OverflowWrapKind::BreakWord => {
+                    parley::style::OverflowWrap::BreakWord
+                }
+                style_engine::css::property::OverflowWrapKind::Anywhere => {
+                    parley::style::OverflowWrap::Anywhere
+                }
+                // 枚举 non_exhaustive（外部 crate 匹配须兜底）
+                _ => parley::style::OverflowWrap::Normal,
+            },
+        ));
+        // F3d（ADR-0026 D5）：字体深化接线（与测量侧同源——PaintOp 携带
+        // 解析值；stretch 100 / 空表不推 = parley 默认。span 级为已知近似，
+        // 仅基样式生效，与行高/字距先例一致）。
+        if font_stretch != 100.0 {
+            builder.push_default(parley::style::StyleProperty::FontWidth(
+                parley::fontique::FontWidth::from_percentage(font_stretch),
+            ));
+        }
+        if let Some(ws) = word_spacing {
+            builder.push_default(parley::style::StyleProperty::WordSpacing(ws));
+        }
+        if !font_features.is_empty() {
+            let fl: Vec<parley::FontFeature> = font_features
+                .iter()
+                .map(|(tag, v)| parley::FontFeature::new(parley::setting::Tag::new(tag), *v))
+                .collect();
+            builder.push_default(parley::style::StyleProperty::FontFeatures(
+                parley::FontFeatures::List(std::borrow::Cow::Owned(fl)),
+            ));
+        }
+        if !font_variations.is_empty() {
+            let vl: Vec<parley::FontVariation> = font_variations
+                .iter()
+                .map(|(tag, v)| parley::FontVariation::new(parley::setting::Tag::new(tag), *v))
+                .collect();
+            builder.push_default(parley::style::StyleProperty::FontVariations(
+                parley::FontVariations::List(std::borrow::Cow::Owned(vl)),
+            ));
         }
         // span 覆盖样式（T5c）：字节区间 [start, end)
         for s in spans {
@@ -397,6 +508,59 @@ impl VelloTextSystem {
                         }),
                     );
             }
+            // F2（ADR-0022 D4）：装饰线绘制（行级聚合：字形 x 域+run
+            // advance 定行宽；baseline 自字形 y、ascent/descent 自 run
+            // 度量；v1 LTR 假设、字体优先装饰位=B 级在案——下划线位
+            // baseline+descent*0.5、上划线 baseline−ascent*0.9、删除线
+            // baseline−ascent*0.5）。
+            if !decorations.is_empty() {
+                let mut min_x = f32::INFINITY;
+                let mut max_x = f32::NEG_INFINITY;
+                let mut baseline = 0.0f32;
+                let mut ascent = 0.0f32;
+                let mut descent = 0.0f32;
+                let mut seen = false;
+                for item in line.items() {
+                    let parley::layout::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                        continue;
+                    };
+                    let run = glyph_run.run();
+                    let mut gx = f32::INFINITY;
+                    for g in glyph_run.positioned_glyphs() {
+                        gx = gx.min(g.x);
+                        baseline = baseline.max(g.y);
+                    }
+                    min_x = min_x.min(gx);
+                    max_x = max_x.max(gx + run.advance());
+                    let m = run.metrics();
+                    ascent = ascent.max(m.ascent);
+                    descent = descent.max(m.descent);
+                    seen = true;
+                }
+                if seen {
+                    for d in decorations.iter() {
+                        let t = d.thickness_px.max(0.5);
+                        let mut draw_line = |y: f32| {
+                            let r = vello::kurbo::Rect::new(
+                                f64::from(min_x),
+                                f64::from(y - t * 0.5),
+                                f64::from(max_x),
+                                f64::from(y + t * 0.5),
+                            );
+                            scene.fill(Fill::NonZero, run_transform, d.color, None, &r);
+                        };
+                        if d.line & 1 != 0 {
+                            draw_line(baseline + descent * 0.5);
+                        }
+                        if d.line & 2 != 0 {
+                            draw_line(baseline - ascent * 0.9);
+                        }
+                        if d.line & 4 != 0 {
+                            draw_line(baseline - ascent * 0.5);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -406,6 +570,149 @@ pub fn render(list: &DisplayList) -> Scene {
     let mut scene = Scene::new();
     render_ops(list, &mut scene);
     scene
+}
+
+/// 离屏渲染（像素回归/快照通路）：DisplayList → RGBA8（行主序紧密排列，
+/// 8bit sRGB 编码值——与 soft sink / Chromium 截图同语义）。
+///
+/// 返回 `None` = 无可用 GPU 适配器（无头 CI 等环境受限场景，调用方决定
+/// 跳过语义）。`STYLE_ENGINE_NO_GPU_PROBE=1` 的短路由调用方执行——windows
+/// CI 的 WARP 设备创建段错误无法进程内捕获，必须环境级跳过（探针惯例
+/// 见本文件 tests 注释）。`scale` 用于设备像素对齐（DisplayList 坐标为
+/// 逻辑 px，golden 截图 = 视口 × scale）。
+///
+/// 错误双轨：适配器缺失回 `Ok(None)`；设备/渲染器/回读失败为 `Err`
+/// （真适配器在场的失败属环境异常，不上浮为跳过语义）。
+pub fn render_offscreen(
+    list: &DisplayList,
+    text: &mut VelloTextSystem,
+    width: u32,
+    height: u32,
+    scale: f32,
+    base_color: [f32; 4],
+) -> Result<Option<Vec<u8>>, String> {
+    // 场景：逻辑坐标 → 设备像素。vello 0.10 Scene 无场景级变换方法，
+    // 经 Scene::append(other, transform)（scene.rs:464）注入缩放——
+    // DrawGlyphs 的 run_transform 在 append 时整体复合，文本随缩放一致。
+    let mut scene = Scene::new();
+    let uniform = (scale - 1.0).abs() <= f32::EPSILON;
+    if !uniform {
+        let mut sub = Scene::new();
+        render_ops_with_text(list, &mut sub, text);
+        scene.append(&sub, Some(Affine::scale(f64::from(scale))));
+    } else {
+        render_ops_with_text(list, &mut scene, text);
+    }
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::default(),
+        display: None,
+    });
+    let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    })) else {
+        return Ok(None);
+    };
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("style-engine-vello-offscreen"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        memory_hints: wgpu::MemoryHints::default(),
+        trace: wgpu::Trace::Off,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+    }))
+    .map_err(|e| format!("设备创建失败: {e}"))?;
+    let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+        .map_err(|e| format!("vello 渲染器创建失败: {e}"))?;
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("style-engine-vello-offscreen"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // vello 存储纹理路径要求 Rgba8Unorm（非 Srgb 变体；探针实测）。
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        // RENDER_ATTACHMENT 供 MSAA 路径；STORAGE_BINDING 供 fine 直写；
+        // TEXTURE_BINDING 供内部 blit；COPY_SRC 供回读。
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    renderer
+        .render_to_texture(
+            &device,
+            &queue,
+            &scene,
+            &view,
+            &vello::RenderParams {
+                base_color: AlphaColor::new(base_color),
+                width,
+                height,
+                antialiasing_method: vello::AaConfig::Area,
+            },
+        )
+        .map_err(|e| format!("render_to_texture 失败: {e}"))?;
+
+    // 回读（bytes_per_row 对齐 256），逐行去填充为紧密 RGBA8。
+    let bytes_per_row = width * 4 / 256 * 256
+        + if (width * 4).is_multiple_of(256) {
+            0
+        } else {
+            256
+        };
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("style-engine-vello-offscreen-readback"),
+        size: u64::from(bytes_per_row) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("style-engine-vello-offscreen"),
+    });
+    encoder.copy_texture_to_buffer(
+        tex.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("设备 poll 失败: {e}"))?;
+    let data = slice.get_mapped_range();
+    let row = width as usize * 4;
+    let mut out = Vec::with_capacity(row * height as usize);
+    for y in 0..height as usize {
+        let start = y * bytes_per_row as usize;
+        out.extend_from_slice(&data[start..start + row]);
+    }
+    drop(data);
+    buf.unmap();
+    Ok(Some(out))
 }
 
 #[derive(Default)]
@@ -537,6 +844,8 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             radius,
             gradient,
             radial,
+            conic,
+            linear,
         } => {
             let shape = rect_shape(
                 *x + state.offset.x as f32,
@@ -545,7 +854,9 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 *height,
                 *radius,
             );
-            let brush = peniko_gradient(gradient, *radial, *x, *y, *width, *height, state);
+            let brush = peniko_gradient(
+                gradient, *radial, *conic, *linear, *x, *y, *width, *height, state,
+            );
             // 椭圆修正（T4c）：rx≠ry 时对画刷施加以圆心为锚的 x 向缩放
             let brush_transform = radial.and_then(|gm| {
                 if gm.ry > 0.0 && (gm.rx - gm.ry).abs() > 0.01 {
@@ -674,12 +985,23 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             radius,
             source_w,
             source_h,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
             pixels,
         } => {
             // 第五批⑨背景图：拉伸至盒（MVP 语义，无 repeat/size）；圆角
             // 非零时先推裁剪层。vello 以 peniko::Image（Rgba8）直绘，
             // 仿射=平移到盒原点后按盒/源比例缩放。
-            let clip_it = radius.iter().any(|r| *r > 0.0);
+            // F3d 9-slice（ADR-0026）：src_* 源子域 ≠ 全图时，仿射改为
+            // 「dest 盒原点 ↔ (src_x,src_y)」对齐 + 盒/子域比例缩放，子域外
+            // 的残图以盒矩形裁剪层兜裁（仿射子域+裁剪）。
+            let sub_rect = *src_x != 0.0
+                || *src_y != 0.0
+                || *src_w != *source_w as f32
+                || *src_h != *source_h as f32;
+            let clip_it = sub_rect || radius.iter().any(|r| *r > 0.0);
             if clip_it {
                 let clip = rect_shape(
                     *x + state.offset.x as f32,
@@ -699,11 +1021,11 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
                 width: *source_w,
                 height: *source_h,
             });
-            let sx = f64::from(*width) / f64::from(*source_w).max(1.0);
-            let sy = f64::from(*height) / f64::from(*source_h).max(1.0);
+            let sx = f64::from(*width) / f64::from(src_w.max(0.001));
+            let sy = f64::from(*height) / f64::from(src_h.max(0.001));
             let xform = Affine::translate((
-                f64::from(*x) + state.offset.x,
-                f64::from(*y) + state.offset.y,
+                f64::from(*x) + state.offset.x - f64::from(*src_x) * sx,
+                f64::from(*y) + state.offset.y - f64::from(*src_y) * sy,
             )) * Affine::scale_non_uniform(sx, sy);
             scene.draw_image(&brush, xform);
             if clip_it {
@@ -732,6 +1054,30 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
         }
         PaintOp::PopClip => {
             scene.pop_layer();
+        }
+        PaintOp::PushClipPath { points, nonzero } => {
+            // F3c（ADR-0025）：多边形裁剪——顶点折线闭合成 BezPath，
+            // 形状层完成裁剪（填充规则随 polygon(evenodd) 传递）。
+            let mut path = vello::kurbo::BezPath::new();
+            if let Some(first) = points.first() {
+                path.move_to((
+                    f64::from(first[0]) + state.offset.x,
+                    f64::from(first[1]) + state.offset.y,
+                ));
+                for p in &points[1..] {
+                    path.line_to((
+                        f64::from(p[0]) + state.offset.x,
+                        f64::from(p[1]) + state.offset.y,
+                    ));
+                }
+                path.close_path();
+            }
+            let fill = if *nonzero {
+                vello::peniko::Fill::NonZero
+            } else {
+                vello::peniko::Fill::EvenOdd
+            };
+            scene.push_layer(fill, Mix::Normal, 1.0, state.effective(), &path);
         }
         PaintOp::PushOpacity {
             alpha,
@@ -788,9 +1134,12 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
 }
 
 /// 引擎 Gradient → peniko Gradient（CSS 渐变线几何；stop 缺省位置均匀分配）。
+#[allow(clippy::too_many_arguments)] // 渐变几何直传（radial/conic/linear 三族并列）
 fn peniko_gradient(
     g: &style_engine::css::property::Gradient,
     radial: Option<style_engine::paint::RadialGeom>,
+    conic: Option<style_engine::paint::ConicGeom>,
+    linear: Option<style_engine::paint::LinearGeom>,
     x: f32,
     y: f32,
     w: f32,
@@ -799,19 +1148,35 @@ fn peniko_gradient(
 ) -> Gradient {
     let mut out = match &g.kind {
         style_engine::css::property::GradientKind::Linear(angle) => {
-            // CSS 角度：0 = 向上，顺时针；方向向量
-            let rad = angle.0.to_radians();
-            let (sin, cos) = rad.sin_cos();
-            let dir = Vec2::new(sin as f64, -(cos as f64));
-            // 渐变线长度：|W·sinθ| + |H·cosθ|
-            let line = ((w * sin.abs()) + (h * cos.abs())) as f64 / 2.0;
-            // 画刷与形状同处用户空间（形状坐标已叠盒原点+偏移）：中心须含盒原点
-            // （第四批⑤修复：此前漏加 (x,y)，非原点盒的线性渐变采样区错位）
-            let cx = f64::from(x) + f64::from(w) / 2.0 + state.offset.x;
-            let cy = f64::from(y) + f64::from(h) / 2.0 + state.offset.y;
-            let start = Point::new(cx - dir.x * line, cy - dir.y * line);
-            let end = Point::new(cx + dir.x * line, cy + dir.y * line);
-            Gradient::new_linear(start, end)
+            if let Some(gm) = linear {
+                // F3d（ADR-0026）：paint 层已解析渐变线绝对端点（CSS 语义，
+                // 9-slice 等区域共用全盒同一线 = 精确切片）；画刷空间叠
+                // state.offset（与 radial/conic 绝对几何同约定）。
+                Gradient::new_linear(
+                    Point::new(
+                        f64::from(gm.start[0]) + state.offset.x,
+                        f64::from(gm.start[1]) + state.offset.y,
+                    ),
+                    Point::new(
+                        f64::from(gm.end[0]) + state.offset.x,
+                        f64::from(gm.end[1]) + state.offset.y,
+                    ),
+                )
+            } else {
+                // CSS 角度：0 = 向上，顺时针；方向向量
+                let rad = angle.0.to_radians();
+                let (sin, cos) = rad.sin_cos();
+                let dir = Vec2::new(sin as f64, -(cos as f64));
+                // 渐变线长度：|W·sinθ| + |H·cosθ|
+                let line = ((w * sin.abs()) + (h * cos.abs())) as f64 / 2.0;
+                // 画刷与形状同处用户空间（形状坐标已叠盒原点+偏移）：中心须含盒原点
+                // （第四批⑤修复：此前漏加 (x,y)，非原点盒的线性渐变采样区错位）
+                let cx = f64::from(x) + f64::from(w) / 2.0 + state.offset.x;
+                let cy = f64::from(y) + f64::from(h) / 2.0 + state.offset.y;
+                let start = Point::new(cx - dir.x * line, cy - dir.y * line);
+                let end = Point::new(cx + dir.x * line, cy + dir.y * line);
+                Gradient::new_linear(start, end)
+            }
         }
         style_engine::css::property::GradientKind::Radial(_) => {
             // T4c：圆心/半径已在 paint 层解析为绝对值（含盒原点）；缺失时退回盒心对角线近似
@@ -830,6 +1195,28 @@ fn peniko_gradient(
                         f64::from(geom.cy) + state.offset.y,
                     ),
                     geom.ry.max(0.5),
+                )),
+                ..Default::default()
+            }
+        }
+        style_engine::css::property::GradientKind::Conic(_) => {
+            // C3（ADR-0017 D2）：peniko Sweep 原生映射——圆心/起角已由 paint 层
+            // 解析（含盒原点）；画刷空间再叠 state.offset（与 radial 臂同约定）。
+            // CSS 0deg=12 点 → paint 层已平移至正 X 轴起（start=(deg−90°)·π/180），
+            // 终角 = start + 2π（全周）。
+            let gm = conic.unwrap_or(style_engine::paint::ConicGeom {
+                cx: x + w * 0.5,
+                cy: y + h * 0.5,
+                start: -(std::f32::consts::FRAC_PI_2),
+            });
+            Gradient {
+                kind: GradientKind::Sweep(SweepGradientPosition::new(
+                    Point::new(
+                        f64::from(gm.cx) + state.offset.x,
+                        f64::from(gm.cy) + state.offset.y,
+                    ),
+                    gm.start,
+                    gm.start + std::f32::consts::TAU,
                 )),
                 ..Default::default()
             }
@@ -884,6 +1271,9 @@ fn distribute_stops(
                         rem: 16.0,
                         viewport_w: 0.0,
                         viewport_h: 0.0,
+                        // A9：渐变 stop 百分比解析不涉 cq/字体单位，
+                        // 以 base() 缺省补全新字段（cq 回落视口、度量近似）
+                        ..style_engine::css::value::ResolveCtx::base(16.0, 16.0, 0.0, 0.0)
                     },
                     0.0,
                 )
