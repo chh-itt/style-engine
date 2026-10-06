@@ -399,6 +399,10 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         }
         P::TransitionDelay => DeclValue::TransitionTime(TransitionTimeList(smallvec![0.0])),
         P::TransitionBehavior => DeclValue::TransitionBehavior(TransitionBehavior::Normal),
+        // P3（ADR-0034 D3）：vertical-align 初始 baseline（不继承）。
+        P::VerticalAlign => {
+            DeclValue::VerticalAlign(crate::css::property::VerticalAlignKind::Baseline)
+        }
         P::MinWidth | P::MinHeight => DeclValue::Len(LengthPercentage::Px(0.0)),
         P::AspectRatio => DeclValue::AspectRatio(None),
         // margin 初始值为 0（CSS）；显式 auto 仍解析为 LenAuto(None) → 居中语义保留
@@ -812,6 +816,14 @@ impl ComputedStyle {
         match self.get(PropertyId::BackdropFilter) {
             Some(DeclValue::Filters(f)) => f,
             _ => &[],
+        }
+    }
+
+    /// vertical-align 计算值（P3，ADR-0034 D3）。缺槽回退初始 Baseline。
+    pub fn vertical_align(&self) -> crate::css::property::VerticalAlignKind {
+        match self.get(PropertyId::VerticalAlign) {
+            Some(DeclValue::VerticalAlign(v)) => v.clone(),
+            _ => crate::css::property::VerticalAlignKind::Baseline,
         }
     }
 

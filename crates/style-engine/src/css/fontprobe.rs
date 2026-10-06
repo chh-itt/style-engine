@@ -21,6 +21,11 @@ pub(crate) struct RawMetrics {
     pub ex_per_em: f32,
     /// 表意字 U+6C34 advance（ic 基准；缺字=1.0）。
     pub ic_per_em: f32,
+    /// hhea ascender（P3，ADR-0034 D3：text-top/text-bottom strut 度量；
+    /// 恒正，abs 防御异号字体）。
+    pub ascent_per_em: f32,
+    /// hhea descender（恒正，abs 归一）。
+    pub descent_per_em: f32,
 }
 
 fn be16(d: &[u8], off: usize) -> Option<u16> {
@@ -67,6 +72,16 @@ pub(crate) fn probe_metrics(data: &[u8]) -> Option<ProbedFont> {
         return None;
     }
     let index_to_loc = be16(data, head + 50)?;
+    // P3（ADR-0034 D3）：hhea ascender/descender（int16 @4/@6）——每 em
+    // 归一恒正（text-top/text-bottom strut 度量）；缺失/异号 abs 防御。
+    let (ascent_per_em, descent_per_em) = match hhea {
+        Some(h) => {
+            let a = (be16(data, h + 4).unwrap_or(0) as i16 as f32 / upem).abs();
+            let d = (be16(data, h + 6).unwrap_or(0) as i16 as f32 / upem).abs();
+            (a.max(0.1), d.max(0.1))
+        }
+        None => (0.8, 0.2),
+    };
     // cmap：优先 (3,1) Windows/BMP，其次任意 format 4 子表
     let cmap = cmap?;
     let n_sub = be16(data, cmap + 2)? as usize;
@@ -212,6 +227,8 @@ pub(crate) fn probe_metrics(data: &[u8]) -> Option<ProbedFont> {
             ch_per_em,
             ex_per_em,
             ic_per_em,
+            ascent_per_em,
+            descent_per_em,
         },
     })
 }

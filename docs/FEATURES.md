@@ -270,10 +270,31 @@
   子式参与、盒自然尺寸=MaxContent 探针+子树叶 nowrap 测宽 max（taffy
   无文本内在尺寸）、行盒溢出续排（CSS 真行为）、容器 min_height=打包
   行高（auto 高塌陷防护）。诚实边界（0.x）：行高=max(测量高)、
-  vertical-align=TOP（baseline 延后）、组内子叶纵向堆叠（多叶组宽=
-  max）、跨叶 br 不支持、仅 Block 容器直子。锁定：tests/css_inline.rs
-  七件（叶+盒同行 advance 接排/双盒换行+容器高/叶续盒/折行推下行/
-  组盒参与/nowrap 溢出续排/无参与者块流回归）。
+  vertical-align=TOP（baseline 延后→**P3 已落地全值族**，见下条）、
+  组内子叶纵向堆叠（多叶组宽=max）、跨叶 br 不支持、仅 Block 容器
+  直子。锁定：tests/css_inline.rs 七件（叶+盒同行 advance 接排/双盒
+  换行+容器高/叶续盒/折行推下行/组盒参与/nowrap 溢出续排/无参与者
+  块流回归）。
+- vertical-align 基线对齐（P3，ADR-0034）：属性面新槽位
+  `vertical-align`（`VerticalAlignKind`：baseline|sub|super|text-top|
+  text-bottom|middle|top|bottom|`<length-percentage>`；不继承、初始
+  baseline；严格文法尾 token 拒绝）；测量层 `measure_with_baseline`
+  返回 (宽, 高, 首行基线=首行首 run `ascent.round()`，加法式——
+  measure/measure_rich/measure_min_content 签名不变）；行结算两阶段
+  （TOP 装箱收集 → flush_inline_line 统一结算：L=max(基线距)、逐
+  参与者 dy 回填 inset.top、行盒扩展、bottom 二遍）；Box 参与者基线
+  =子树首文本叶（`box_first_text_baseline`，无文本=盒高）；字体度量
+  扩展 hhea asc/desc（FontMetrics `ascent_per_em`/`descent_per_em`）。
+  偏差【B】：baseline（初始值）不产生偏移（v1 逐位一致保护，混字号
+  默认基线下沉后续）；sub/super=±0.34em 兜底常量（UA 决定值，Chromium
+  校准未做）；middle x-height=fontprobe ex_per_em（未注册 0.5em）；
+  calc() 承载偏移=0；% 基准=装箱行高；仅 settle_lines 行内参与者
+  消费（flex/grid baseline 对齐等上游；span 级不做）。锁定：
+  decl.rs::vertical_align_parse_family（12 正 4 拒）、
+  text.rs::measure_with_baseline_first_run_ascent、engine.rs 行为锁
+  六件（no_decl_bitwise_v1/length_offset/super_sub_shifts/
+  middle_between_super_and_baseline/box_baseline_from_text/
+  top_bottom_alignment）。
 - 结算 DAG 与文本效果五件（F2，ADR-0022）：①帧内结算链硬编码 →
   `SettlePassKind{Calc,Tables,Columns,Floats,Lines}` 显式依赖图+拓扑
   `schedule()`（debug_assert 环防护）+ `settle_should_run` 空输入门——
@@ -528,7 +549,7 @@
 - @font-face / 字体资源【已契约（第五批⑯）：@font-face 解析静默跳过且不产生报告警告（良性已知规则——告警留给影响渲染的事，`@import`/`@supports` 等其余未支持 at-rule 仍跳过+告警）；字体资源=宿主经 `add_font` 推送字节（零副作用，引擎不取 src() URL）；font-family 按字体内部家族名匹配（fontique 注册，generic 族 sans-serif/monospace 等不在无系统环境下回退——用例须显式命名族）；unicode-range/font-display/ascent-override 等描述符无引擎语义；golden 侧 dumper 经 data:-URL @font-face + document.fonts.ready、引擎侧 run_case 以同字节 add_font——双源同字形】
 - 文本叶尺寸语义【已契约+已落地（第五批⑥）】（第四批快照目验发现，旧语义=盒尺寸被文本实测覆写、显式 width/height 不生效——demo tilt 卡曾现形 90×24 即该缺陷）：契约=①声明 width/height 优先于文本测量（CSS 显式尺寸胜出）；②无声明时交 taffy auto——块流文本叶拉伸到容器内容宽（与浏览器匿名块盒一致），flex/grid 子项取内容宽（固有尺寸经 LeafMeasure/min-content 供给），min/max 宽仍由 taffy 夹紧；③absolute 无声明宽 = shrink-to-fit 夹紧 clamp(min_content, cb 内容宽, max_content)（CSS 10.3.7，第三 pass 保留——restyle 期落显式测量宽保 compute #1 可用）；④测量高兜底 height:auto=内容高、声明高优先；⑤折行约束（wrap_widths/max_advance=容器内容宽）与盒宽解耦——盒宽不再夹住折行。测试 text_leaf_block_stretch_and_declared_width（拉伸 220/声明 120/内容高非零）+ absolute_text_shrinks_to_fit 断言更新（host 声明宽保留后夹紧宽=300、measures=该约束下最宽行）。
 - 滚动容器【量程语义=已文档（第五批⑭；绝对定位后代并入为近似=C·豁免）】（ADR-0007）：overflow ∈ {auto（解析归一为 scroll）, scroll} 两轴独立识别；偏移归宿主（`set_scroll_offset`，引擎不夹紧——越界/回弹/阻尼语义=宿主按 `Frame.scrollable` 自行实现），量程经 `Frame.scrollable`（key → 各轴 (max_x, max_y)，px，每帧随布局重算）上报。量程定义=每轴 max(0, 内容并集在该轴超出 padding box 的幅度)：内容并集 = 滚动容器 padding box ∪ 全部流内后代 border box（按 relative 偏移后实际位置；文本叶按实测盒；三期⑥：带 transform 的后代（含祖先链复合仿射——各变换均以未变换视口系为基，复合序 `mul_affine(acc, own)` 与绘制流 cur∘M 嵌套一致，终结复用 ADR-0009 的 `resolve_transform_affine`）按变换后四角 AABB 并入、仅正向溢出（LTR 左/上越界不扩量程，Chromium 同语义；锁定测试 scroll_range_includes_transformed_child / scroll_range_nested_transform_composes / scroll_range_rotate_aabb_positive_side_only / scroll_range_transform_up_extends_nothing））；绝对定位后代以当前布局位置并入为近似（abspos 盒锚定最近 positioned 祖先而非滚动容器流，滚动后不重投影、量程不随之重算——精确 abspos 量程=C·豁免，宿主如需可自并集）；hidden/clip 仅裁剪、不上报量程；滚动条 overlay 式、宿主所有、不占布局空间；sticky 契约记录（后布局位移 pass）、实现停泊。绘制 PushClip → PushScroll{dx,dy} → PopScroll → PopClip，偏移变更不触发重排（量程计算锁定于 scrollable 上报测试 (0,190) 用例）。
-- 布局映射【display:inline=IFC 行内流已落地（F1 / ADR-0021，取代第五批⑧契约化决策）：inline→Display::Inline（连续性标记/组盒）、inline-block→Display::InlineBlock（原子盒）参与块容器行打包（settle_lines，见 T0 F1 条）；inline-flex→Flex、inline-grid→Grid、inline-table→Table 仍归一并发 tracing 告警（`style_engine::css` target）而非报告失败；inline 内容=文本叶承载（T5c 通路）；第五批⑧纵向堆叠语义由 F1 行盒并排取代（契约测试重写 display_inline_line_participation_f1）；calc 百分比扁平化=A·待办⑤（独立票）→**已消除（三期③「calc 15 槽位结算」实质消除）**；margin auto 居中、box-sizing、shrink-to-fit、grid 轨道消费、margin collapse=已落地——第五批⑦评估证实 taffy 0.14 block 算法内置纵向折叠（兄弟取 max/负 margin 求和/父子穿透 strut/浮动与 clearance 机械齐全），引擎用内建 `taffy::TaffyTree` 直接获得、零额外代码；flex/grid 上下文不折叠与 CSS 一致；已知偏差（三期②随 absolute-anchor-jump 用例记录）：末子 margin-bottom 与父 margin-bottom 塌陷时 taffy 把塌陷量落在父盒上方（父.y 增大）而非父底缘之外（违 CSS 2.1 §8.3.1），用例规避中、B 级在案（重估条件=taffy 上游修复或引擎侧塌陷后处理）；测试 margin_collapse_block_siblings 块流 30（max）/flex 50（相加）双向锁定】：display:inline 缺席（统一块化）；calc 含百分比：旧「百分比基按 0 扁平化」语义已消除（A·待办⑤ 由三期③「calc 15 槽位结算」实质消除——settle_calc 以父内容盒（size−border−padding）为基解析 calc 百分比回写，width/height/flex-basis/min/max-width/height/margin 四侧/padding 四侧/column-gap/row-gap 共 15 槽位全落地，见 T0 段 calc 结算条；旧「taffy 0.14 calc 类型擦除指针 + 宿主回调求值、接入需指针所有权约定与 unsafe 面」评估已被 2026-09 上游复评修正：taffy 0.14 公开 `resolve_calc_value`）；15 槽位外的 calc 百分比长尾仍走延迟结算管线；vw/vh 已按视口解析。box-sizing（Numeric Channel box-model 用例驱动接入）：CSS 默认 content-box，taffy `BoxSizing` 直通换算（border-box 显式路径有对照用例）；边框计入布局——border 映射进 taffy border rect（style none → 0，与 used-width 语义一致），此前「边框仅绘制不占位」属语义偏差、由通道首战修正。shrink-to-fit（T5d 第三 pass 已落地）：absolute 叶按包含块可用宽夹紧——width = clamp(min_content, avail, max_content)，cb = 最近 positioned/transformed 祖先（三期②锚定跳走对齐；无 → 视口宽；近似：可用宽未扣自身 margin/静态位置），夹紧对象为内容宽（先扣自身水平 padding 与有效 border，CSS 10.3.7 约束式）；文本 min-content = `break_all_lines(Some(0.0))` 的最宽不可断原子（restyle 期随自动测量产出 `min_measures`，max-content 即无界测量）；非文本叶经 `set_leaf_intrinsic(key, min_w, min_h, max_w, max_h)` 提供固有区间，definite 首选尺寸仍走 `set_leaf_measure`（两者尺寸语义 = content-box，与 CSS width 一致）；块级流 width:auto 拉伸语义不变。合成视口根：taffy 根之上另有 ICB 节点，树根自身 margin 得以生效；taffy `location` 为父相对坐标，collect 沿树累计祖先偏移输出视口绝对坐标；margin 初始值为 0（CSS），显式 auto 才触发定宽块级盒居中。
+- 布局映射【display:inline=IFC 行内流已落地（F1 / ADR-0021，取代第五批⑧契约化决策）：inline→Display::Inline（连续性标记/组盒）、inline-block→Display::InlineBlock（原子盒）参与块容器行打包（settle_lines，见 T0 F1 条；vertical-align 全值族已落地 P3/ADR-0034——TOP 硬编码退役、baseline 不偏移回归锁在案，见 T0 段 vertical-align 条）；inline-flex→Flex、inline-grid→Grid、inline-table→Table 仍归一并发 tracing 告警（`style_engine::css` target）而非报告失败；inline 内容=文本叶承载（T5c 通路）；第五批⑧纵向堆叠语义由 F1 行盒并排取代（契约测试重写 display_inline_line_participation_f1）；calc 百分比扁平化=A·待办⑤（独立票）→**已消除（三期③「calc 15 槽位结算」实质消除）**；margin auto 居中、box-sizing、shrink-to-fit、grid 轨道消费、margin collapse=已落地——第五批⑦评估证实 taffy 0.14 block 算法内置纵向折叠（兄弟取 max/负 margin 求和/父子穿透 strut/浮动与 clearance 机械齐全），引擎用内建 `taffy::TaffyTree` 直接获得、零额外代码；flex/grid 上下文不折叠与 CSS 一致；已知偏差（三期②随 absolute-anchor-jump 用例记录）：末子 margin-bottom 与父 margin-bottom 塌陷时 taffy 把塌陷量落在父盒上方（父.y 增大）而非父底缘之外（违 CSS 2.1 §8.3.1），用例规避中、B 级在案（重估条件=taffy 上游修复或引擎侧塌陷后处理）；测试 margin_collapse_block_siblings 块流 30（max）/flex 50（相加）双向锁定】：display:inline 缺席（统一块化）；calc 含百分比：旧「百分比基按 0 扁平化」语义已消除（A·待办⑤ 由三期③「calc 15 槽位结算」实质消除——settle_calc 以父内容盒（size−border−padding）为基解析 calc 百分比回写，width/height/flex-basis/min/max-width/height/margin 四侧/padding 四侧/column-gap/row-gap 共 15 槽位全落地，见 T0 段 calc 结算条；旧「taffy 0.14 calc 类型擦除指针 + 宿主回调求值、接入需指针所有权约定与 unsafe 面」评估已被 2026-09 上游复评修正：taffy 0.14 公开 `resolve_calc_value`）；15 槽位外的 calc 百分比长尾仍走延迟结算管线；vw/vh 已按视口解析。box-sizing（Numeric Channel box-model 用例驱动接入）：CSS 默认 content-box，taffy `BoxSizing` 直通换算（border-box 显式路径有对照用例）；边框计入布局——border 映射进 taffy border rect（style none → 0，与 used-width 语义一致），此前「边框仅绘制不占位」属语义偏差、由通道首战修正。shrink-to-fit（T5d 第三 pass 已落地）：absolute 叶按包含块可用宽夹紧——width = clamp(min_content, avail, max_content)，cb = 最近 positioned/transformed 祖先（三期②锚定跳走对齐；无 → 视口宽；近似：可用宽未扣自身 margin/静态位置），夹紧对象为内容宽（先扣自身水平 padding 与有效 border，CSS 10.3.7 约束式）；文本 min-content = `break_all_lines(Some(0.0))` 的最宽不可断原子（restyle 期随自动测量产出 `min_measures`，max-content 即无界测量）；非文本叶经 `set_leaf_intrinsic(key, min_w, min_h, max_w, max_h)` 提供固有区间，definite 首选尺寸仍走 `set_leaf_measure`（两者尺寸语义 = content-box，与 CSS width 一致）；块级流 width:auto 拉伸语义不变。合成视口根：taffy 根之上另有 ICB 节点，树根自身 margin 得以生效；taffy `location` 为父相对坐标，collect 沿树累计祖先偏移输出视口绝对坐标；margin 初始值为 0（CSS），显式 auto 才触发定宽块级盒居中。
 - 滚动：`PushScroll/PopScroll` 折叠为坐标平移；滚动语义归宿主（ADR-0005）。
 - Conformance（ADR-0003 双通道骨架已落地，`crates/style-engine-conformance`）：Numeric Channel——case（case.html +
 - CSS Nesting 顶层裸声明【已契约（B3；预存在偏差升格为文档化契约）】：样式表顶层 `color: red;` 形裸声明经 cssparser StyleSheetParser 毒化下一规则（prelude 捕获吞至下一 `{`，选择器解析失败整条丢失）——浏览器按 decl 跳过恢复；重估条件：顶层规则表改 RuleBodyParser 驱动（嵌套语境 parse_value 守卫已就位，迁移成本集中在 StyleSheetParser 语义复核）。

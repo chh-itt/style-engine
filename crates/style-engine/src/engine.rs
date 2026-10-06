@@ -283,6 +283,24 @@ struct ActiveTransition {
     easing: TimingFn,
 }
 
+/// F1（P3，ADR-0034 D2）：行内参与者 TOP 装箱暂存——settle_lines 收集、
+/// flush_inline_line 消费（vertical-align 统一结算偏移+行盒扩展）。
+#[cfg(feature = "text")]
+struct PendingLinePart {
+    tid: taffy::NodeId,
+    va: crate::css::property::VerticalAlignKind,
+    /// 参与者基线距（TOP 装箱内从盒顶到其基线；Box 无文本=盒高）。
+    pb: f32,
+    /// 参与者盒高（decl 覆盖后）。
+    h: f32,
+    /// TOP 装箱 inset.top 值（= 装箱行顶 − 容器 pad_top）。
+    top: f32,
+    /// 参与者字号 px（sub/super em 常量、middle x-height 换算）。
+    font_size: f32,
+    /// 参与者字体度量（middle x-height、text-top/bottom asc/desc）。
+    fm: crate::css::value::FontMetrics,
+}
+
 /// G1（ADR-0032）：不可过渡的描述符槽——animation-* 与 transition-*
 /// 描述符自身（文档未定义其动画性；transition 描述符自指无意义）。
 fn is_unanimatable_descriptor(pid: PropertyId) -> bool {
@@ -4237,6 +4255,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let mut y = content_top;
             let mut x = content_left;
             let mut line_h = 0.0f32;
+            // P3（ADR-0034 D2）：strut = 容器字体度量（text-top/bottom 的
+            // 对齐目标）；pending = 本行 TOP 装箱暂存，行结束 flush。
+            let (strut_fm, strut_size) = match self.styles.get(pid) {
+                Some(c) => (*c.font_metrics(), c.font_size_px()),
+                None => (Default::default(), 16.0),
+            };
+            let mut pending: Vec<PendingLinePart> = Vec::new();
             for part in parts {
                 match *part {
                     InlinePart::Leaf { id } => {
@@ -4269,18 +4294,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         } else {
                             None
                         };
-                        let (w, h) = match decl_w {
+                        let (w, h, pb) = match decl_w {
                             Some(dw) => {
-                                let m = self.text.measure_rich(
+                                let m = self.text.measure_with_baseline(
                                     &text,
                                     &cs,
                                     &span_refs,
                                     Some(dw),
                                     &self.map_env(),
                                 );
-                                (dw, m.1)
+                                (dw, m.1, m.2)
                             }
-                            None => self.text.measure_rich(
+                            None => self.text.measure_with_baseline(
                                 &text,
                                 &cs,
                                 &span_refs,
@@ -4309,6 +4334,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         let _ = self.taffy.set_style(tid, st);
                         self.inline_run_participants.insert(id);
                         changed = true;
+                        // P3：TOP 装箱信息入行暂存（flush 统一算偏移）。
+                        pending.push(PendingLinePart {
+                            tid,
+                            va: cs.vertical_align(),
+                            pb,
+                            h,
+                            top: y - pad_top,
+                            font_size: cs.font_size_px(),
+                            fm: *cs.font_metrics(),
+                        });
                         // 满行判定：折行发生（宽触及剩余）→ 占满本行，
                         // 后续参与者下行。
                         if avail.is_some() && w > 0.0 && w >= remaining - 0.5 {
@@ -4367,7 +4402,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         // 换行判定（行首盒不换；行已溢出（nowrap 叶等）→
                         // 后续盒继续同行——CSS 行盒溢出续排真行为）。
                         if x > content_left && x <= content_right && x + bw > content_right {
-                            y += line_h;
+                            // P3：行结束——先 flush 上一行（偏移回填+行盒
+                            // 扩展）再下行。
+                            let final_h =
+                                self.flush_inline_line(&mut pending, strut_fm, strut_size, line_h);
+                            y += final_h;
                             x = content_left;
                             line_h = 0.0;
                         }
@@ -4398,11 +4437,38 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         let _ = self.taffy.set_style(tid, st);
                         self.inline_run_participants.insert(id);
                         changed = true;
+                        // P3：Box 基线探针（子树首文本叶=探针 y+叶基线；
+                        // 无文本=底边）+ TOP 装箱信息入行暂存。
+                        let pb = self.box_first_text_baseline(id, bh);
+                        pending.push(PendingLinePart {
+                            tid,
+                            va: self
+                                .styles
+                                .get(&id)
+                                .map(|c| c.vertical_align())
+                                .unwrap_or(crate::css::property::VerticalAlignKind::Baseline),
+                            pb,
+                            h: bh,
+                            top: y - pad_top,
+                            font_size: self
+                                .styles
+                                .get(&id)
+                                .map(|c| c.font_size_px())
+                                .unwrap_or(16.0),
+                            fm: self
+                                .styles
+                                .get(&id)
+                                .map(|c| *c.font_metrics())
+                                .unwrap_or_default(),
+                        });
                         x += bw;
                         line_h = line_h.max(bh);
                     }
                 }
             }
+            // P3：run 尾 flush 残余行（偏移回填+行盒扩展，容器高度
+            // 保持段按扩展后行高计）。
+            line_h = self.flush_inline_line(&mut pending, strut_fm, strut_size, line_h);
             // 容器高度保持：行内内容出流（Absolute）会使 auto 高容器塌陷
             //（spec：行内内容贡献行盒高；浮盒本就不贡献父高故 floats 无此
             // 步）。min_height=打包行底（内容盒高）；taffy 取 max(auto 内容
@@ -4436,6 +4502,126 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 },
             );
         }
+    }
+
+    /// Box 参与者基线探针（P3，ADR-0034 D2）：子树**首个文本叶**的
+    /// 探针布局 y 偏移 + 其首行基线；无文本叶 = 盒底边（v1 近似）。
+    /// 前置：对 tid 已跑 MaxContent 探针布局（location 树就绪）。
+    /// location.y 沿路径累加（taffy 子节点 location 相对父 content box；
+    /// border/padding 差异近似=B 级在案 ADR-0034）。
+    #[cfg(feature = "text")]
+    fn box_first_text_baseline(&mut self, root: NodeId, fallback: f32) -> f32 {
+        let mut stack: Vec<(NodeId, f32)> = vec![(root, 0.0)];
+        while let Some((nid, dy)) = stack.pop() {
+            let has_text = self
+                .tree
+                .node(nid)
+                .text
+                .as_deref()
+                .is_some_and(|t| !t.is_empty());
+            if has_text {
+                if let Some(cs) = self.styles.get(&nid).cloned() {
+                    let owned = self.span_styles.get(&nid).cloned().unwrap_or_default();
+                    let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                        owned.iter().map(|(a, b, sc)| (*a, *b, sc)).collect();
+                    let env = self.map_env();
+                    let (_, _, pb) = self.text.measure_with_baseline(
+                        self.tree.node(nid).text.as_deref().unwrap_or(""),
+                        &cs,
+                        &span_refs,
+                        None,
+                        &env,
+                    );
+                    return dy + pb;
+                }
+                return dy + fallback;
+            }
+            if let Some(&tid) = self.taffy_node.get(&nid) {
+                let child_y = match self.taffy.layout(tid) {
+                    Ok(l) => l.location.y,
+                    Err(_) => 0.0,
+                };
+                for g in self.tree.children(nid).iter().rev() {
+                    stack.push((*g, dy + child_y));
+                }
+            }
+        }
+        fallback
+    }
+
+    /// 行两阶段结算 flush（P3，ADR-0034 D2）：TOP 装箱收集完成后按
+    /// vertical-align 统一结算纵向偏移——行基线 L = max(基线距)；非
+    /// bottom 值先算 dy 并回填 inset.top（dy 相对装箱行顶）；行盒底 =
+    /// max(原行高, max(dy+h)) 扩展（descender 下沉扩展语义）；bottom
+    /// 值对齐扩展后行底（二遍）。返回最终行高（≥ 入参 line_h）。
+    /// 偏差（ADR-0034 在案）：va=baseline 不产生偏移（v1 TOP 装箱逐位
+    /// 一致——混字号默认基线下沉属 B 级后续）；calc() 承载偏移按 0。
+    #[cfg(feature = "text")]
+    fn flush_inline_line(
+        &mut self,
+        pending: &mut Vec<PendingLinePart>,
+        strut_fm: crate::css::value::FontMetrics,
+        strut_size: f32,
+        line_h: f32,
+    ) -> f32 {
+        use crate::css::property::VerticalAlignKind as Va;
+        use crate::css::value::LengthPercentage as Lp;
+        if pending.is_empty() {
+            return line_h;
+        }
+        let baseline = pending.iter().map(|p| p.pb).fold(0.0f32, f32::max);
+        let strut_asc = strut_fm.ascent_per_em * strut_size;
+        let strut_desc = strut_fm.descent_per_em * strut_size;
+        let mut max_bottom = 0.0f32;
+        let mut bottom_parts: Vec<(usize, f32)> = Vec::new();
+        for (i, p) in pending.iter().enumerate() {
+            let dy = match &p.va {
+                Va::Baseline | Va::Top => 0.0,
+                Va::Bottom => {
+                    bottom_parts.push((i, p.h));
+                    0.0
+                }
+                Va::Sub => baseline + 0.34 * p.font_size - p.pb,
+                Va::Super => baseline - 0.34 * p.font_size - p.pb,
+                Va::Length(lp) => {
+                    // % 基准 = 装箱行高；px 直接；em/rem/视口/容器按节点
+                    // 与全局基准换算；calc() = 0（B 级在案）。
+                    let va_px = match lp {
+                        Lp::Px(v) => *v,
+                        Lp::Em(v) => *v * p.font_size,
+                        Lp::Rem(v) => *v * self.rem_base(),
+                        Lp::Percent(v) => *v * line_h,
+                        Lp::Vw(v) => *v * self.map_env().viewport_w,
+                        Lp::Vh(v) => *v * self.map_env().viewport_h,
+                        _ => 0.0,
+                    };
+                    baseline - va_px - p.pb
+                }
+                Va::Middle => baseline - 0.5 * p.fm.ex_per_em * p.font_size - 0.5 * p.h,
+                Va::TextTop => baseline - strut_asc - p.pb + p.fm.ascent_per_em * p.font_size,
+                Va::TextBottom => baseline + strut_desc - p.pb - p.fm.descent_per_em * p.font_size,
+            };
+            max_bottom = max_bottom.max(dy + p.h);
+            if dy != 0.0
+                && let Ok(mut st) = self.taffy.style(p.tid).cloned()
+            {
+                st.inset.top = taffy::style_helpers::length(p.top + dy);
+                let _ = self.taffy.set_style(p.tid, st);
+            }
+        }
+        let final_h = line_h.max(max_bottom);
+        for &(i, h) in &bottom_parts {
+            let p = &pending[i];
+            let dy = final_h - h;
+            if dy != 0.0
+                && let Ok(mut st) = self.taffy.style(p.tid).cloned()
+            {
+                st.inset.top = taffy::style_helpers::length(p.top + dy);
+                let _ = self.taffy.set_style(p.tid, st);
+            }
+        }
+        pending.clear();
+        final_h
     }
 
     /// E4（ADR-0019）：浮动结算——出流/堆叠/环绕/clear 钳位（CSS 2 §9.5）。
@@ -4990,6 +5176,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     ch_per_em: p.metrics.ch_per_em,
                     ex_per_em: p.metrics.ex_per_em,
                     ic_per_em: p.metrics.ic_per_em,
+                    ascent_per_em: p.metrics.ascent_per_em,
+                    descent_per_em: p.metrics.descent_per_em,
                 },
             ));
         }
@@ -8546,6 +8734,252 @@ mod tests {
         assert_eq!(b.y, 0.0, "F1：同行并排（取代第五批⑧块化堆叠契约）");
         assert!((b.x - a.width).abs() < 0.5, "b.x=a 宽（接排）");
         assert!(a.width > 0.0 && b.width > 0.0);
+    }
+
+    #[test]
+    fn vertical_align_no_decl_bitwise_v1() {
+        // P3（ADR-0034 D2 回归锁）：无 vertical-align 声明与显式 baseline
+        // 的行结算输出逐位一致（baseline 不产生偏移——v1 TOP 装箱保护）。
+        let node = |classes: &str, text: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
+        let run = |sheet_css: &str| {
+            let mut engine: StyleEngine<Key> = StyleEngine::new();
+            engine.add_font(TEST_FONT.to_vec());
+            assert!(engine.set_stylesheet(sheet_css).is_clean());
+            assert!(engine.insert(None, Key(1), node("p", "")).is_ok());
+            assert!(
+                engine
+                    .insert(Some(Key(1)), Key(2), node("a", "aaa"))
+                    .is_ok()
+            );
+            assert!(
+                engine
+                    .insert(Some(Key(1)), Key(3), node("b", "bbb"))
+                    .is_ok()
+            );
+            engine.frame((800.0, 600.0), 1.0, 0.0)
+        };
+        let f1 = run(
+            "div.p { width: 300px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; } div.b { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; }",
+        );
+        let f2 = run(
+            "div.p { width: 300px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; vertical-align: baseline; } div.b { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; vertical-align: baseline; }",
+        );
+        for k in [Key(1), Key(2), Key(3)] {
+            let r1 = f1.find(k).unwrap();
+            let r2 = f2.find(k).unwrap();
+            assert_eq!(r1.x, r2.x, "k={k:?} x 逐位一致");
+            assert_eq!(r1.y, r2.y, "k={k:?} y 逐位一致");
+            assert_eq!(r1.width, r2.width);
+            assert_eq!(r1.height, r2.height);
+        }
+    }
+
+    #[test]
+    fn vertical_align_length_offset() {
+        // P3（ADR-0034 D2）：va:<length> 上浮负偏移——b（40px 无文本盒，
+        // va:10px）dy = L−10−pb = 40−10−40 = −10 → b.y=−10；a（baseline）
+        // 不动。行基线 L=max(pb)=40（b 无文本=盒高）。
+        let node = |classes: &str, text: Option<&str>| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            text: text.map(|t| t.to_string()),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 300px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; } div.b { display: inline-block; height: 40px; vertical-align: 10px; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p", Some(""))).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("a", Some("aaa")))
+                .is_ok()
+        );
+        assert!(engine.insert(Some(Key(1)), Key(3), node("b", None)).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame.find(Key(2)).unwrap();
+        let b = frame.find(Key(3)).unwrap();
+        assert_eq!(a.y, 0.0, "baseline 叶不动");
+        assert!(
+            (b.y - (-10.0)).abs() < 0.5,
+            "va:10px 盒 dy=L−10−pb=−10（b.y={}）",
+            b.y
+        );
+    }
+
+    #[test]
+    fn vertical_align_super_sub_shifts() {
+        // P3（ADR-0034 D2）：sub/super=±0.34em 常量（0.34×16=5.44px）。
+        // 三 inline 叶同行：b(super) 上浮 −5.44、c(sub) 下沉 +5.44；
+        // 行盒扩展 final_h = max(19, 5.44+19) = 24.44。
+        let node = |classes: &str, text: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 400px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; } div.b { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; vertical-align: super; } div.c { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; vertical-align: sub; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p", "")).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("a", "aaa"))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(3), node("b", "bbb"))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(4), node("c", "ccc"))
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame.find(Key(2)).unwrap();
+        let b = frame.find(Key(3)).unwrap();
+        let c = frame.find(Key(4)).unwrap();
+        assert_eq!(a.y, 0.0, "baseline 叶不动");
+        assert!(
+            (b.y - (-5.44)).abs() < 0.6,
+            "super 上浮 5.44px（b.y={}）",
+            b.y
+        );
+        assert!((c.y - 5.44).abs() < 0.6, "sub 下沉 5.44px（c.y={}）", c.y);
+        // 容器高度保持段按扩展后行高（> 单行 19）
+        let p = frame.find(Key(1)).unwrap();
+        assert!(p.height >= 24.0, "行盒扩展进容器高（p.h={}）", p.height);
+    }
+
+    #[test]
+    fn vertical_align_middle_between_super_and_baseline() {
+        // P3（ADR-0034 D2）：middle = x-height/2 对齐——介于 super 与
+        // baseline 之间（dy_super = −5.44 < dy_middle = −0.5·xh·fs − h/2
+        // + L − pb … 方向性锁定）。
+        let node = |classes: &str, text: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 400px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; } div.b { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; vertical-align: super; } div.c { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; vertical-align: middle; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p", "")).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("a", "aaa"))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(3), node("b", "bbb"))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(4), node("c", "ccc"))
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame.find(Key(2)).unwrap();
+        let b = frame.find(Key(3)).unwrap();
+        let c = frame.find(Key(4)).unwrap();
+        assert!(b.y < a.y, "super 高于 baseline（{} < {}）", b.y, a.y);
+        assert!(b.y < c.y, "super 高于 middle（{} < {}）", b.y, c.y);
+    }
+
+    #[test]
+    fn vertical_align_box_baseline_from_text() {
+        // P3（ADR-0034 D2）：Box 参与者基线=子树首文本叶基线（非盒高）。
+        // b（inline-block h:60 有文本 16px）：pb≈15=L → a/b 同 y=0。
+        // 若误用盒高（pb=60）则 L=60、a.y=45——本断言区分两种实现。
+        let node = |classes: &str, text: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 300px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; } div.b { display: inline-block; height: 60px; font-family: \"DejaVu Sans\"; font-size: 16px; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p", "")).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("a", "aaa"))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(3), node("b", "bbb"))
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame.find(Key(2)).unwrap();
+        let b = frame.find(Key(3)).unwrap();
+        assert_eq!(a.y, 0.0, "a 基线=L（盒基线取文本）");
+        assert_eq!(b.y, 0.0, "b 基线=子文本基线（非盒高）");
+    }
+
+    #[test]
+    fn vertical_align_top_bottom_alignment() {
+        // P3（ADR-0034 D2）：top=行顶（TOP 装箱即位 dy=0）；bottom=行底
+        //（扩展后二遍 dy=final_h−h）。b(h60,top)、c(h40,bottom)、
+        // a(baseline 叶)：final_h=max(19,60,40)=60 → c.y=20。
+        let node = |classes: &str, text: Option<&str>| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            text: text.map(|t| t.to_string()),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 300px; } div.a { display: inline; font-family: \"DejaVu Sans\"; font-size: 16px; } div.b { display: inline-block; height: 60px; vertical-align: top; } div.c { display: inline-block; height: 40px; vertical-align: bottom; }"
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p", Some(""))).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(1)), Key(2), node("a", Some("aaa")))
+                .is_ok()
+        );
+        assert!(engine.insert(Some(Key(1)), Key(3), node("b", None)).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(4), node("c", None)).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame.find(Key(2)).unwrap();
+        let b = frame.find(Key(3)).unwrap();
+        let c = frame.find(Key(4)).unwrap();
+        assert_eq!(a.y, 0.0);
+        assert_eq!(b.y, 0.0, "top=行顶（装箱即位）");
+        assert!(
+            (c.y - 20.0).abs() < 0.5,
+            "bottom=行底 60−40=20（c.y={}）",
+            c.y
+        );
     }
 
     #[test]

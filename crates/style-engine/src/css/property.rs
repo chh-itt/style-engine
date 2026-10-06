@@ -401,6 +401,8 @@ pub enum PropertyId {
     TransitionDelay,
     /// transition-behavior — 离散属性过渡策略（G1，ADR-0032）。
     TransitionBehavior,
+    /// vertical-align — 行内参与者纵向对齐（P3，ADR-0034 D3）。
+    VerticalAlign,
 }
 
 impl PropertyId {
@@ -581,18 +583,23 @@ impl PropertyId {
         Self::TransitionTimingFunction,
         Self::TransitionDelay,
         Self::TransitionBehavior,
+        // P3（ADR-0034）：vertical-align（ALL 尾追加；动画描述符槽整体
+        // 后移 ×1 至 170..177，slot_alignment 不变量=ALL 序连续）
+        Self::VerticalAlign,
     ];
 
-    /// 槽位存储总槽位数：ALL 全部 169 位（0..139 原序、F2 文本 7 位、
+    /// 槽位存储总槽位数：ALL 全部 170 位（0..139 原序、F2 文本 7 位、
     /// F3b 背景 6 位、F3d 边框图 5 位、F3d 字体 5 位、F4 两属性、G1
-    /// transition 五长手，slot() 显式编号）加 7 个动画描述符位（非 ALL）。
-    pub const SLOT_COUNT: usize = 176;
+    /// transition 五长手、P3 vertical-align，slot() 显式编号）加 7 个
+    /// 动画描述符位（非 ALL）。
+    pub const SLOT_COUNT: usize = 177;
 
     /// 槽位存储下标（ComputedStyle 的 `Vec<Option<DeclValue>>` 用）。
     /// 0..139 = ALL 原序；139..146 = F2 文本追加（ALL 尾部成员）；
     /// 146..152 = F3b 背景追加；152..164 = F3d 边框图+字体追加+F4 两
     /// 属性；164..169 = G1 transition 五长手（ALL 尾部成员）；
-    /// 169..176 = 动画描述符（不在 ALL）。
+    /// 169 = P3 vertical-align（ALL 尾部成员）；170..177 = 动画描述符
+    /// （不在 ALL）。
     /// clip-path 沿用原 ALL 位 71（第四批④ 占位，F3c 原位升级，ADR-0025）。
     /// `slot_alignment` 测试锁定本表
     /// 与 ALL 的一致性——新增变体时必须同步扩展本 match 与 SLOT_COUNT。
@@ -780,15 +787,17 @@ impl PropertyId {
             Self::TransitionTimingFunction => 166,
             Self::TransitionDelay => 167,
             Self::TransitionBehavior => 168,
-            // 动画描述符（非 ALL 成员；声明/采样时落槽；G1 追加后整体
-            // 后移 ×5）
-            Self::AnimationName => 169,
-            Self::AnimationDuration => 170,
-            Self::AnimationDelay => 171,
-            Self::AnimationIterationCount => 172,
-            Self::AnimationTimingFunction => 173,
-            Self::AnimationDirection => 174,
-            Self::AnimationFillMode => 175,
+            // P3（ADR-0034）：vertical-align（ALL 尾位；描述符让位 ×1）
+            Self::VerticalAlign => 169,
+            // 动画描述符（非 ALL 成员；声明/采样时落槽；P3 追加后整体
+            // 后移 ×1）
+            Self::AnimationName => 170,
+            Self::AnimationDuration => 171,
+            Self::AnimationDelay => 172,
+            Self::AnimationIterationCount => 173,
+            Self::AnimationTimingFunction => 174,
+            Self::AnimationDirection => 175,
+            Self::AnimationFillMode => 176,
             Self::Hyphens => 162,
             Self::BackdropFilter => 163,
         }
@@ -823,6 +832,7 @@ impl PropertyId {
             Self::TransitionProperty => "transition-property",
             Self::TransitionDuration => "transition-duration",
             Self::TransitionTimingFunction => "transition-timing-function",
+            Self::VerticalAlign => "vertical-align",
             Self::TransitionDelay => "transition-delay",
             Self::TransitionBehavior => "transition-behavior",
             Self::Width => "width",
@@ -1458,6 +1468,8 @@ pub enum DeclValue {
     TransitionTiming(TransitionTimingList),
     /// transition-behavior — 离散属性过渡策略（单值，非列表）。
     TransitionBehavior(TransitionBehavior),
+    /// vertical-align（P3，ADR-0034 D3）：行内参与者纵向对齐值族。
+    VerticalAlign(VerticalAlignKind),
     /// filter / backdrop-filter（P2 批，ADR-0031 D1）：有序 filter 函数
     /// 链（`Filters(vec![])` = none，有效声明显式无滤镜）。旧 Effect(bool)
     /// 存在性语义退役（will-change/isolation 仍用 Effect）。
@@ -5580,6 +5592,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::TransitionDelay => parse_transition_time(p, true),
         P::TransitionTimingFunction => parse_transition_timing(p),
         P::TransitionBehavior => parse_transition_behavior(p),
+        P::VerticalAlign => parse_vertical_align(p),
         P::Hyphens => parse_hyphens(p),
         P::BackdropFilter => parse_filter_value_list(p),
         P::TextOverflow => parse_text_overflow(p),
@@ -5850,6 +5863,58 @@ pub enum TransitionBehavior {
     Normal,
     /// allow-discrete — 离散属性也产生过渡，采样按离散规则在 50% 翻转。
     AllowDiscrete,
+}
+
+/// vertical-align（P3，ADR-0034 D3，css2 §10.8.1）：行内参与者相对行
+/// 基线的纵向对齐值族。不继承；初始 baseline。percentage 基准 = 行高
+/// （settle_lines 装箱值）；sub/super 偏移常量取 0.34em（Chromium 量级
+/// 校准，规范不固定 UA 值——B 级在案）。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum VerticalAlignKind {
+    /// baseline（初始）——参与者基线对齐行基线（v1 TOP 装箱即此语义，
+    /// 不产生额外偏移）。
+    Baseline,
+    /// sub — 基线下沉 0.34em。
+    Sub,
+    /// super — 基线上浮 0.34em。
+    Super,
+    /// text-top — 参与者字体 ascent 顶对齐 strut（容器字体）ascent 顶。
+    TextTop,
+    /// text-bottom — 参与者字体 descent 底对齐 strut descent 底。
+    TextBottom,
+    /// middle — 参与者盒中点对齐 基线 − x-height/2（x-height 来自
+    /// fontprobe ex 度量，未注册回退 0.5em）。
+    Middle,
+    /// top — 参与者行盒顶对齐行顶（TOP 装箱原生，偏移 0）。
+    Top,
+    /// bottom — 参与者行盒底对齐行底（行盒扩展后）。
+    Bottom,
+    /// `<length-percentage>` — 显式偏移，正 = 上浮；percentage 基准行高。
+    Length(LengthPercentage),
+}
+
+/// vertical-align（P3，ADR-0034 D3）：关键字全族 | <length-percentage>。
+pub fn parse_vertical_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    // 关键字先行
+    if let Ok(v) = p.try_parse(|p| {
+        keyword(p, |k| match k.to_ascii_lowercase().as_str() {
+            "baseline" => Some(DeclValue::VerticalAlign(VerticalAlignKind::Baseline)),
+            "sub" => Some(DeclValue::VerticalAlign(VerticalAlignKind::Sub)),
+            "super" => Some(DeclValue::VerticalAlign(VerticalAlignKind::Super)),
+            "text-top" => Some(DeclValue::VerticalAlign(VerticalAlignKind::TextTop)),
+            "text-bottom" => Some(DeclValue::VerticalAlign(VerticalAlignKind::TextBottom)),
+            "middle" => Some(DeclValue::VerticalAlign(VerticalAlignKind::Middle)),
+            "top" => Some(DeclValue::VerticalAlign(VerticalAlignKind::Top)),
+            "bottom" => Some(DeclValue::VerticalAlign(VerticalAlignKind::Bottom)),
+            _ => None,
+        })
+    }) {
+        return Ok(v);
+    }
+    // <length-percentage>（% 基准=行高，settle_lines 结算期换算）
+    let lp = crate::css::value::parse_length_percentage(p)?;
+    Ok(DeclValue::VerticalAlign(VerticalAlignKind::Length(lp)))
 }
 
 fn parse_animation_name(p: &mut Parser<'_>) -> ValResult<DeclValue> {

@@ -66,6 +66,11 @@ pub struct FontMetrics {
     pub ex_per_em: f32,
     /// 表意字 U+6C34 advance（ic 基准；缺字=1.0）。
     pub ic_per_em: f32,
+    /// hhea ascender（P3，ADR-0034 D3：vertical-align text-top/bottom 与
+    /// middle 的 strut 度量；未注册回退 0.8em）。
+    pub ascent_per_em: f32,
+    /// hhea descender（恒正；未注册回退 0.2em）。
+    pub descent_per_em: f32,
 }
 
 impl Default for FontMetrics {
@@ -74,6 +79,8 @@ impl Default for FontMetrics {
             ch_per_em: 0.5,
             ex_per_em: 0.5,
             ic_per_em: 1.0,
+            ascent_per_em: 0.8,
+            descent_per_em: 0.2,
         }
     }
 }

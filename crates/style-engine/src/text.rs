@@ -90,6 +90,24 @@ impl TextSystem {
         if text.is_empty() {
             return (0.0, 0.0);
         }
+        let (w, h, _) = self.measure_two_pass(text, style, spans, max_advance, env);
+        (w, h)
+    }
+
+    /// 富文本测量 + 首行基线（P3，ADR-0034 D1）：返回 (宽, 高, 基线距)。
+    /// 基线 = 首行首 run ascent（px，整数化，同㉔ Chromium 对齐惯例）；
+    /// settle_lines 行内基线对齐（vertical-align）消费。无 run = 0。
+    pub fn measure_with_baseline(
+        &mut self,
+        text: &str,
+        style: &ComputedStyle,
+        spans: &[(u32, u32, &ComputedStyle)],
+        max_advance: Option<f32>,
+        env: &MediaEnv,
+    ) -> (f32, f32, f32) {
+        if text.is_empty() {
+            return (0.0, 0.0, 0.0);
+        }
         self.measure_two_pass(text, style, spans, max_advance, env)
     }
 
@@ -106,7 +124,8 @@ impl TextSystem {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        self.measure_two_pass(text, style, spans, Some(0.0), env)
+        let (w, h, _) = self.measure_two_pass(text, style, spans, Some(0.0), env);
+        (w, h)
     }
 
     /// 公共测量路径（第五批㉔）：normal 行高度量 Chromium 对齐。
@@ -121,7 +140,7 @@ impl TextSystem {
         spans: &[(u32, u32, &ComputedStyle)],
         max_advance: Option<f32>,
         env: &MediaEnv,
-    ) -> (f32, f32) {
+    ) -> (f32, f32, f32) {
         // C2（ADR-0016）：text-transform 分段变换——span 边界切段、逐字符
         // old→new 字节映射、span 偏移重写；全表 none → 零成本直通。
         let tt: Option<(crate::text_transform::TransformedText, Vec<SpanStyle<'_>>)> =
@@ -213,7 +232,8 @@ impl TextSystem {
         };
         let mut layout = self.build_layout(text, style, spans, forced_lh, env, caps_scaled);
         layout.break_all_lines(max_advance);
-        (layout.width(), layout.height())
+        let baseline = first_run_baseline(&layout);
+        (layout.width(), layout.height(), baseline)
     }
 
     /// 公共排版构造：按基样式 + span 覆盖样式建立 ranged layout（不断行）。
@@ -363,6 +383,18 @@ fn chromium_normal_lh(layout: &parley::Layout<MeasureBrush>) -> Option<f32> {
     Some((m.ascent.round() + m.descent.round()).max(1.0))
 }
 
+/// 首行首 run 基线（P3，ADR-0034 D1）：ascent 整数化（同㉔ Chromium 对齐
+/// 惯例，px）。无行/无 run（空白布局）= 0。vertical-align 基线对齐的
+/// 测量层承载数据。
+fn first_run_baseline(layout: &parley::Layout<MeasureBrush>) -> f32 {
+    layout
+        .lines()
+        .next()
+        .and_then(|line| line.runs().next())
+        .map(|run| run.metrics().ascent.round())
+        .unwrap_or(0.0)
+}
+
 /// 家族名归一：Named 原样、泛族名映射到 CSS 通用族关键字。
 fn family_cow(style: &ComputedStyle) -> Cow<'static, str> {
     match style.font_family().0.iter().next() {
@@ -505,6 +537,47 @@ mod tests {
         assert!(
             (w_sc - w_128).abs() > 0.5,
             "small-caps 区别于全缩放（{w_sc} vs {w_128}）"
+        );
+    }
+
+    #[test]
+    fn measure_with_baseline_first_run_ascent() {
+        // P3（ADR-0034 D1）：measure_with_baseline 第三元=首行首 run 基线
+        //（round(ascent)）。锁定：空文本 (0,0,0)；非空 0 < b < 行高；
+        // 基线随字号线性（16px→32px 比值≈2）；旧 measure/measure_rich
+        // 签名不变（加法式）。
+        let mut ts = TextSystem::new();
+        ts.add_font(include_bytes!("../../style-engine-demo/assets/fonts/DejaVuSans.ttf").to_vec());
+        let mk = |css: &str| {
+            let sheet = crate::css::stylesheet::parse_stylesheet(css);
+            let mut tree = crate::tree::StyleTree::new();
+            let id = tree.insert_child(
+                tree.root(),
+                crate::tree::StyleNode {
+                    name: Some("div".into()),
+                    text: Some(String::new()),
+                    ..Default::default()
+                },
+            );
+            crate::computed::compute_node(&tree, id, &sheet, &MediaEnv::default(), None)
+        };
+        let style16 = mk("div { font-family: \"DejaVu Sans\"; font-size: 16px; }");
+        let style32 = mk("div { font-family: \"DejaVu Sans\"; font-size: 32px; }");
+        let env = MediaEnv::default();
+        // 空文本 = (0,0,0)
+        assert_eq!(
+            ts.measure_with_baseline("", &style16, &[], None, &env),
+            (0.0, 0.0, 0.0)
+        );
+        // 非空：0 < 基线 < 行高（基线在首行行盒内）
+        let (w, h, b) = ts.measure_with_baseline("abc", &style16, &[], None, &env);
+        assert!(w > 0.0 && h > 0.0, "测量非零");
+        assert!(b > 0.0 && b < h, "基线在行盒内（b={b} h={h}）");
+        // 字号线性：32px 基线 ≈ 2× 16px 基线
+        let (_, _, b32) = ts.measure_with_baseline("abc", &style32, &[], None, &env);
+        assert!(
+            (b32 - 2.0 * b).abs() < 1.0,
+            "基线随字号线性（b16={b} b32={b32}）"
         );
     }
 }

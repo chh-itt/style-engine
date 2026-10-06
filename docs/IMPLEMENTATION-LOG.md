@@ -1752,3 +1752,19 @@ opacity(filter(子树))、D5 纯 opacity 链直映超集）。
   登记：ADR-0031（落地记录+修订写回）、CHANGELOG P2 条、FEATURES.md
   （T0 段新建 filter 本体条/F4 条追注/偏差核对条改写/T1 text-align 条
   追注）、本段。
+
+## P3 批 — vertical-align 基线对齐 / IFC v2（ADR-0034，goal-c293e543）
+
+**范围**：F1（ADR-0021）行模型 TOP 硬编码升级为 vertical-align 全值族。P2（filter 本体化，commit b8a3fe0）之后实施。
+
+**解析层**（css/property.rs）：PropertyId::VerticalAlign（槽位 169，ALL 尾追加，动画描述符后移 170..177，SLOT_COUNT=177）；VerticalAlignKind（non_exhaustive：Baseline/Sub/Super/TextTop/TextBottom/Middle/Top/Bottom/Length(LengthPercentage)）；parse_vertical_align（八关键字 → 否则 parse_length_percentage）；P::VerticalAlign 解析分支。不继承（computed.rs inherits 白名单不加）；初始 Baseline；ComputedStyle::vertical_align() getter（缺槽回退 Baseline）。
+
+**测量层**（text.rs，D1）：measure_two_pass 三元组化 (w, h, baseline)；first_run_baseline = 首行首 run metrics().ascent.round()（无 run=0）；公共 measure_with_baseline（空文本 (0,0,0)）；measure/measure_rich/measure_min_content 签名不变（加法式）。
+
+**字体度量**（css/fontprobe.rs + css/value.rs + engine.rs add_font）：RawMetrics/FontMetrics 加 ascent_per_em/descent_per_em（hhea int16 @4/@6，abs 归一恒正，缺失回退 0.8/0.2）——text-top/text-bottom strut 与 middle 换算消费面。教训：be16 已做 from_be_bytes 勿双重转换；Px 臂模式匹配引用载荷需显式解引。
+
+**行结算两阶段**（engine.rs settle_lines，D2）：TOP 装箱收集改入 PendingLinePart（模块级 struct：tid/va/pb/h/top/font_size/fm）；行结束 flush_inline_line——L=max(pb)、逐参与者 vertical-align 求 dy 回填 inset.top += dy、行盒扩展 final_h=max(装箱行高, max(dy+h))、bottom 二遍 dy=final_h−h；flush 挂点两处（Box 换行判定处 + run 循环尾——首次插错缩进落在 parts 循环内每参与者 flush，已修正）；Box 基线探针 box_first_text_baseline（DFS 子树首文本叶，taffy location.y 沿路径累加，无文本=盒高 fallback）。偏移语义：Length（Px 直取/Em×字号/Rem×rem_base/Percent×装箱行高/Vw/Vh 视口）、Sub/Super=±0.34×字号、Middle=L−0.5·ex_per_em·fs−0.5·h、TextTop/TextBottom=strut asc/desc 对齐、Top=0（装箱即行顶）、Baseline=0（**v1 逐位一致回归锁**——baseline 亦对齐 L 会平移全体参与者破坏 F1 契约，混字号默认下沉 B 级在案）；calc() 承载偏移=0（B 级）。
+
+**测试（+8，全量 559 绿）**：decl.rs::vertical_align_parse_family（全值族 12 例含 % 存小数/负值/em + 拒绝 4 例）；text.rs::measure_with_baseline_first_run_ascent（空 (0,0,0)/0<b<h/32px≈2×16px 线性）；engine.rs 行为锁六件——vertical_align_no_decl_bitwise_v1（无声明 vs 显式 baseline 三节点几何逐位一致）、length_offset（va:10px 40px 无文本盒 dy=−10 精确）、super_sub_shifts（±5.44px + 行盒扩展 24.44 进容器高）、middle_between_super_and_baseline（方向序）、box_baseline_from_text（盒基线=子文本基线 pb≈15 而非盒高 60——若误用盒高则 L=60、a.y=45 区分）、top_bottom_alignment（top 装箱即位/bottom 二遍 60−40=20）。教训：测试样式表 div { display: inline; } 通配把容器 p 也 inline 化 → 行运行收集失效、块流堆叠假象——inline 声明须逐类限定。
+
+**收口**：clippy lib 清零（map(|s| s.clone()) → .cloned() 两处）；rustfmt 仅本批 7 文件（css/property.rs、css/value.rs、css/decl.rs、css/fontprobe.rs、computed.rs、text.rs、engine.rs）；ADR-0034 落地记录+六条实施偏差写回；CHANGELOG P3 条；FEATURES F1 条追注+新条 vertical-align 基线对齐+布局映射偏差核对条头补注。

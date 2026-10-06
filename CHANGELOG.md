@@ -754,6 +754,28 @@
   （filter+2 层对/backdrop+1/will-change+0）、soft 端到端像素三件
   （invert 层/backdrop 区域替换/透明保留快照）。全量 **551** 测试绿
   （545→551）。
+- **vertical-align 基线对齐 / IFC v2（P3 批，ADR-0034）**：F1 行模型
+  TOP 硬编码升级为 vertical-align 全值族——①属性面新槽位
+  `vertical-align`（SLOT_COUNT 177，九变体 `VerticalAlignKind`，
+  八关键字 + `<length-percentage>`（% 存小数），严格文法尾 token
+  拒绝；不继承，初始 baseline）；②测量层加法式
+  `measure_with_baseline -> (宽, 高, 首行基线)`（measure_two_pass
+  三元组化，首行首 run `metrics().ascent.round()`；旧三签名不变）；
+  ③行结算两阶段化：TOP 装箱收集 `PendingLinePart`（基线距/字号/
+  字体度量）→ 行尾 `flush_inline_line` 统一结算——L=max(基线距)、
+  逐参与者求 dy 回填 inset.top、行盒扩展 max(参与者盒底)、bottom
+  二遍对齐行底；Box 基线探针 `box_first_text_baseline`（子树首文本
+  叶，无文本=盒高）；④字体度量扩展：fontprobe hhea asc/desc
+  （`ascent_per_em`/`descent_per_em`，abs 归一，缺失回退 0.8/0.2）
+  注入 FontMetrics——text-top/text-bottom strut 与 middle x-height
+  消费面；⑤偏移语义：length（px/em/rem/% 行高/视口）、sub/super
+  ±0.34em（兜底 B 级）、middle=x-height/2 对齐、top=装箱即位、
+  bottom=行底、baseline 不偏移（v1 逐位一致回归锁；混字号默认
+  基线下沉 B 级在案）、calc() 偏移=0（B 级）。锁定测试 +8：解析
+  全值族 12 例 + 拒绝 4 例、measure_with_baseline 线性/空文本、
+  行为锁 6 项（无声明 vs baseline 逐位一致、length 精确 −10px、
+  super/sub ±5.44px + 行盒扩展、middle 方向序、盒基线=子文本基线、
+  top/bottom 对齐）。全量 **559** 测试绿（551→559）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

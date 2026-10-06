@@ -3223,4 +3223,44 @@ mod tests {
         ),);
         let _ = PropertyId::BackdropFilter;
     }
+
+    #[test]
+    fn vertical_align_parse_family() {
+        use crate::css::property::{PropertyId, VerticalAlignKind as Va};
+        use crate::css::value::LengthPercentage as Lp;
+        // P3（ADR-0034 D3）：全值族——8 关键字 + <length-percentage>
+        //（% 存小数、负值合法、em 承载）。
+        for (src, want) in [
+            ("vertical-align: baseline", Va::Baseline),
+            ("vertical-align: sub", Va::Sub),
+            ("vertical-align: super", Va::Super),
+            ("vertical-align: text-top", Va::TextTop),
+            ("vertical-align: text-bottom", Va::TextBottom),
+            ("vertical-align: middle", Va::Middle),
+            ("vertical-align: top", Va::Top),
+            ("vertical-align: bottom", Va::Bottom),
+            ("vertical-align: 10px", Va::Length(Lp::Px(10.0))),
+            ("vertical-align: 50%", Va::Length(Lp::Percent(0.5))),
+            ("vertical-align: 1em", Va::Length(Lp::Em(1.0))),
+            ("vertical-align: -5px", Va::Length(Lp::Px(-5.0))),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            match parsed(&b.decls[0]) {
+                DeclValue::VerticalAlign(v) => assert_eq!(v, &want, "{src}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // 拒绝：未知关键字 / 尾垃圾 token / 裸数字 / 非长度值。
+        for src in [
+            "vertical-align: wat",
+            "vertical-align: super 2px",
+            "vertical-align: 10",
+            "vertical-align: red",
+        ] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+        let _ = PropertyId::VerticalAlign;
+    }
 }
