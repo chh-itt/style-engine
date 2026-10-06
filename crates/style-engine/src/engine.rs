@@ -6,6 +6,7 @@
 
 use crate::computed::{ComputedStyle, compute_node_from_cascade, compute_node_in};
 use crate::css::decl::parse_inline_declarations;
+use crate::css::property::{DeclValue, PropertyId, TimingFn};
 use crate::css::stylesheet::{MediaEnv, Stylesheet};
 use crate::error::ParseReport;
 use crate::layout::map_style;
@@ -261,6 +262,67 @@ impl SettlePassKind {
     }
 }
 
+/// G1（ADR-0032）：单槽活动过渡——reconciliation 启动/重定向，采样挂点
+/// 逐帧推进。`from`/`to` 为过渡端点值（from 可能是重定向时刻的插值中间
+/// 值）；时间量与 `self.now` 同为秒（f32，与 animation 采样一致）。
+#[derive(Debug, Clone)]
+struct ActiveTransition {
+    /// 目标 PropertyId（写回与列表配对用；槽位由 pid.slot() 派生）。
+    pid: PropertyId,
+    /// 过渡起点值（启动=before-change 值；重定向=当前插值中间值）。
+    from: DeclValue,
+    /// 过渡终点值（restyled 后的级联值）。
+    to: DeclValue,
+    /// 启动/重定向时刻（帧时间，秒）。
+    start_time: f32,
+    /// 过渡时长（秒；≥0）。
+    duration: f32,
+    /// 延迟（秒；可为负=快进）。
+    delay: f32,
+    /// 缓动（复用 animation 文法，ADR-0032 D1）。
+    easing: TimingFn,
+}
+
+/// G1（ADR-0032）：不可过渡的描述符槽——animation-* 与 transition-*
+/// 描述符自身（文档未定义其动画性；transition 描述符自指无意义）。
+fn is_unanimatable_descriptor(pid: PropertyId) -> bool {
+    use PropertyId as P;
+    matches!(
+        pid,
+        P::AnimationName
+            | P::AnimationDuration
+            | P::AnimationDelay
+            | P::AnimationIterationCount
+            | P::AnimationTimingFunction
+            | P::AnimationDirection
+            | P::AnimationFillMode
+            | P::TransitionProperty
+            | P::TransitionDuration
+            | P::TransitionTimingFunction
+            | P::TransitionDelay
+            | P::TransitionBehavior
+    )
+}
+
+/// G1（ADR-0032）：过渡在时刻 now 的当前值（重定向 from 端取值）——
+/// 延迟段=from；进行中=缓动求值 lerp_decl（离散对 50% 翻转）；完成=to。
+fn transition_sample(t: &ActiveTransition, now: f32, dark: bool) -> DeclValue {
+    use crate::css::property::lerp_decl;
+    let local = now - t.start_time - t.delay;
+    if local <= 0.0 || t.duration <= 0.0 {
+        return t.from.clone();
+    }
+    let p = (local / t.duration).min(1.0);
+    let eased = t.easing.sample(p);
+    lerp_decl(&t.from, &t.to, eased, dark).unwrap_or_else(|| {
+        if eased < 0.5 {
+            t.from.clone()
+        } else {
+            t.to.clone()
+        }
+    })
+}
+
 /// 样式引擎实例。K 为宿主节点键（Copy + Eq + Hash）。
 pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     tree: StyleTree,
@@ -351,6 +413,15 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     /// 记录；restyle 期 @container 求值消费；缺席 = unknown → 特性不命中）。
     container_sizes: HashMap<NodeId, [f32; 2]>,
     styles: HashMap<NodeId, ComputedStyle>,
+    /// G1（ADR-0032）：活动过渡表——restyle 提交点 reconciliation 启动/
+    /// 重定向/取消，frame() 采样挂点逐帧写入过渡中间值并清理过期条目。
+    /// 空表 = 稳态零写入（无活动过渡时 frame() 与既有行为逐位一致）。
+    transitions: HashMap<NodeId, Vec<ActiveTransition>>,
+    /// G1（ADR-0032）：动画运行槽位的底层值副本——动画结束（fill:none）
+    /// 时恢复 underlying（css-animations-1：无填充结束后回落底层值，不得
+    /// 残留最后动画采样值）。条目 = (槽, 底层值, 上帧写入值)；上帧写入值
+    /// 用于检测外部重算（restyle 重建 cs 后自动刷新快照）。
+    anim_underlying: HashMap<NodeId, Vec<(PropertyId, DeclValue, DeclValue)>>,
     /// C4（ADR-0018）：::selection 通道样式（origin 直配；宿主读取）。
     selection_styles: HashMap<NodeId, ComputedStyle>,
     /// C4（ADR-0018）：::placeholder 通道样式（origin 直配；宿主读取）。
@@ -447,6 +518,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             hit_rects: Vec::new(),
             container_sizes: HashMap::new(),
             styles: HashMap::new(),
+            transitions: HashMap::new(),
+            anim_underlying: HashMap::new(),
             selection_styles: HashMap::new(),
             placeholder_styles: HashMap::new(),
             float_touched: std::collections::HashSet::new(),
@@ -637,6 +710,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let ids: Vec<NodeId> = self.pseudo_ids.values().copied().collect();
             for pid in ids {
                 self.tree.remove(pid);
+                // G1（ADR-0032）：伪节点死亡卫生清理（与树移除同域）
+                self.transitions.remove(&pid);
+                self.anim_underlying.remove(&pid);
             }
             self.pseudo_ids.clear();
             self.dirty_struct = true;
@@ -912,6 +988,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.taffy_root = None;
             self.taffy_node.clear();
             self.styles.clear();
+            self.transitions.clear();
+            self.anim_underlying.clear();
             self.focused_node = None;
             self.pseudo_ids.clear();
             self.dirty_struct = true;
@@ -950,6 +1028,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.auto_text.remove(&d);
             self.scroll_offsets.remove(&d);
             self.styles.remove(&d);
+            // G1（ADR-0032）：节点移除同步清理过渡条目（NodeId 槽位复用
+            // 防悬垂——与 styles.remove 同一正确性域）。
+            self.transitions.remove(&d);
+            self.anim_underlying.remove(&d);
             self.taffy_node.remove(&d);
         }
         self.tree.remove(id);
@@ -1552,6 +1634,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             // 布局前；同帧布局正确）。
             #[cfg(feature = "text")]
             self.sync_pseudo_text();
+            // G1（ADR-0032）：transition 采样——级联后、动画前（CSS 层叠：
+            // animation 层高于 transition 层，同槽动画值随后覆写过渡值）。
+            // 过渡表空 → 零写入（稳态铁律：无活动过渡 frame() 行为与既有
+            // 实现逐位一致；布局每帧全量重算，过渡值变更无需独立失效标）。
+            self.sample_transitions();
             // 第五批⑰：@keyframes 动画采样——每帧级联后、布局前覆写（布局与
             // 绘制消费动画值；布局每帧全量重算，动画值变更无需独立失效标）
             self.apply_animations();
@@ -2287,6 +2374,304 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         tid
     }
 
+    /// G1（ADR-0032）：restyle 提交点 reconciliation——新计算值 vs
+    /// before-change 值（styles 表）逐槽对账，启动/重定向/取消过渡
+    /// （css-transitions-2 §3 三则）。判定序（规格精化，在案偏差）：
+    /// ①新值==生效值（含过渡采样中间值）→ 取消该槽活动过渡；
+    /// ②combined duration（duration+delay）≤0 → 取消 + 不启动（值即刻
+    /// 跳变为新级联值）；
+    /// ③活动过渡存在且新值==to → 保持运行（不重启时钟——无关 restyle
+    /// 不复位动画进度，偏离任务规格"值相同→取消"字面）；
+    /// ④其余 → 启动/重定向：from=当前插值中间值（活动过渡）否则生效值，
+    /// start=当前帧时间；
+    /// ⑤可插值对（lerp_decl 分类探针）才可 normal 过渡；离散对需
+    /// transition-behavior:allow-discrete 才启动，否则立即跳变；
+    /// ⑥（偏差）目标槽被活动动画覆盖（animation 命中且 duration>0）时
+    /// 不启动新过渡——动画层高于过渡层，启动后首帧即被覆写，徒留隐形
+    /// 计时器；已运行过渡不受影响（动画结束后采样值重现，ADR-0032 边界）。
+    /// transition-* 与 animation-* 描述符槽自身不可过渡（文档未定义其
+    /// 动画性，且自指无意义）。
+    fn reconcile_transitions(&mut self, id: NodeId, cs: &ComputedStyle) {
+        use crate::css::property::{
+            DeclValue, PropertyId as P, TimingFn, TransitionBehavior, TransitionTarget, lerp_decl,
+        };
+
+        // 快路径：无活动过渡且新声明无正时长 → 无启动面（全局稳态下每
+        // 节点仅一次 map 探测 + 小列表扫描）。
+        let active_empty = self.transitions.get(&id).is_none_or(Vec::is_empty);
+        let durations_zero = match cs.get(P::TransitionDuration) {
+            Some(DeclValue::TransitionTime(l)) => l.0.iter().all(|&d| d <= 0.0),
+            _ => true,
+        };
+        if active_empty && durations_zero {
+            return;
+        }
+        // before-change 值；首次 restyle（无旧值）不产生过渡。
+        let Some(old) = self.styles.get(&id) else {
+            return;
+        };
+        // 目标属性列表（after-change 的 transition-property）
+        let Some(DeclValue::TransitionProperty(props)) = cs.get(P::TransitionProperty) else {
+            return;
+        };
+        if props.0.is_empty() {
+            return;
+        }
+        // 候选槽展开：None 跳过；All = 全部可过渡槽（ALL 表剔除描述符，
+        // 配对下标=槽自身位序）；Ident = 属性名路由（未知名=不产生过渡）。
+        let mut candidates: Vec<(usize, P)> = Vec::new();
+        for (k, target) in props.0.iter().enumerate() {
+            match target {
+                TransitionTarget::None => {}
+                TransitionTarget::All => {
+                    for (i, &pid) in P::ALL.iter().enumerate() {
+                        if !is_unanimatable_descriptor(pid) {
+                            candidates.push((i, pid));
+                        }
+                    }
+                }
+                TransitionTarget::Ident(name) => {
+                    if let Some(pid) = P::from_css_name(name)
+                        && !is_unanimatable_descriptor(pid)
+                    {
+                        candidates.push((k, pid));
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let durations: &[f32] = match cs.get(P::TransitionDuration) {
+            Some(DeclValue::TransitionTime(l)) => &l.0,
+            _ => &[],
+        };
+        let timings: &[TimingFn] = match cs.get(P::TransitionTimingFunction) {
+            Some(DeclValue::TransitionTiming(l)) => &l.0,
+            _ => &[],
+        };
+        let delays: &[f32] = match cs.get(P::TransitionDelay) {
+            Some(DeclValue::TransitionTime(l)) => &l.0,
+            _ => &[],
+        };
+        let behavior = match cs.get(P::TransitionBehavior) {
+            Some(DeclValue::TransitionBehavior(b)) => *b,
+            _ => TransitionBehavior::Normal,
+        };
+        let now = self.now as f32;
+        let dark = self.media.dark;
+        let anim_covered = self.animation_covered_slots(cs);
+        let has_active = !active_empty;
+        let mut actions: Vec<(P, Option<ActiveTransition>)> = Vec::new();
+        for (k, pid) in candidates {
+            let (Some(ov), Some(nv)) = (old.get(pid), cs.get(pid)) else {
+                continue;
+            };
+            let active_t = if has_active {
+                self.transitions
+                    .get(&id)
+                    .and_then(|l| l.iter().find(|t| t.pid == pid))
+            } else {
+                None
+            };
+            let dur = if durations.is_empty() {
+                0.0
+            } else {
+                durations[k % durations.len()]
+            };
+            let delay = if delays.is_empty() {
+                0.0
+            } else {
+                delays[k % delays.len()]
+            };
+            let tim = if timings.is_empty() {
+                TimingFn::Ease
+            } else {
+                timings[k % timings.len()]
+            };
+            match active_t {
+                Some(t) => {
+                    // ③新值 == to → 保持运行（不重启时钟）。放在最前：容器
+                    // 规则收敛环 pass2 重算级联不变（ov==nv 采样表象）时，
+                    // 不得取消 pass1 刚启动的过渡（css-transitions §3 终值
+                    // 对账语义；偏差①的精化边界，ADR-0032）。
+                    if nv == &t.to {
+                        continue;
+                    }
+                    // ①新级联 == 当前生效值（== 采样中间值）→ 取消
+                    //（视觉等效：Chromium 走零跨度过渡，同效）。
+                    if ov == nv {
+                        actions.push((pid, None));
+                        continue;
+                    }
+                    // ②combined duration ≤ 0（新声明）→ 取消
+                    if dur + delay <= 0.0 {
+                        actions.push((pid, None));
+                        continue;
+                    }
+                    // ④重定向：from = 当前时刻插值值
+                    let from = transition_sample(t, now, dark);
+                    actions.push((
+                        pid,
+                        Some(ActiveTransition {
+                            pid,
+                            from,
+                            to: nv.clone(),
+                            start_time: now,
+                            duration: dur,
+                            delay,
+                            easing: tim,
+                        }),
+                    ));
+                }
+                None => {
+                    // ①值相同 → 无动作（稳态快路径核心判定）
+                    if ov == nv {
+                        continue;
+                    }
+                    // ②combined duration ≤ 0 → 不启动（值即刻跳变）
+                    if dur + delay <= 0.0 {
+                        continue;
+                    }
+                    // ⑤可插值性探针（0.5 中点）：可插值对才可 normal 过渡；
+                    // 离散对需 allow-discrete 才启动，否则立即跳变。
+                    let interpolable = lerp_decl(ov, nv, 0.5, dark).is_some();
+                    if !interpolable && behavior != TransitionBehavior::AllowDiscrete {
+                        continue;
+                    }
+                    // ⑥活动动画覆盖槽不启动新过渡（偏差⑥在案）
+                    if anim_covered
+                        .as_ref()
+                        .is_some_and(|s| s.contains(&pid.slot()))
+                    {
+                        continue;
+                    }
+                    actions.push((
+                        pid,
+                        Some(ActiveTransition {
+                            pid,
+                            from: ov.clone(),
+                            to: nv.clone(),
+                            start_time: now,
+                            duration: dur,
+                            delay,
+                            easing: tim,
+                        }),
+                    ));
+                }
+            }
+        }
+        if actions.is_empty() {
+            return;
+        }
+        if !has_active && actions.iter().all(|(_, a)| a.is_none()) {
+            return; // 仅取消但无活动条目 → 无需动表（稳态不建空键）
+        }
+        let entry = self.transitions.entry(id).or_default();
+        for (pid, action) in actions {
+            match action {
+                None => entry.retain(|t| t.pid != pid),
+                Some(t) => match entry.iter_mut().find(|e| e.pid == pid) {
+                    Some(e) => *e = t,
+                    None => entry.push(t),
+                },
+            }
+        }
+        if entry.is_empty() {
+            self.transitions.remove(&id);
+        }
+    }
+
+    /// G1（ADR-0032）：该节点活动动画覆盖的槽位集（animation-name 命中
+    /// @keyframes 且 duration>0 时，关键帧声明的 Parsed 槽位集合）——
+    /// reconciliation 抑制这些槽的新过渡启动（偏差⑥）。
+    fn animation_covered_slots(
+        &self,
+        cs: &ComputedStyle,
+    ) -> Option<std::collections::BTreeSet<usize>> {
+        use crate::css::property::{DeclValue, PropertyId};
+        let name = match cs.get(PropertyId::AnimationName) {
+            Some(DeclValue::AnimationName(Some(n))) => n.clone(),
+            _ => return None,
+        };
+        let duration = match cs.get(PropertyId::AnimationDuration) {
+            Some(DeclValue::AnimationTime(s)) => *s,
+            _ => 0.0,
+        };
+        if duration <= 0.0 {
+            return None;
+        }
+        let rule = self
+            .extra_sheets
+            .iter()
+            .rev()
+            .find_map(|(_, _, s)| s.keyframes.iter().find(|r| r.name == name))
+            .or_else(|| self.sheet.keyframes.iter().find(|r| r.name == name))?;
+        let mut slots = std::collections::BTreeSet::new();
+        for f in &rule.frames {
+            for d in &f.declarations.decls {
+                slots.insert(d.id.slot());
+            }
+        }
+        Some(slots)
+    }
+
+    /// G1（ADR-0032）：transition 采样挂点——对每个活动过渡按 now 求插值
+    /// 并写回对应槽位：延迟段保持 from；进度 ≥1 写 to 并移除条目（终值
+    /// = to 保持）；进行中按缓动求值 lerp_decl，不可插值对（allow-discrete
+    /// 启动的离散过渡）按离散规则在 50% 翻转。表空早退（稳态零写入）。
+    fn sample_transitions(&mut self) {
+        use crate::css::property::lerp_decl;
+        if self.transitions.is_empty() {
+            return;
+        }
+        let dark = self.media.dark;
+        let now = self.now as f32;
+        let ids: Vec<NodeId> = self.transitions.keys().copied().collect();
+        for id in ids {
+            let Some(list) = self.transitions.get_mut(&id) else {
+                continue;
+            };
+            let Some(cs) = self.styles.get_mut(&id) else {
+                // 样式表孤儿（树移除竞态）：条目作废
+                list.clear();
+                continue;
+            };
+            list.retain_mut(|t| {
+                let local = now - t.start_time - t.delay;
+                if local < 0.0 {
+                    // 延迟段：保持 from（负延迟=快进，直接落进行中段）
+                    cs.set_value(t.pid, t.from.clone());
+                    return true;
+                }
+                if t.duration <= 0.0 {
+                    // 0s 过渡：终值即刻生效
+                    cs.set_value(t.pid, t.to.clone());
+                    return false;
+                }
+                let p = local / t.duration;
+                if p >= 1.0 {
+                    cs.set_value(t.pid, t.to.clone());
+                    return false;
+                }
+                let eased = t.easing.sample(p);
+                let v = lerp_decl(&t.from, &t.to, eased, dark).unwrap_or_else(|| {
+                    // 离散对（allow-discrete 过渡）：50% 翻转
+                    if eased < 0.5 {
+                        t.from.clone()
+                    } else {
+                        t.to.clone()
+                    }
+                });
+                cs.set_value(t.pid, v);
+                true
+            });
+            if list.is_empty() {
+                self.transitions.remove(&id);
+            }
+        }
+    }
+
     /// @keyframes 动画采样（第五批⑰）：对声明了 animation-name 且命中
     /// @keyframes 的节点，按 now（宿主帧推进，秒）采样关键帧轨道并覆写
     /// 计算样式。动画层高于作者级联（CSS：动画覆盖普通声明，仅
@@ -2302,7 +2687,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let sheet = &self.sheet;
         let extras = &self.extra_sheets;
         let styles = &mut self.styles;
-        for cs in styles.values_mut() {
+        let anim_underlying = &mut self.anim_underlying;
+        for (anim_id, cs) in styles.iter_mut() {
             let name = match cs.get(PropertyId::AnimationName) {
                 Some(DeclValue::AnimationName(Some(n))) => n.clone(),
                 _ => continue,
@@ -2342,6 +2728,47 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 Some(DeclValue::AnimationFillMode(f)) => *f,
                 _ => crate::css::property::AnimFillMode::None,
             };
+            // 轨道收集（Parsed 声明；var() 载体不入轨——MVP 偏差）。
+            // 提前到 p_eff 判定前：G1 底层值副本管理需要槽集。
+            let mut tracks: BTreeMap<PropertyId, Vec<(f32, &DeclValue)>> = BTreeMap::new();
+            for f in &rule.frames {
+                for d in &f.declarations.decls {
+                    if let crate::css::decl::DeclSource::Parsed(v) = &d.value {
+                        tracks.entry(d.id).or_default().push((f.offset, v));
+                    }
+                }
+            }
+            // G1（ADR-0032）：底层值副本管理——首见动画快照关键帧槽位当前
+            // 值（覆写前 = 级联/底层值）；已有条目则槽值 ≠ 上帧写入值 =
+            // 外部重算（restyle 重建 cs）→ 刷新快照，使「恢复 underlying」
+            // 语义始终锚定最新级联值；槽集随轨道对齐（换动画名自愈）。
+            {
+                let entry = anim_underlying.entry(*anim_id).or_default();
+                if entry.is_empty() {
+                    for pid in tracks.keys() {
+                        if let Some(v) = cs.value(*pid) {
+                            entry.push((*pid, v.clone(), v.clone()));
+                        }
+                    }
+                } else {
+                    entry.retain(|(pid, _, _)| tracks.contains_key(pid));
+                    for pid in tracks.keys() {
+                        if !entry.iter().any(|(p, _, _)| p == pid)
+                            && let Some(v) = cs.value(*pid)
+                        {
+                            entry.push((*pid, v.clone(), v.clone()));
+                        }
+                    }
+                    for (pid, under, last) in entry.iter_mut() {
+                        if let Some(cur) = cs.value(*pid)
+                            && cur != last
+                        {
+                            *under = cur.clone();
+                            *last = cur.clone();
+                        }
+                    }
+                }
+            }
             let local = now - delay;
             // 采样点：未开始（backwards/both → 0）/进行中/已结束
             // （forwards/both → 1）；其余阶段用底层值（不覆写）
@@ -2375,15 +2802,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             } else {
                 matches!(fill, AnimFillMode::Forwards | AnimFillMode::Both).then_some(1.0)
             };
-            let Some(p_eff) = p_eff else { continue };
-            // 轨道收集（Parsed 声明；var() 载体不入轨——MVP 偏差）
-            let mut tracks: BTreeMap<PropertyId, Vec<(f32, &DeclValue)>> = BTreeMap::new();
-            for f in &rule.frames {
-                for d in &f.declarations.decls {
-                    if let crate::css::decl::DeclSource::Parsed(v) = &d.value {
-                        tracks.entry(d.id).or_default().push((f.offset, v));
+            let Some(p_eff) = p_eff else {
+                // G1：已结束且无 forwards/both 填充 → 恢复底层值
+                //（css-animations-1：结束后回落 underlying，不残留最后
+                // 动画采样值）；未开始（local<0）仅跳过。
+                if local >= total
+                    && local > 0.0
+                    && let Some(und) = anim_underlying.remove(anim_id)
+                {
+                    for (pid, under, _) in und {
+                        cs.set_value(pid, under);
                     }
                 }
+                continue;
+            };
+            // G1：终值固定（forwards/both 已结束）→ 副本无后续用途
+            if local >= total {
+                anim_underlying.remove(anim_id);
             }
             for (pid, mut track) in tracks {
                 track.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -2417,6 +2852,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     });
                 if let Some(v) = sampled {
                     cs.set_value(pid, v);
+                }
+            }
+            // G1：记录本帧写入值（外部重算检测基准——下帧槽值 ≠ 此值即
+            // 视为 restyle 重算，刷新底层值快照）。
+            if let Some(entry) = anim_underlying.get_mut(anim_id) {
+                for (pid, _, last) in entry.iter_mut() {
+                    if let Some(v) = cs.value(*pid) {
+                        *last = v.clone();
+                    }
                 }
             }
         }
@@ -4417,7 +4861,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 
     fn restyle(&mut self) {
-        self.styles.clear();
+        // G1（ADR-0032）：styles 表不清空——保留为 before-change style
+        // （class/state/text 变更走 dirty_style 全量路径，若清空则旧值
+        // 丢失、过渡无从对账）。restyle_node 父先子后逐节点覆盖；孤儿
+        // 条目由 remove()/materialize_pseudos 清理；根重算先行 → 后代
+        // 读 rem_base 等仍取新根值（与清空语义一致）。
         self.span_styles.clear();
         self.parents.clear();
         self.wrap_widths.clear();
@@ -4974,7 +5422,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // 与 rem_base 同源；用户根挂合成根之下，parent_id 判不出）的
         // font-size 内 rem 按 CSS Values 以初始值解析；求值完成后
         // env.rem 即新根字号，供本节点 span/map_style/度量与通道。
-        let is_doc_root = self.root_key.and_then(|k| self.key_to_node.get(&k)).copied() == Some(id);
+        let is_doc_root = self
+            .root_key
+            .and_then(|k| self.key_to_node.get(&k))
+            .copied()
+            == Some(id);
         let mut env = self.map_env();
         if is_doc_root {
             env.rem = 16.0;
@@ -5069,14 +5521,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let owned = self.span_styles.get(&id).cloned().unwrap_or_default();
             let span_refs: Vec<(u32, u32, &ComputedStyle)> =
                 owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
-            let (w, h) = self
-                .text
-                .measure_rich(&text, &cs, &span_refs, None, &env);
+            let (w, h) = self.text.measure_rich(&text, &cs, &span_refs, None, &env);
             if w > 0.0 || h > 0.0 {
                 self.measures.insert(id, (w, h));
-                let min = self
-                    .text
-                    .measure_min_content(&text, &cs, &span_refs, &env);
+                let min = self.text.measure_min_content(&text, &cs, &span_refs, &env);
                 self.min_measures.insert(id, min);
                 self.auto_text.insert(id);
             }
@@ -5138,6 +5586,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // C4（ADR-0018）：::selection / ::placeholder 通道（须在 cs 移入
         // styles 前取 &cs 作继承基）。
         self.style_channels(id, &cs, cctx, &env);
+        // G1（ADR-0032）：transition reconciliation——提交前对新旧计算值
+        // 对账，启动/重定向/取消过渡（from 端 = 旧 styles 表的生效值，
+        // 含过渡采样中间值 = before-change 语义）。
+        self.reconcile_transitions(id, &cs);
         self.styles.insert(id, cs);
         guard.mark(id);
         let children: Vec<NodeId> = self.tree.children(id).to_vec();
@@ -7288,16 +7740,18 @@ mod tests {
                 .is_clean()
         );
         let mut engine = engine;
-        assert!(engine
-            .insert(
-                None,
-                Key(1),
-                StyleNode {
-                    name: Some("div".into()),
-                    ..Default::default()
-                }
-            )
-            .is_ok());
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("div".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
         let _frame = engine.frame((800.0, 600.0), 1.0, 0.0);
         let cs = engine.computed_style(Key(1)).unwrap();
         assert_eq!(
@@ -7640,7 +8094,9 @@ mod tests {
             assert!(blue > red, "{label} SC 应后画（blue={blue:?} red={red:?}）");
             assert_eq!(ops.len(), plain.len() + 2, "{label} 应产生层对");
             assert_eq!(
-                ops.iter().filter(|op| matches!(op, crate::paint::PaintOp::PushBlend { .. })).count(),
+                ops.iter()
+                    .filter(|op| matches!(op, crate::paint::PaintOp::PushBlend { .. }))
+                    .count(),
                 1,
                 "{label} 应恰一个 PushBlend"
             );
@@ -7695,21 +8151,23 @@ mod tests {
         assert!(engine.insert(Some(Key(1)), Key(2), node("c")).is_ok());
         let ops = engine.frame((800.0, 600.0), 1.0, 0.0).paint.ops.to_vec();
         let find = |tag: &str| {
-            ops.iter().position(|op| match op {
-                crate::paint::PaintOp::PushBlend { mode, .. }
-                    if tag == "push_blend" && *mode == crate::css::property::BlendMode::Multiply =>
-                {
-                    true
-                }
-                crate::paint::PaintOp::PopBlend if tag == "pop_blend" => true,
-                crate::paint::PaintOp::PushOpacity { .. } if tag == "push_opacity" => true,
-                crate::paint::PaintOp::PopOpacity if tag == "pop_opacity" => true,
-                crate::paint::PaintOp::FillRect { color, .. } if tag == "fill" => {
-                    color.components[2] == 1.0 && color.components[0] == 0.0
-                }
-                _ => false,
-            })
-            .unwrap_or_else(|| panic!("{tag} 未找到于 {ops:?}"))
+            ops.iter()
+                .position(|op| match op {
+                    crate::paint::PaintOp::PushBlend { mode, .. }
+                        if tag == "push_blend"
+                            && *mode == crate::css::property::BlendMode::Multiply =>
+                    {
+                        true
+                    }
+                    crate::paint::PaintOp::PopBlend if tag == "pop_blend" => true,
+                    crate::paint::PaintOp::PushOpacity { .. } if tag == "push_opacity" => true,
+                    crate::paint::PaintOp::PopOpacity if tag == "pop_opacity" => true,
+                    crate::paint::PaintOp::FillRect { color, .. } if tag == "fill" => {
+                        color.components[2] == 1.0 && color.components[0] == 0.0
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("{tag} 未找到于 {ops:?}"))
         };
         let (b, po, f, oo, pb) = (
             find("push_blend"),

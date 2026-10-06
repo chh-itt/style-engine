@@ -391,6 +391,16 @@ pub enum PropertyId {
     /// backdrop-filter — 背景滤镜存在性（F4，ADR-0028：非 none 触发 SC，
     /// 效果本体 T2，同 filter 第四批④ 先例）。
     BackdropFilter,
+    /// transition-property — 可过渡属性名列表（G1，ADR-0032）。
+    TransitionProperty,
+    /// transition-duration — 过渡时长列表，秒（G1，ADR-0032）。
+    TransitionDuration,
+    /// transition-timing-function — 过渡缓动列表（G1，ADR-0032）。
+    TransitionTimingFunction,
+    /// transition-delay — 过渡延迟列表，秒，可为负（G1，ADR-0032）。
+    TransitionDelay,
+    /// transition-behavior — 离散属性过渡策略（G1，ADR-0032）。
+    TransitionBehavior,
 }
 
 impl PropertyId {
@@ -564,17 +574,25 @@ impl PropertyId {
         // 符槽整体后移 ×2 至 164..171，slot_alignment 不变量=ALL 序连续）
         Self::Hyphens,
         Self::BackdropFilter,
+        // G1（ADR-0032）：transition 五长手（ALL 尾追加；动画描述符槽整体
+        // 后移 ×5 至 169..176，slot_alignment 不变量=ALL 序连续）
+        Self::TransitionProperty,
+        Self::TransitionDuration,
+        Self::TransitionTimingFunction,
+        Self::TransitionDelay,
+        Self::TransitionBehavior,
     ];
 
-    /// 槽位存储总槽位数：ALL 全部 164 位（0..139 原序、F2 文本 7 位、
-    /// F3b 背景 6 位、F3d 边框图 5 位、F3d 字体 5 位、F4 两属性，slot()
-    /// 显式编号）加 7 个动画描述符位（非 ALL）。
-    pub const SLOT_COUNT: usize = 171;
+    /// 槽位存储总槽位数：ALL 全部 169 位（0..139 原序、F2 文本 7 位、
+    /// F3b 背景 6 位、F3d 边框图 5 位、F3d 字体 5 位、F4 两属性、G1
+    /// transition 五长手，slot() 显式编号）加 7 个动画描述符位（非 ALL）。
+    pub const SLOT_COUNT: usize = 176;
 
     /// 槽位存储下标（ComputedStyle 的 `Vec<Option<DeclValue>>` 用）。
     /// 0..139 = ALL 原序；139..146 = F2 文本追加（ALL 尾部成员）；
     /// 146..152 = F3b 背景追加；152..164 = F3d 边框图+字体追加+F4 两
-    /// 属性；164..171 = 动画描述符（不在 ALL）。
+    /// 属性；164..169 = G1 transition 五长手（ALL 尾部成员）；
+    /// 169..176 = 动画描述符（不在 ALL）。
     /// clip-path 沿用原 ALL 位 71（第四批④ 占位，F3c 原位升级，ADR-0025）。
     /// `slot_alignment` 测试锁定本表
     /// 与 ALL 的一致性——新增变体时必须同步扩展本 match 与 SLOT_COUNT。
@@ -755,15 +773,22 @@ impl PropertyId {
             Self::FontFeatures => 159,
             Self::FontVariations => 160,
             Self::FontVariantCaps => 161,
-            // 动画描述符（非 ALL 成员；声明/采样时落槽；F4 追加后整体
-            // 后移 ×2）
-            Self::AnimationName => 164,
-            Self::AnimationDuration => 165,
-            Self::AnimationDelay => 166,
-            Self::AnimationIterationCount => 167,
-            Self::AnimationTimingFunction => 168,
-            Self::AnimationDirection => 169,
-            Self::AnimationFillMode => 170,
+            // G1（ADR-0032）：transition 五长手（=ALL 尾位，slot==ALL 位序；
+            // 动画描述符让位其后 ×5）
+            Self::TransitionProperty => 164,
+            Self::TransitionDuration => 165,
+            Self::TransitionTimingFunction => 166,
+            Self::TransitionDelay => 167,
+            Self::TransitionBehavior => 168,
+            // 动画描述符（非 ALL 成员；声明/采样时落槽；G1 追加后整体
+            // 后移 ×5）
+            Self::AnimationName => 169,
+            Self::AnimationDuration => 170,
+            Self::AnimationDelay => 171,
+            Self::AnimationIterationCount => 172,
+            Self::AnimationTimingFunction => 173,
+            Self::AnimationDirection => 174,
+            Self::AnimationFillMode => 175,
             Self::Hyphens => 162,
             Self::BackdropFilter => 163,
         }
@@ -795,6 +820,11 @@ impl PropertyId {
             Self::AnimationFillMode => "animation-fill-mode",
             Self::Hyphens => "hyphens",
             Self::BackdropFilter => "backdrop-filter",
+            Self::TransitionProperty => "transition-property",
+            Self::TransitionDuration => "transition-duration",
+            Self::TransitionTimingFunction => "transition-timing-function",
+            Self::TransitionDelay => "transition-delay",
+            Self::TransitionBehavior => "transition-behavior",
             Self::Width => "width",
             Self::Height => "height",
             Self::MinWidth => "min-width",
@@ -1418,6 +1448,16 @@ pub enum DeclValue {
     AnimationDirection(AnimDirection),
     /// animation-fill-mode — 动画外填充模式。
     AnimationFillMode(AnimFillMode),
+    // transition 描述符（G1，ADR-0032）：不可被过渡的目标、不参与
+    // DeclValue 插值
+    /// transition-property — 可过渡属性名列表（none|all|custom-ident#）。
+    TransitionProperty(TransitionPropertyList),
+    /// transition-duration / transition-delay — 时长/延迟列表，秒。
+    TransitionTime(TransitionTimeList),
+    /// transition-timing-function — 缓动函数列表。
+    TransitionTiming(TransitionTimingList),
+    /// transition-behavior — 离散属性过渡策略（单值，非列表）。
+    TransitionBehavior(TransitionBehavior),
     /// filter 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
     /// 语义位（ADR-0008 全集），不携带也不实现滤镜效果。
     /// （clip-path 已升级为 ClipPath(ClipShape) 形状值，F3c，ADR-0025。）
@@ -5381,6 +5421,12 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::AnimationTimingFunction => parse_timing_fn(p),
         P::AnimationDirection => parse_anim_direction(p),
         P::AnimationFillMode => parse_anim_fill_mode(p),
+        // G1（ADR-0032）：transition 五长手
+        P::TransitionProperty => parse_transition_property(p),
+        P::TransitionDuration => parse_transition_time(p, false),
+        P::TransitionDelay => parse_transition_time(p, true),
+        P::TransitionTimingFunction => parse_transition_timing(p),
+        P::TransitionBehavior => parse_transition_behavior(p),
         P::Hyphens => parse_hyphens(p),
         P::BackdropFilter => parse_sc_effect(p),
         P::TextOverflow => parse_text_overflow(p),
@@ -5552,10 +5598,13 @@ impl TimingFn {
             Self::Linear => t,
             Self::Steps(n, jump_end) => {
                 let n = n.max(1) as f32;
+                // css-easing-1：steps(n, end)（默认）= 阶跃在段尾 = ⌊p·n⌋/n
+                //（p=1 端点 floor(n·1)/n=1 恰为终值）；steps(n, start) =
+                // 段首跳变 = ⌈p·n⌉/n（p=0 端点 ceil(0)=0 恰为初值）。
                 if jump_end {
-                    (t * n).ceil() / n
-                } else {
                     (t * n).floor() / n
+                } else {
+                    (t * n).ceil() / n
                 }
             }
             Self::Ease => Self::bezier(0.25, 0.1, 0.25, 1.0, t),
@@ -5613,6 +5662,43 @@ pub enum AnimFillMode {
     Both,
 }
 
+/// transition-property 目标（G1，ADR-0032）：none | all | custom-ident。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum TransitionTarget {
+    /// none — 不过渡任何属性。
+    None,
+    /// all — 所有可过渡属性。
+    All,
+    /// 自定义属性名（含引擎未知名——解析不做已知性校验，引擎按
+    /// 属性名匹配；匹配失败=该名不产生过渡）。
+    Ident(String),
+}
+
+/// transition-property 逗号列表（G1）。smallvec 就地存 2 组。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitionPropertyList(pub SmallVec<[TransitionTarget; 2]>);
+
+/// transition-duration / transition-delay 逗号列表，秒（G1）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitionTimeList(pub SmallVec<[f32; 2]>);
+
+/// transition-timing-function 逗号列表（G1）。复用 animation 的
+/// TimingFn 文法与类型（ADR-0032 D1：不另造缓动类型）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitionTimingList(pub SmallVec<[TimingFn; 2]>);
+
+/// transition-behavior（G1）：离散属性过渡策略（单值，非列表——
+/// css-transitions-2 §2.4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransitionBehavior {
+    /// normal — 离散属性不产生过渡（立即跳变，默认）。
+    Normal,
+    /// allow-discrete — 离散属性也产生过渡，采样按离散规则在 50% 翻转。
+    AllowDiscrete,
+}
+
 fn parse_animation_name(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     // none | <ident>（自定义标识 --* 与 CSS 宽关键字拒绝为动画名）
     let t = p.next()?.clone();
@@ -5657,6 +5743,13 @@ fn parse_iteration_count(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 }
 
 fn parse_timing_fn(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    parse_timing_fn_one(p).map(DeclValue::AnimationTiming)
+}
+
+/// <easing-function>（第五批⑰ 文法，G1 transition-timing-function 复用）：
+/// steps(n[, start|end]) 函数形优先，否则 linear/ease 系关键字。
+/// 返回裸 TimingFn（简写/列表解析复用同一入口）。
+pub(crate) fn parse_timing_fn_one(p: &mut Parser<'_>) -> ValResult<TimingFn> {
     // steps(n[, start|end]) 函数形优先（缺省第二参=end；try_parse 失败
     // 自动回滚落回关键字形）
     let is_steps = p.try_parse(|p| -> ValResult<()> {
@@ -5667,14 +5760,17 @@ fn parse_timing_fn(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         }
     });
     if is_steps.is_ok() {
-        return timing_fn_steps_body(p);
+        return match timing_fn_steps_body(p)? {
+            DeclValue::AnimationTiming(f) => Ok(f),
+            _ => Err(p.new_error_for_next_token()),
+        };
     }
     keyword(p, |k| match k.to_ascii_lowercase().as_str() {
-        "linear" => Some(DeclValue::AnimationTiming(TimingFn::Linear)),
-        "ease" => Some(DeclValue::AnimationTiming(TimingFn::Ease)),
-        "ease-in" => Some(DeclValue::AnimationTiming(TimingFn::EaseIn)),
-        "ease-out" => Some(DeclValue::AnimationTiming(TimingFn::EaseOut)),
-        "ease-in-out" => Some(DeclValue::AnimationTiming(TimingFn::EaseInOut)),
+        "linear" => Some(TimingFn::Linear),
+        "ease" => Some(TimingFn::Ease),
+        "ease-in" => Some(TimingFn::EaseIn),
+        "ease-out" => Some(TimingFn::EaseOut),
+        "ease-in-out" => Some(TimingFn::EaseInOut),
         _ => None,
     })
 }
@@ -5732,6 +5828,104 @@ fn parse_anim_fill_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         "forwards" => Some(DeclValue::AnimationFillMode(AnimFillMode::Forwards)),
         "backwards" => Some(DeclValue::AnimationFillMode(AnimFillMode::Backwards)),
         "both" => Some(DeclValue::AnimationFillMode(AnimFillMode::Both)),
+        _ => None,
+    })
+}
+
+// ---------- transition（G1，ADR-0032）：五长手解析 ----------
+
+/// transition-property：none | all | <custom-ident>（逗号多组）。
+fn parse_transition_property(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        let t = p.next()?.clone();
+        let target = match &t {
+            Token::Ident(id) if id.eq_ignore_ascii_case("none") => TransitionTarget::None,
+            Token::Ident(id) if id.eq_ignore_ascii_case("all") => TransitionTarget::All,
+            // custom-ident：--* 与 CSS 宽关键字非法（同 animation-name 文法）
+            Token::Ident(id)
+                if !id.starts_with("--")
+                    && !matches!(
+                        id.to_ascii_lowercase().as_str(),
+                        "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+                    ) =>
+            {
+                TransitionTarget::Ident(id.to_string())
+            }
+            _ => return Err(p.new_error_for_next_token()),
+        };
+        list.push(target);
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
+    }
+    Ok(DeclValue::TransitionProperty(TransitionPropertyList(list)))
+}
+
+/// transition-duration / transition-delay 共用 <time>#：s/ms → 秒。
+/// duration 拒负（t∈[0,∞)）；delay 允负（快进语义）。
+fn parse_transition_time(p: &mut Parser<'_>, allow_negative: bool) -> ValResult<DeclValue> {
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        let t = p.next()?.clone();
+        let Token::Dimension { value, unit, .. } = &t else {
+            return Err(p.new_error_for_next_token());
+        };
+        let secs = if unit.eq_ignore_ascii_case("s") {
+            *value
+        } else if unit.eq_ignore_ascii_case("ms") {
+            value / 1000.0
+        } else {
+            return Err(p.new_error_for_next_token());
+        };
+        if secs < 0.0 && !allow_negative {
+            return Err(p.new_error_for_next_token());
+        }
+        list.push(secs);
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
+    }
+    Ok(DeclValue::TransitionTime(TransitionTimeList(list)))
+}
+
+/// transition-timing-function：<easing-function>#（复用 animation 文法）。
+fn parse_transition_timing(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        list.push(parse_timing_fn_one(p)?);
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
+    }
+    Ok(DeclValue::TransitionTiming(TransitionTimingList(list)))
+}
+
+/// transition-behavior：normal | allow-discrete（单值）。
+fn parse_transition_behavior(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |k| match k.to_ascii_lowercase().as_str() {
+        "normal" => Some(DeclValue::TransitionBehavior(TransitionBehavior::Normal)),
+        "allow-discrete" => Some(DeclValue::TransitionBehavior(
+            TransitionBehavior::AllowDiscrete,
+        )),
         _ => None,
     })
 }

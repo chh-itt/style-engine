@@ -319,7 +319,7 @@ error: test failed, to rerun pass `-p style-engine --test css_images`]
 - **C3 probe_dump 实测**：
 leaf_box = Some((0.0, 0.0, 60.0, 0.0))
 op = Image(30,0,0,0)
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
 
 - **C3 probe 实测定案**：leaf_box=(0,0,**60,0** 高=0)、op=Image(30,0,0,0)——**与 paint 数学完全自洽**（bh=0→contain s=0→fw/fh=0；ox=0.5·(60−0)=30）→ **根因=布局侧：image 叶未被测量**（remeasure 走查/消费链未覆盖无文本叶→measures 无→taffy 高 0）。修复方向：走查头（:1240-1292 装填条件）或消费链（:1360-1440 分支条件）扩 image 叶——读 :1240-1292+:1358-1440 后落修。probe_dump 用后即删。
 
@@ -332,16 +332,16 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; fin
 - **C3 css_images 第 2 轮**：test image_leaf_declared_width_scales_height ... FAILED
 thread 'image_leaf_declared_width_scales_height' (23100) panicked at crates\style-engine\tests\css_images.rs:74:5:
 test result: FAILED. 12 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-error: test failed, to rerun pass `-p style-engine --test css_images`
+error: test failed, to rerun pass `-p style-engine --test css_images`
 
 - **C3 css_images 第 2 轮**：12 过 1 败（image_leaf_declared_width_scales_height，:74:5 approx）——seed 机制生效。失败消息：
 thread 'image_leaf_declared_width_scales_height' (13300) panicked at crates\style-engine\tests\css_images.rs:74:5:
 20 ≈ 40 失败
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
 
 - **C3 最后一败确诊**：image_leaf_declared_width_scales_height「20 ≈ 40 失败」（h=自然 20，w=80 过）——**declared 闭包洞**：has_declared_len(Width)=真（ts.size 写侧保留 80 ✓）但 `cs.len(pid)` 对 `width: 80px`（存 LenAuto(Some(Px(80))) 形）返回 None → declared=None → 走 (None,None)=自然分支 mh=20。修：declared 闭包改直读 `cs.get(pid)` match `DeclValue::Len(lp) | LenAuto(Some(lp))` → resolve（弃 has_declared_len+len 组合）。
 
-- **C3 css_images 第 3 轮**（declared 闭包直读 Len/LenAuto 修后）：test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+- **C3 css_images 第 3 轮**（declared 闭包直读 Len/LenAuto 修后）：test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
 - **C3 css_images 第 3 轮 = 13/13 全绿**（declared 闭包直读 Len/LenAuto 修后）。**下一步**：cargo test --workspace 全量（上轮在 css_images 中止，需全计数）→ 登记（CHANGELOG/FEATURES/日志/todo）→ 用户报告。
 
@@ -1651,3 +1651,45 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 - **P1-3 repeating-*-gradient 三族（commit a06e1bb）**：分派器 strip `repeating-` 前缀复用三解析器、`Gradient.repeating` 流入双 sink；周期=首末停点跨距、无限平铺（vello=画刷几何收缩一周期+stops 平移归一+Extend::Repeat（径向必须 new_two_point 两圆承载 r0 相位——r0=0 平移 stops 丢相位 first）；soft=t.rem_euclid 回停点序列）；周期 0→透明黑、全缺省停点退化非 repeating。踩坑：vello tests use 需 vello::kurbo::Point（kurbo 非独立 crate 名）、ColorStops 不可 .iter()（索引访问）。全量 506（499→506）。
 - **P1-1 margin collapsing 重估+padding 八长手 A 级修复（commit ade12f2）**：重估=块流折叠全路径正确（父子顶塌穿/兄弟 max(正和)+min(负)/空块自塌/浮动子不折叠/结算 pass 不扰动；taffy CollapsibleMarginSet 自 0.10 承载，浮动仍 settle_floats 手管）——新增 tests/css_margin_collapse.rs 七件锁。修复=padding 物理四长手+逻辑四向解析误路由 parse_corner_radius 产出 Radius 族（计算/布局/绘制读取方全只认 Len→整链静默归零；简写正常故既有测试未暴露；calc 长手钳位测试腿虚掩）——property.rs 派发改 parse_len；cascade_layers.rs wide_inherit_forces_non_inherited_property 曾把 Radius 固化成断言（A8 批教训：**测试修期望值时先判行为对错，勿固化 bug**）。全量 513（506→513）、perf_gate PASS（1.568/1.612/0.886/0.485）、clippy 本批零新增（既有 lib-test 两处 is_none()/find_map 未动）。
 - **登记**：CHANGELOG 阶段7 五条（rem/P1-2/P1-3/P1-1）、FEATURES.md（P1-1 条接 P1-3 条后、rem 条已入值与颜色节、mix-blend T0 条）、DEPENDENCIES.md（P1-2 枚举缺口条）、IMPLEMENTATION-LOG 本条。提交序列：commit1/2（P0 rem+文档，9 文件）、commit3 bf6ce2c（P1-2，10 文件）、commit4 a06e1bb（P1-3，8 文件）、commit5 ade12f2（P1-1，5 文件）。
+
+## 追加批次：最大化改进计划 P1 批（soft 真 blur / 文档收口 / transition，goal-c293e543）
+
+- **P1b 文档收口（代理执行，七项）**：FEATURES.md 十处定点编辑（MSRV 陈旧 1.85→1.90 全文唯一处 :497；A·待办⑤ calc 扁平化标「已消除（三期③ calc 15 槽位实质消除）」；T2 DisplayList serde 条移入新建「### 已落地存档」小节（F3a2 兑现形态）；T0 补建 mix-blend/isolation 混合层条 :172（soft 18/18 原生、vello 16/18 peniko Mix 缺口 B 级）；conformance 通道合计「最后记录点」注记 + Numeric 19/Pixel 7 全文点名补遗；测试总数三处改「当时 NNN…现值 ≥512 以 CI 为准」措辞）+ 追溯补记两篇 ADR（0029-blend-isolation：BlendMode 18 值/PushBlend-PopBlend 层对「混合层须最外」契约/isolation≡PushBlend{Normal}/否决 Effect(bool) 等；0030-repeating-gradients：strip 前缀复用解析器/周期语义/vello 几何收缩一周期+Extend::Repeat/soft rem_euclid/P1-0 停点归一，编号引用源=IMPLEMENTATION-LOG :1645/:1650）。未触碰 CHANGELOG/代码。
+- **P1-4 soft sink 真 blur（box-shadow / text-shadow）**：「blur 忽略」偏差升级真模糊管线。设计四步：①形状 alpha 遮罩——Shadow op 纯平移矩阵（b/c≈0 且 a=d≈1）下构造设备空间 u8 遮罩：outset=外扩 spread 圆角矩形（圆角 radii+spread 增缩、钳半宽 hw/hh 防退化椭圆）、inset=盒内 mask − 平移扩展矩形 mask（clear 语义），像素中心 +0.5 采样 src_inside；②3×可分离盒模糊（水平/垂直交替三遍，σ=blur/2、盒宽 w=⌊√(4σ²+1)⌉ 取奇（三遍合计方差 (w²−1)/4≈σ²）、下限 1；u8 窗口 u32 累加 `(sum+len/2)/len` 取整——全程整数+固定遍历序=逐位确定）、边界钳位延拓（pad=⌈3σ⌉ 下边缘≈0）；③遮罩区域=形状盒±⌈3σ⌉∩画布（高斯 99.7% 能量界）；④composite_mask 着色合成 alpha=color.a×mask/255 逐像素 src-over（clips_ok 之外、inset 盒 src_inside 之外跳过）。text-shadow blur>0=draw_text_shadow_blur：字形折线（text_device_polys 重构产物）→fill_polygons_mask（fill_polygons 同款扫描线 4×4 子行 16 级覆盖、nonzero 环绕、写入取 max 重叠不叠加）→blur_alpha_u8→着色合成；装饰线不投影（Chromium 同语义）；blur=0 保持平移重发原路径（既有像素输出逐位不变）。Text op 折线构建重构为 `text_device_polys`（每字符一组轮廓保持逐字符 fill_polygons 粒度——重叠字形逐次 src-over 不可合并；装饰线组附色、填充序不变；draw_text 消费端字节等价）。旋转/缩放矩阵回退平移矩形近似（B 级在案）。实施曲折：clippy type_complexity×3 → GlyphGroups/DecoGroups/MaskBound 三 type alias；collapsible_if → let-chain（edition 2024）；text_shadow_blur_zero 测试首跑失败=op_text 固定黑 vs 蓝影色不一致（legacy 基准影子 op 补色）。锁五件：盒影软化+单调衰减+pad 外零+双渲染逐字节一致、spread/圆角形状、inset 钳盒、text-shadow 遮罩可见+确定性、blur=0 与平移重发逐字节一致、旋转矩阵回退不 panic。全量 **518** 绿（513→518；soft 30/30）、clippy -D warnings 清零、fmt 净。登记：CHANGELOG P1-4 条、FEATURES.md（text-shadow 条 soft 侧改写、阴影条 soft 真 blur 追记）、IMPLEMENTATION-LOG 本条。
+
+- **P1-5 transition-* 全量（P1a 代理实施 + 主会话接管收尾，ADR-0032）**：
+  P1a 代理（e46fecc5）完成核心——5 新槽位 164..168 + 动画描述符后移
+  169..175（SLOT_COUNT 176）、TransitionTarget/TransitionBehavior 类型、
+  五长手解析器（<time># 拒负/允负、<easing># 重构出 parse_timing_fn_one
+  共文法）、transition 简写展开、computed initial 五臂、decl shorthand
+  登记与展开臂、engine.rs ActiveTransition + reconcile_transitions
+  （判定序：快路径 → before-change 缺失不启动 → ③新值==to 保持运行
+  （容器收敛环保护）→ ①新级联==生效值取消 → ②combined≤0 → ④重定向
+  from=transition_sample → ⑤可插值探针 → ⑥animation_covered_slots 抑制）
+  + sample_transitions 采样挂点（frame() 内 restyle 后、apply_animations
+  前）+ remove/materialize/全清三处卫生 + tests/transition.rs 19 件锁
+  测试。**代理上下文耗尽未收尾（9/19 失败），主会话接管诊断修复**：
+  根因三层——①8 件测试缺基线帧/启动帧（before-change 语义需要已渲染
+  帧：首帧 restyle 时 styles 表空 → reconcile 无旧值不过渡 = CSS 正确
+  语义；测试驱动契约修正为 基线帧→变更→启动帧 frame(0.0)→推进帧，
+  教训两轮：基线帧必须在 set_declarations 之前）；②**引擎真 bug：
+  TimingFn::Steps 语义分支写反**（property.rs sample()：jump_end=true
+  走 ceil = jump-start 语义；css-easing-1：jump-end 默认=⌊p·n⌋/n、
+  jump-start=⌈p·n⌉/n——对调修复，steps_sampling_points 断言按
+  jump-end 真值改写 0.1→from/0.6→0.5/1.0→终值）；③animation_overrides
+  断言隐含 linear 但动画默认 easing=ease（Chromium 语义正确）——测试
+  显式声明 linear；④**动画结束恢复底层值（真缺口补齐）**：
+  apply_animations「已结束且无填充 → 不覆写」≠「恢复 underlying」
+  （styles 表残留最后动画采样值，t≥duration 稳态帧永不清除）——新增
+  anim_underlying: HashMap<NodeId, Vec<(PropertyId, 底层值, 上帧写入值)>>
+  机制：首见动画快照关键帧槽位当前值（覆写前=级联值）、已有条目槽值
+  ≠上帧写入值=外部重算自动刷新（restyle 重建 cs 后快照锚定最新级联）、
+  槽集随轨道对齐（换动画名自愈）、已结束无填充写回快照并移除、
+  forwards/both 终值固定即清、节点移除/伪节点死亡/全清三处卫生同步；
+  ⑤px_of 测试辅助 match 变体修正（Width=DeclValue::LenAuto(Some(Px))，
+  非 Len）；⑥redirect 重定向帧驱动补齐（set(0.5) 后 frame(0.25)
+  from=旧过渡生效值 0.75 重置时钟）。修复后 19/19 全绿；全量 **545**
+  测试绿（518→545；Steps 修复未破坏任何既有动画/过渡测试）。
+  登记：ADR-0032（新建）、CHANGELOG P1-5 条、FEATURES.md（@keyframes
+  条追记结束恢复+steps 修正；:26 状态与动画行改写 transition 全量；
+  新建 transition-* 条目）。

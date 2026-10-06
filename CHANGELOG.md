@@ -693,6 +693,45 @@
   正腿、padding-inline-start 逻辑向、inherit 逐字复制。
   全量 **513** 测试绿（506→513；cascade_layers 修正为断言重写不计新增，
   新增 7 件折叠锁）。
+- **soft sink 真 blur：box-shadow / text-shadow 遮罩盒模糊（P1-4 批）**：
+  soft sink「blur 忽略」偏差升级为真模糊管线——①形状 alpha 遮罩：
+  Shadow op 在纯平移矩阵下构造设备空间 u8 遮罩（outset=外扩 spread 的
+  圆角矩形，圆角随 spread 增缩并钳半宽防退化椭圆；inset=盒内减平移
+  扩展矩形，合成期钳回盒内）；②3×可分离盒模糊（σ=blur/2，盒宽
+  w=⌊√(4σ²+1)⌉ 取奇——三遍合计方差 ≈σ²；u32 窗口累加取整
+  `(sum+len/2)/len`，全程整数运算+固定遍历序，逐位确定、像素测试可
+  锁）；③遮罩 pad=⌈3σ⌉（高斯 99.7% 能量界）∩画布；④着色合成
+  alpha=color.a×mask/255 逐像素 src-over（clips 之外、inset 盒外跳
+  过）。旋转/缩放矩阵回退平移矩形近似（B 级在案）。text-shadow
+  blur>0 = 字形折线遮罩（fill_polygons 同款扫描线 16 级覆盖、写入取
+  max 重叠不叠加）+ 同款盒模糊 + 着色，装饰线不投影（Chromium 同语
+  义）；blur=0 保持平移重发原路径（既有像素输出逐位不变）。Text op
+  折线构建重构为 `text_device_polys`（每字符一组轮廓保持逐字符填充
+  粒度、装饰线组附色——draw_text 消费端字节等价）。新增锁定测试五
+  件：盒影软化+单调衰减+pad 外零+双渲染逐字节一致、spread/圆角形状、
+  inset 钳盒、text-shadow 遮罩可见+确定性、blur=0 与平移重发逐字节
+  一致、旋转矩阵回退。全量 **518** 测试绿（513→518；soft 30/30）。
+- **transition-* 全量：CSS Transitions 落地（P1-5 批，ADR-0032）**：
+  ①属性面 5 新槽位（SLOT_COUNT 176）——transition-property（None/All/
+  Ident 列表，custom-ident 合法保留）、duration/delay（`<time>#`，
+  duration 拒负、delay 允负快进）、timing-function（复用 TimingFn 共
+  文法）、behavior（Normal/AllowDiscrete）+ 简写 `<single-transition>#`
+  （顺序自由、首 time=duration 次=delay、三 time/负 duration 报错整条
+  忽略）；②reconciliation（restyle 提交点、styles.insert 前）：新值==to
+  保持运行（容器收敛环保护）> 新级联==生效值取消 > combined≤0 取消/
+  不启动 > 重定向（from=当前插值中间值）> 可插值探针（离散对需
+  allow-discrete）> 动画覆盖槽抑制启动（偏差在案）；描述符槽自身不可
+  过渡；③采样挂点 frame()（restyle 后、动画前——animation 层高于
+  transition 层）；延迟段写 from、进度≥1 写 to 移除、离散 50% 翻转；
+  过渡表空=稳态零写入；④**引擎修正**：TimingFn::Steps 语义分支写反
+  （jump-end 应为 ⌊p·n⌋/n，原走 ceil）对调修复；⑤**动画结束恢复底层
+  值**：apply_animations 结束且无填充时原「不覆写」≠「恢复 underlying」
+  （styles 表残留最后动画采样值）——新增 anim_underlying 副本机制
+  （首见快照关键帧槽位当前值、外部重算自动刷新、结束写回并移除、
+  forwards/both 终值固定即清、节点移除三处卫生同步）；⑥锁定测试
+  19 件（解析 5 + 驱动 7 + none/all + steps 采样点 + 离散双语义 +
+  动画覆盖 + 稳态幂等 + 文本 color 过渡）。全量 **545** 测试绿
+  （518→545）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | FillRect | ✓ | 椭圆圆角逐像素覆盖测试 |
 //! | Gradient | ✓ | linear（CSS 角度）+ radial（RadialGeom 椭圆）+ conic（ConicGeom 扫角，C3）；停点色仅 Absolute（其余视作全透明），位置仅 Px/Percent（其余/None 自动均布） |
-//! | Shadow | 近似 | 平移半透明矩形（blur 忽略——与 vello sink MVP 同偏差；inset=与盒求交） |
+//! | Shadow | ✓ blur 路径 | blur=0：外扩/内缩平移矩形（原路径）；blur>0：真形状遮罩（圆角矩形 out/inset）+ 3×盒模糊≈高斯（σ=blur/2、pad=⌈3σ⌉、整数滑动窗确定性）——仅纯平移矩阵，旋转/缩放回退平移矩形（记录偏差） |
 //! | Image | ✓ | 最近邻采样（缩放无滤波） |
 //! | Border | 近似 | 直边带（Solid；Dashed/Dotted 近似为实线；圆角未斜切） |
 //! | PushClip/PopClip | ✓ | 矩形+圆角裁剪栈（裁剪矩节点随所在变换层） |
@@ -22,7 +22,7 @@
 //! | PushBlend/PopBlend | ✓ | 混合组全 18 种模式（快照底 + 清区累积，pop 按模式合成；P1-2，css-compositing-1；plus-lighter/darker=预乘加法惯例） |
 //! | PushScroll/PopScroll | ✓ | 平移折叠进变换矩阵（嵌套累加） |
 //! | PushTransform/PopTransform | ✓ | 逆映射逐像素反解 + 4×4 子采样覆盖；无旋转缩放时走中心采样快路径（与整数盒逐位一致）；斜向边缘为锯齿（无 AA，记录） |
-//! | Text | ✓ 近似 | 最小 TrueType（cmap4/glyf 简单+复合字形）折线扫描线 16 级覆盖；基线 = Chromium 同法（hhea 取整 + 半行距）；无 kerning/GSUB、无合成粗斜体、span 覆盖忽略、仅 Start 对齐、max_advance 不折行（记录） |
+//! | Text | ✓ 近似 | 最小 TrueType（cmap4/glyf 简单+复合字形）折线扫描线 16 级覆盖；基线 = Chromium 同法（hhea 取整 + 半行距）；无 kerning/GSUB、无合成粗斜体、span 覆盖忽略、仅 Start 对齐、max_advance 不折行（记录）；text-shadow blur>0=字形遮罩真模糊（装饰线不投影，Chromium 同语义）、blur=0=平移重发 |
 //!
 //! 字节零副作用：字体由宿主经 [`FontBank`] 提供（族名 → TTF 字节）；
 //! `render` 不带字体库时跳过 Text（v0 行为）。
@@ -30,6 +30,7 @@
 // 阶段3 API 冻结：公共项文档强制（C3 契约）。
 #![deny(missing_docs)]
 
+pub mod filter;
 mod ttf;
 
 use style_engine::css::property::{
@@ -359,10 +360,7 @@ fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
             out[3] = ao;
             out
         }
-        BlendMode::Hue
-        | BlendMode::Saturation
-        | BlendMode::Color
-        | BlendMode::Luminosity => {
+        BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => {
             let b = blend_non_separable(mode, [cb[0], cb[1], cb[2]], [cs[0], cs[1], cs[2]]);
             let mut out = [0.0f32; 4];
             for c in 0..3 {
@@ -375,8 +373,7 @@ fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
             let mut out = [0.0f32; 4];
             for c in 0..3 {
                 let b = blend_separable(mode, cb[c], cs[c]);
-                out[c] =
-                    a_s * (1.0 - ab) * cs[c] + a_s * ab * b + ab * (1.0 - a_s) * cb[c];
+                out[c] = a_s * (1.0 - ab) * cs[c] + a_s * ab * b + ab * (1.0 - a_s) * cb[c];
             }
             out[3] = ao;
             out
@@ -595,27 +592,42 @@ fn apply_op(
             offset_y,
             spread,
             inset,
+            blur,
             ..
         } => {
-            // 模糊忽略（与 vello sink MVP 同偏差）：外阴影=外扩平移矩形；
-            // 内阴影=平移矩形与盒体求交。
-            let (sx, sy, sw, sh) = if *inset {
-                let (ix0, iy0) = ((x + offset_x).max(*x), (y + offset_y).max(*y));
-                let (ix1, iy1) = (
-                    (x + offset_x + width + spread).min(x + width),
-                    (y + offset_y + height + spread).min(y + height),
-                );
-                (ix0, iy0, (ix1 - ix0).max(0.0), (iy1 - iy0).max(0.0))
-            } else {
-                (
-                    x + offset_x - spread,
-                    y + offset_y - spread,
-                    width + 2.0 * spread,
-                    height + 2.0 * spread,
-                )
-            };
             let c = components_of_color(color.components);
-            fill_rect(canvas, clips, *mat, sx, sy, sw, sh, radius, move |_, _| c);
+            // P1c 真 blur：blur>0 且矩阵纯平移 → 形状 alpha 遮罩 + 3×盒
+            // 模糊（σ=blur/2，见 draw_blurred_shadow）；其余（旋转/缩放
+            // 矩阵）保持平移矩形近似（记录偏差）。
+            let fast = mat.b.abs() < 1e-6
+                && mat.c.abs() < 1e-6
+                && (mat.a - 1.0).abs() < 1e-6
+                && (mat.d - 1.0).abs() < 1e-6;
+            if *blur > 0.0 && fast {
+                draw_blurred_shadow(
+                    canvas, clips, *mat, *x, *y, *width, *height, radius, c, *offset_x, *offset_y,
+                    *spread, *inset, *blur,
+                );
+            } else {
+                // blur=0 原路径：外阴影=外扩平移矩形；内阴影=平移矩形
+                // 与盒体求交。
+                let (sx, sy, sw, sh) = if *inset {
+                    let (ix0, iy0) = ((x + offset_x).max(*x), (y + offset_y).max(*y));
+                    let (ix1, iy1) = (
+                        (x + offset_x + width + spread).min(x + width),
+                        (y + offset_y + height + spread).min(y + height),
+                    );
+                    (ix0, iy0, (ix1 - ix0).max(0.0), (iy1 - iy0).max(0.0))
+                } else {
+                    (
+                        x + offset_x - spread,
+                        y + offset_y - spread,
+                        width + 2.0 * spread,
+                        height + 2.0 * spread,
+                    )
+                };
+                fill_rect(canvas, clips, *mat, sx, sy, sw, sh, radius, move |_, _| c);
+            }
         }
         PaintOp::Image {
             x,
@@ -815,8 +827,7 @@ fn apply_op(
             for py in by..y1 {
                 let row = py as usize * canvas.width as usize;
                 for px in bx..x1 {
-                    canvas.pixels[(row + px as usize) * 4..(row + px as usize) * 4 + 4]
-                        .fill(0);
+                    canvas.pixels[(row + px as usize) * 4..(row + px as usize) * 4 + 4].fill(0);
                 }
             }
         }
@@ -895,26 +906,47 @@ fn apply_op(
             // F3d：features/variations 无消费点（FontBank 无 GSUB/gvar，
             // 记录偏差）；stretch/word-spacing 伪合成消费（见 draw_text）。
             let _ = text_align;
-            // F2（ADR-0022 D5）：影字先绘（平移重发；blur=B 级在案——
-            // 软栅格逐字形模糊未启）。
+            // F2（ADR-0022 D5）：影字先绘。P1c：blur>0 → 字形遮罩真模糊
+            // （装饰线不投影——Chromium 同语义）；blur=0 → 原平移重发
+            // （含装饰线，保持既有像素输出）。
             for s in shadows.iter() {
-                draw_text(
-                    canvas,
-                    clips,
-                    *mat,
-                    *x + s.dx,
-                    *y + s.dy,
-                    text,
-                    s.color.components,
-                    *font_size,
-                    font_family,
-                    *letter_spacing,
-                    *line_height,
-                    *font_stretch,
-                    *word_spacing,
-                    bank,
-                    decorations,
-                );
+                if s.blur > 0.0 {
+                    draw_text_shadow_blur(
+                        canvas,
+                        clips,
+                        *mat,
+                        *x + s.dx,
+                        *y + s.dy,
+                        text,
+                        s.color.components,
+                        *font_size,
+                        font_family,
+                        *letter_spacing,
+                        *line_height,
+                        *font_stretch,
+                        *word_spacing,
+                        bank,
+                        s.blur,
+                    );
+                } else {
+                    draw_text(
+                        canvas,
+                        clips,
+                        *mat,
+                        *x + s.dx,
+                        *y + s.dy,
+                        text,
+                        s.color.components,
+                        *font_size,
+                        font_family,
+                        *letter_spacing,
+                        *line_height,
+                        *font_stretch,
+                        *word_spacing,
+                        bank,
+                        decorations,
+                    );
+                }
             }
             draw_text(
                 canvas,
@@ -1239,14 +1271,353 @@ fn add_span(cov: &mut [f32], base_x: f32, xa: f32, xb: f32) {
     }
 }
 
-/// Text op 光栅化：家族命中 [`FontBank`] → 最小 TrueType → 折线 → 扫描线。
-/// 基线与 Chromium 同法：hhea asc/desc 取整，行盒内半行距居中；
-/// normal（None）= round(asc)+round(desc)（与引擎 ㉔ 同式）。
-/// F3d（ADR-0026 D5）：font-stretch 伪合成（字形轮廓与步进同比 x 向
-/// 缩放 fw=stretch/100——DejaVu 无 width 轴，B 级在案）；
-/// word-spacing = 每空格字形后追加像素；features/variations 无消费点。
+// ===== P1c：真 blur 基建（形状 alpha 遮罩 + 3×可分离盒模糊）=====
+
+/// 字形组：每字符一组轮廓（保持逐字符 fill_polygons 粒度）。
+type GlyphGroups = Vec<Vec<Vec<(f32, f32)>>>;
+/// 装饰线组：附色矩形折线（填充序=原实现）。
+type DecoGroups = Vec<([f32; 4], Vec<(f32, f32)>)>;
+/// 遮罩合成的额外钳位域（inset=盒矩形 x/y/w/h + 圆角）。
+type MaskBound = (f32, f32, f32, f32, [f32; 8]);
+
+/// 三遍盒模糊的盒宽（逼近高斯 σ：单遍均匀盒方差 (w²−1)/12，三遍合计
+/// (w²−1)/4 = σ² → w=√(4σ²+1)，取奇数、下限 1）。
+pub(crate) fn box_width_for_sigma(sigma: f32) -> usize {
+    if sigma <= 0.0 {
+        return 1;
+    }
+    let w = (4.0 * sigma * sigma + 1.0).sqrt().round() as i64;
+    (w.max(1) as usize) | 1
+}
+
+/// u8 alpha 遮罩 3×可分离盒模糊（水平/垂直交替三遍；逐像素窗口 u32
+/// 累加、`(sum + len/2)/len` 取整——全程整数运算、固定遍历序，逐位
+/// 确定）。边界=钳位延拓（遮罩 pad=⌈3σ⌉，边缘邻域值≈0，钳位影响
+/// 可忽略）。
+pub(crate) fn blur_alpha_u8(mask: &mut [u8], mw: usize, mh: usize, sigma: f32) {
+    let bw = box_width_for_sigma(sigma);
+    if bw <= 1 || mw == 0 || mh == 0 {
+        return;
+    }
+    let half = (bw / 2) as i64;
+    let len = bw as u32;
+    let rnd = len / 2;
+    let mut tmp = vec![0u8; mw * mh];
+    let mut tmp2 = vec![0u8; mw * mh];
+    for _ in 0..3 {
+        // 水平：mask → tmp
+        for y in 0..mh {
+            let row = &mask[y * mw..(y + 1) * mw];
+            let at = |i: i64| row[i.clamp(0, mw as i64 - 1) as usize] as u32;
+            for x in 0..mw {
+                let xi = x as i64;
+                let sum = (xi - half..=xi + half).map(at).sum::<u32>();
+                tmp[y * mw + x] = ((sum + rnd) / len) as u8;
+            }
+        }
+        // 垂直：tmp → tmp2
+        for x in 0..mw {
+            let at = |i: i64| tmp[i.clamp(0, mh as i64 - 1) as usize * mw + x] as u32;
+            for y in 0..mh {
+                let yi = y as i64;
+                let sum = (yi - half..=yi + half).map(at).sum::<u32>();
+                tmp2[y * mw + x] = ((sum + rnd) / len) as u8;
+            }
+        }
+        mask.copy_from_slice(&tmp2);
+    }
+}
+
+/// 设备空间圆角矩形 → u8 遮罩（像素中心采样；`clear=true` 时矩形内
+/// 清零——inset 内影的"洞"，否则矩形内置 255）。
 #[allow(clippy::too_many_arguments)]
-fn draw_text(
+fn mask_rect(
+    mask: &mut [u8],
+    mw: usize,
+    mh: usize,
+    ox: i64,
+    oy: i64,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: &[f32; 8],
+    clear: bool,
+) {
+    for iy in 0..mh {
+        let py = (oy + iy as i64) as f32 + 0.5;
+        for ix in 0..mw {
+            let px = (ox + ix as i64) as f32 + 0.5;
+            if src_inside(px, py, x, y, w, h, r) {
+                let idx = iy * mw + ix;
+                mask[idx] = if clear { 0 } else { 255 };
+            }
+        }
+    }
+}
+
+/// 字形折线 → u8 遮罩（与 [`fill_polygons`] 同扫描线算法：4×4 子行
+/// 16 级覆盖、nonzero 环绕；写入取 max——重叠字形不叠加）。区域以
+/// 遮罩缓冲为界（设备坐标 (ox, oy) 起，尺寸 mw×mh）。
+fn fill_polygons_mask(
+    mask: &mut [u8],
+    mw: i64,
+    mh: i64,
+    ox: i64,
+    oy: i64,
+    polys: &[Vec<(f32, f32)>],
+) {
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for poly in polys {
+        for &(x, y) in poly {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        return;
+    }
+    let x0 = (min_x.floor() as i64).max(ox);
+    let y0 = (min_y.floor() as i64).max(oy);
+    let x1 = (((max_x + 1.0).ceil() as i64).min(ox + mw)).max(x0);
+    let y1 = (((max_y + 1.0).ceil() as i64).min(oy + mh)).max(y0);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let mut edges: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for poly in polys {
+        let n = poly.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            if a.1 != b.1 {
+                edges.push((a.0, a.1, b.0, b.1));
+            }
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+    let mut cov = vec![0.0f32; (x1 - x0).max(0) as usize];
+    for py in y0..y1 {
+        for c in cov.iter_mut() {
+            *c = 0.0;
+        }
+        for s in 0..4 {
+            let ys = py as f32 + (s as f32 + 0.5) * 0.25;
+            let mut xs: Vec<(f32, i32)> = Vec::new();
+            for &(ex0, ey0, ex1, ey1) in &edges {
+                let (lo, hi) = if ey0 < ey1 { (ey0, ey1) } else { (ey1, ey0) };
+                if ys < lo || ys >= hi {
+                    continue;
+                }
+                let t = (ys - ey0) / (ey1 - ey0);
+                xs.push((ex0 + t * (ex1 - ex0), if ey1 > ey0 { 1 } else { -1 }));
+            }
+            if xs.is_empty() {
+                continue;
+            }
+            xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut winding = 0i32;
+            let mut span_start = 0.0f32;
+            for (x, d) in xs {
+                if winding != 0 {
+                    add_span(&mut cov, x0 as f32, span_start, x);
+                }
+                winding += d;
+                span_start = x;
+            }
+        }
+        for (i, &c) in cov.iter().enumerate() {
+            if c <= 0.0 {
+                continue;
+            }
+            let mx = x0 + i as i64 - ox;
+            let my = py - oy;
+            let v = (c.min(1.0) * 255.0).round() as u8;
+            let idx = (my * mw + mx) as usize;
+            mask[idx] = mask[idx].max(v);
+        }
+    }
+}
+
+/// 遮罩着色合成：`alpha = color.a × mask/255`，逐像素 src-over；clips
+/// 之外或 `bound`（inset=盒矩形，含圆角）之外跳过。
+#[allow(clippy::too_many_arguments)]
+fn composite_mask(
+    canvas: &mut SoftCanvas,
+    clips: &[Clip],
+    mask: &[u8],
+    mw: i64,
+    ox: i64,
+    oy: i64,
+    color: [f32; 4],
+    bound: Option<MaskBound>,
+) {
+    if mw <= 0 {
+        return;
+    }
+    let mh = mask.len() as i64 / mw;
+    for my in 0..mh {
+        for mx in 0..mw {
+            let a = mask[(my * mw + mx) as usize];
+            if a == 0 {
+                continue;
+            }
+            let dx = (ox + mx) as f32 + 0.5;
+            let dy = (oy + my) as f32 + 0.5;
+            if !clips_ok(clips, dx, dy) {
+                continue;
+            }
+            if let Some((bx, by, bw, bh, br)) = bound
+                && !src_inside(dx, dy, bx, by, bw, bh, &br)
+            {
+                continue;
+            }
+            let af = (a as f32 / 255.0) * color[3];
+            let i = ((oy + my) as usize * canvas.width as usize + (ox + mx) as usize) * 4;
+            blend(
+                &mut canvas.pixels[i..i + 4],
+                [color[0], color[1], color[2], af],
+            );
+        }
+    }
+}
+
+/// 真模糊盒阴影（P1c）：设备空间形状 alpha 遮罩 + [`blur_alpha_u8`]
+/// （σ=blur/2）+ [`composite_mask`]。outset=外扩 spread 的圆角矩形
+/// （圆角随 spread 增缩、钳半宽防退化椭圆）；inset=盒内减平移扩展
+/// 矩形（合成期钳回盒内）。遮罩区域=形状盒 ± ⌈3σ⌉ ∩ 画布。仅纯
+/// 平移矩阵调用（旋转/缩放回退平移矩形近似——模块表记录偏差）。
+#[allow(clippy::too_many_arguments)]
+fn draw_blurred_shadow(
+    canvas: &mut SoftCanvas,
+    clips: &[Clip],
+    mat: Mat,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: &[f32; 8],
+    color: [f32; 4],
+    ox: f32,
+    oy: f32,
+    spread: f32,
+    inset: bool,
+    blur: f32,
+) {
+    let sigma = (blur * 0.5).max(0.25);
+    let pad = (3.0 * sigma).ceil() as i64;
+    // 纯平移矩阵：设备矩形 = 源矩形 + (e, f)。
+    let (dx, dy) = (x + mat.e, y + mat.f);
+    let radii = |rw: f32, rh: f32, grow: f32| -> [f32; 8] {
+        let hx = (rw * 0.5).max(0.0);
+        let hy = (rh * 0.5).max(0.0);
+        [
+            (radius[0] + grow).max(0.0).min(hx),
+            (radius[1] + grow).max(0.0).min(hy),
+            (radius[2] + grow).max(0.0).min(hx),
+            (radius[3] + grow).max(0.0).min(hy),
+            (radius[4] + grow).max(0.0).min(hx),
+            (radius[5] + grow).max(0.0).min(hy),
+            (radius[6] + grow).max(0.0).min(hx),
+            (radius[7] + grow).max(0.0).min(hy),
+        ]
+    };
+    let (sx, sy, sw, sh) = if inset {
+        (dx, dy, w, h)
+    } else {
+        (
+            dx + ox - spread,
+            dy + oy - spread,
+            w + 2.0 * spread,
+            h + 2.0 * spread,
+        )
+    };
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+    let mx0 = ((sx.floor() as i64) - pad).max(0);
+    let my0 = ((sy.floor() as i64) - pad).max(0);
+    let mx1 = ((sx + sw).ceil() as i64 + pad).min(canvas.width as i64);
+    let my1 = ((sy + sh).ceil() as i64 + pad).min(canvas.height as i64);
+    if mx0 >= mx1 || my0 >= my1 {
+        return;
+    }
+    let (mw, mh) = ((mx1 - mx0) as usize, (my1 - my0) as usize);
+    let mut mask = vec![0u8; mw * mh];
+    if inset {
+        mask_rect(
+            &mut mask,
+            mw,
+            mh,
+            mx0,
+            my0,
+            dx,
+            dy,
+            w,
+            h,
+            &radii(w, h, 0.0),
+            false,
+        );
+        let (hx, hy, hw, hh) = (
+            dx + ox - spread,
+            dy + oy - spread,
+            w + 2.0 * spread,
+            h + 2.0 * spread,
+        );
+        if hw > 0.0 && hh > 0.0 {
+            mask_rect(
+                &mut mask,
+                mw,
+                mh,
+                mx0,
+                my0,
+                hx,
+                hy,
+                hw,
+                hh,
+                &radii(hw, hh, spread),
+                true,
+            );
+        }
+    } else {
+        mask_rect(
+            &mut mask,
+            mw,
+            mh,
+            mx0,
+            my0,
+            sx,
+            sy,
+            sw,
+            sh,
+            &radii(sw, sh, spread),
+            false,
+        );
+    }
+    blur_alpha_u8(&mut mask, mw, mh, sigma);
+    let bound = if inset {
+        Some((dx, dy, w, h, radii(w, h, 0.0)))
+    } else {
+        None
+    };
+    composite_mask(canvas, clips, &mask, mw as i64, mx0, my0, color, bound);
+}
+
+/// text-shadow blur>0：字形折线 → 遮罩（[`fill_polygons_mask`]）→
+/// [`blur_alpha_u8`]（σ=blur/2）→ 着色合成。装饰线不投影（Chromium
+/// 同语义）；offset 已由调用方计入 x/y。
+#[allow(clippy::too_many_arguments)]
+fn draw_text_shadow_blur(
     canvas: &mut SoftCanvas,
     clips: &[Clip],
     mat: Mat,
@@ -1261,16 +1632,83 @@ fn draw_text(
     font_stretch: f32,
     word_spacing: Option<f32>,
     bank: &FontBank,
-    decorations: &[style_engine::paint::TextDecorationPaint],
+    blur: f32,
 ) {
+    let (glyphs, _) = text_device_polys(
+        mat,
+        x,
+        y,
+        text,
+        font_size,
+        family,
+        letter_spacing,
+        line_height,
+        font_stretch,
+        word_spacing,
+        bank,
+        &[],
+    );
+    let flat: Vec<Vec<(f32, f32)>> = glyphs.into_iter().flatten().collect();
+    if flat.is_empty() {
+        return;
+    }
+    let sigma = (blur * 0.5).max(0.25);
+    let pad = (3.0 * sigma).ceil() as i64;
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for poly in &flat {
+        for &(px, py) in poly {
+            min_x = min_x.min(px);
+            min_y = min_y.min(py);
+            max_x = max_x.max(px);
+            max_y = max_y.max(py);
+        }
+    }
+    let mx0 = ((min_x.floor() as i64) - pad).max(0);
+    let my0 = ((min_y.floor() as i64) - pad).max(0);
+    let mx1 = ((max_x.ceil() as i64) + pad).min(canvas.width as i64);
+    let my1 = ((max_y.ceil() as i64) + pad).min(canvas.height as i64);
+    if mx0 >= mx1 || my0 >= my1 {
+        return;
+    }
+    let (mw, mh) = ((mx1 - mx0) as usize, (my1 - my0) as usize);
+    let mut mask = vec![0u8; mw * mh];
+    fill_polygons_mask(&mut mask, mw as i64, mh as i64, mx0, my0, &flat);
+    blur_alpha_u8(&mut mask, mw, mh, sigma);
+    composite_mask(canvas, clips, &mask, mw as i64, mx0, my0, color, None);
+}
+
+/// Text 设备空间折线提取：字形（每字符一组轮廓——保持原逐字符
+/// fill_polygons 粒度，重叠字形逐次 src-over）+ 装饰线矩形（附色，
+/// 填充序与原实现一致）。字体未命中 → 空组。供 [`draw_text`] 与
+/// [`draw_text_shadow_blur`] 共用（P1c 重构，光栅输出逐位不变）。
+#[allow(clippy::too_many_arguments)]
+fn text_device_polys(
+    mat: Mat,
+    x: f32,
+    y: f32,
+    text: &str,
+    font_size: f32,
+    family: &FontFamilyList,
+    letter_spacing: f32,
+    line_height: Option<f32>,
+    font_stretch: f32,
+    word_spacing: Option<f32>,
+    bank: &FontBank,
+    decorations: &[style_engine::paint::TextDecorationPaint],
+) -> (GlyphGroups, DecoGroups) {
+    let mut glyph_groups: GlyphGroups = Vec::new();
+    let mut deco_groups: DecoGroups = Vec::new();
     let Some(data) = family.0.iter().find_map(|f| match f {
         FamilyName::Named(name) => bank.get(name),
         _ => None,
     }) else {
-        return; // 未命中字体 → 跳过该 Text（记录偏差）
+        return (glyph_groups, deco_groups); // 未命中字体 → 跳过该 Text（记录偏差）
     };
     let Some(font) = ttf::SoftFont::parse(data) else {
-        return;
+        return (glyph_groups, deco_groups);
     };
     let scale = font.scale_for(font_size);
     let asc = font.ascender as f32 * scale;
@@ -1287,16 +1725,16 @@ fn draw_text(
         let gid = font.lookup(ch).unwrap_or(0);
         let polys_font = font.outline(gid);
         if !polys_font.is_empty() {
-            let mut polys: Vec<Vec<(f32, f32)>> = Vec::with_capacity(polys_font.len());
+            let mut contours: Vec<Vec<(f32, f32)>> = Vec::with_capacity(polys_font.len());
             for cont in &polys_font {
                 let mut dp = Vec::with_capacity(cont.len());
                 for &(fx, fy) in cont {
                     let (sx, sy) = (pen + fx * scale * fw, baseline - fy * scale);
                     dp.push(mat.apply(sx, sy));
                 }
-                polys.push(dp);
+                contours.push(dp);
             }
-            fill_polygons(canvas, clips, &polys, color);
+            glyph_groups.push(contours);
         }
         pen += font.advance(gid, scale) * fw + letter_spacing;
         if ch == ' ' {
@@ -1326,9 +1764,56 @@ fn draw_text(
                     mat.apply(end_x, cy + t * 0.5),
                     mat.apply(x, cy + t * 0.5),
                 ];
-                fill_polygons(canvas, clips, &[rect], d.color.components);
+                deco_groups.push((d.color.components, rect));
             }
         }
+    }
+    (glyph_groups, deco_groups)
+}
+
+/// Text op 光栅化：家族命中 [`FontBank`] → 最小 TrueType → 折线 → 扫描线。
+/// 基线与 Chromium 同法：hhea asc/desc 取整，行盒内半行距居中；
+/// normal（None）= round(asc)+round(desc)（与引擎 ㉔ 同式）。
+/// F3d（ADR-0026 D5）：font-stretch 伪合成（字形轮廓与步进同比 x 向
+/// 缩放 fw=stretch/100——DejaVu 无 width 轴，B 级在案）；
+/// word-spacing = 每空格字形后追加像素；features/variations 无消费点。
+#[allow(clippy::too_many_arguments)]
+fn draw_text(
+    canvas: &mut SoftCanvas,
+    clips: &[Clip],
+    mat: Mat,
+    x: f32,
+    y: f32,
+    text: &str,
+    color: [f32; 4],
+    font_size: f32,
+    family: &FontFamilyList,
+    letter_spacing: f32,
+    line_height: Option<f32>,
+    font_stretch: f32,
+    word_spacing: Option<f32>,
+    bank: &FontBank,
+    decorations: &[style_engine::paint::TextDecorationPaint],
+) {
+    let (glyph_groups, deco_groups) = text_device_polys(
+        mat,
+        x,
+        y,
+        text,
+        font_size,
+        family,
+        letter_spacing,
+        line_height,
+        font_stretch,
+        word_spacing,
+        bank,
+        decorations,
+    );
+    for contours in &glyph_groups {
+        fill_polygons(canvas, clips, contours, color);
+    }
+    for (dc, rect) in &deco_groups {
+        fill_polygons(canvas, clips, std::slice::from_ref(rect), *dc);
     }
 }
 
@@ -1480,6 +1965,202 @@ mod tests {
             }
         }
         r
+    }
+
+    // ===== P1c：真 blur =====
+
+    #[allow(clippy::too_many_arguments)]
+    fn op_shadow(
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        dx: f32,
+        dy: f32,
+        spread: f32,
+        blur: f32,
+        inset: bool,
+        radius: [f32; 8],
+    ) -> PaintOp {
+        PaintOp::Shadow {
+            x,
+            y,
+            width: w,
+            height: h,
+            radius,
+            color: rgba(color),
+            offset_x: dx,
+            offset_y: dy,
+            spread,
+            blur,
+            inset,
+        }
+    }
+
+    fn gray_at(c: &SoftCanvas, x: u32, y: u32) -> u8 {
+        pixel(c, x, y)[0]
+    }
+
+    #[test]
+    fn box_shadow_blur_softens_edge_and_deterministic() {
+        // blur=8（σ=4）：盒内全影、盒缘外单调衰减、pad=3σ 之外为零；
+        // 两次渲染逐字节一致（整数滑动窗确定性）。
+        let mut list = DisplayList::default();
+        list.ops.push(op_shadow(
+            16.0,
+            16.0,
+            16.0,
+            16.0,
+            [0.0, 0.0, 0.0, 1.0],
+            0.0,
+            0.0,
+            0.0,
+            8.0,
+            false,
+            [0.0; 8],
+        ));
+        let c = render(&list, 48, 48, [255, 255, 255, 255]);
+        assert!(gray_at(&c, 24, 24) < 60, "center fully shadowed");
+        assert!(
+            gray_at(&c, 24, 15) < gray_at(&c, 24, 12),
+            "monotonic falloff outward"
+        );
+        assert!(gray_at(&c, 24, 12) < 255, "bleed outside box edge");
+        assert_eq!(gray_at(&c, 2, 2), 255, "beyond 3σ pad untouched");
+        let c2 = render(&list, 48, 48, [255, 255, 255, 255]);
+        assert_eq!(c.pixels, c2.pixels, "byte-deterministic");
+    }
+
+    #[test]
+    fn box_shadow_blur_rounded_spread_shape() {
+        // spread=4 外扩 + 圆角：形状盒 12..36，(2,2) 距形状 > pad=6 → 白。
+        let mut list = DisplayList::default();
+        list.ops.push(op_shadow(
+            16.0,
+            16.0,
+            16.0,
+            16.0,
+            [0.0, 0.0, 0.0, 1.0],
+            0.0,
+            0.0,
+            4.0,
+            4.0,
+            false,
+            [4.0; 8],
+        ));
+        let c = render(&list, 48, 48, [255, 255, 255, 255]);
+        assert!(gray_at(&c, 24, 24) < 60, "center dark");
+        assert_eq!(gray_at(&c, 2, 2), 255, "outside pad white");
+    }
+
+    #[test]
+    fn inset_shadow_blur_clipped_to_box() {
+        // inset：影只见于盒内（上缘暗、洞心白）；盒外即使模糊可达也钳回。
+        let mut list = DisplayList::default();
+        list.ops.push(op_shadow(
+            12.0,
+            12.0,
+            24.0,
+            24.0,
+            [0.0, 0.0, 0.0, 1.0],
+            0.0,
+            4.0,
+            0.0,
+            6.0,
+            true,
+            [0.0; 8],
+        ));
+        let c = render(&list, 48, 48, [255, 255, 255, 255]);
+        assert!(gray_at(&c, 24, 13) < 200, "top edge dark");
+        assert!(gray_at(&c, 24, 28) >= 250, "hole interior clean");
+        assert_eq!(gray_at(&c, 24, 5), 255, "outside box clipped");
+    }
+
+    #[test]
+    fn text_shadow_blur_glyph_mask_deterministic() {
+        use style_engine::paint::TextShadowPaint;
+        let mut op = op_text(8.0, 8.0, "Hi");
+        if let PaintOp::Text { shadows, .. } = &mut op {
+            *shadows = vec![TextShadowPaint {
+                dx: 1.0,
+                dy: 1.0,
+                blur: 3.0,
+                color: rgba([1.0, 0.0, 0.0, 1.0]),
+            }];
+        }
+        let mut list = DisplayList::default();
+        list.ops.push(op);
+        let c = render_with_fonts(&list, 64, 32, [255, 255, 255, 255], &font_bank());
+        // 红影存在（r 显著高于 g/b）且两次渲染逐字节一致。
+        let reds = (0..c.width)
+            .flat_map(|x| (0..c.height).map(move |y| (x, y)))
+            .filter(|&(x, y)| {
+                let p = pixel(&c, x, y);
+                p[0] as i32 - p[1].max(p[2]) as i32 > 40
+            })
+            .count();
+        assert!(reds > 20, "blurred red shadow visible, reds={reds}");
+        let c2 = render_with_fonts(&list, 64, 32, [255, 255, 255, 255], &font_bank());
+        assert_eq!(c.pixels, c2.pixels, "byte-deterministic");
+    }
+
+    #[test]
+    fn text_shadow_blur_zero_keeps_legacy_path() {
+        // blur=0 与「平移重发两个 Text op」逐字节一致（原路径未动）。
+        use style_engine::paint::TextShadowPaint;
+        let mut op = op_text(8.0, 8.0, "Hi");
+        if let PaintOp::Text { shadows, .. } = &mut op {
+            *shadows = vec![TextShadowPaint {
+                dx: 2.0,
+                dy: 3.0,
+                blur: 0.0,
+                color: rgba([0.0, 0.0, 1.0, 1.0]),
+            }];
+        }
+        let mut list = DisplayList::default();
+        list.ops.push(op);
+        let c = render_with_fonts(&list, 64, 32, [255, 255, 255, 255], &font_bank());
+        let mut legacy = DisplayList::default();
+        // legacy 影字 op 颜色须与被测 shadow 同色（op_text 默认黑）。
+        let mut shadow_op = op_text(10.0, 11.0, "Hi");
+        if let PaintOp::Text { color, .. } = &mut shadow_op {
+            *color = rgba([0.0, 0.0, 1.0, 1.0]);
+        }
+        legacy.ops.push(shadow_op);
+        legacy.ops.push(op_text(8.0, 8.0, "Hi"));
+        let c2 = render_with_fonts(&legacy, 64, 32, [255, 255, 255, 255], &font_bank());
+        assert_eq!(c.pixels, c2.pixels, "blur=0 == shifted re-emit");
+    }
+
+    #[test]
+    fn box_shadow_blur_rotated_matrix_fallback() {
+        // 非平移矩阵回退平移矩形近似（记录偏差）：不 panic、有墨迹。
+        let mut list = DisplayList::default();
+        let rad = std::f32::consts::FRAC_PI_4;
+        list.ops.push(PaintOp::PushTransform {
+            affine: [rad.cos(), rad.sin(), -rad.sin(), rad.cos(), 0.0, 0.0],
+        });
+        list.ops.push(op_shadow(
+            16.0,
+            16.0,
+            16.0,
+            16.0,
+            [0.0, 0.0, 0.0, 1.0],
+            0.0,
+            0.0,
+            0.0,
+            8.0,
+            false,
+            [0.0; 8],
+        ));
+        list.ops.push(PaintOp::PopTransform);
+        let c = render(&list, 64, 64, [255, 255, 255, 255]);
+        let ink = (0..c.width)
+            .flat_map(|x| (0..c.height).map(move |y| (x, y)))
+            .filter(|&(x, y)| gray_at(&c, x, y) < 250)
+            .count();
+        assert!(ink > 0, "fallback shadow still paints, ink={ink}");
     }
 
     #[test]
@@ -2051,8 +2732,7 @@ mod tests {
             width: 4.0,
             height: 4.0,
         });
-        list.ops
-            .push(op_fill(0.0, 0.0, 4.0, 4.0, [0.0; 8], src));
+        list.ops.push(op_fill(0.0, 0.0, 4.0, 4.0, [0.0; 8], src));
         list.ops.push(PaintOp::PopBlend);
         let c = render(&list, 4, 4, base);
         let mut p = [0u8; 4];
@@ -2067,21 +2747,45 @@ mod tests {
         let blue = [0.0, 0.0, 1.0, 1.0];
         let white = [255, 255, 255, 255];
         // multiply：cb·cs 逐通道 → 红底蓝源 = 乘黑 (0,0,0)
-        assert_eq!(blend_pixel_of(BlendMode::Multiply, [255, 0, 0, 255], blue), [0, 0, 0, 255]);
+        assert_eq!(
+            blend_pixel_of(BlendMode::Multiply, [255, 0, 0, 255], blue),
+            [0, 0, 0, 255]
+        );
         // screen：cb+cs−cb·cs → 红底蓝源 = (255,0,255)
-        assert_eq!(blend_pixel_of(BlendMode::Screen, [255, 0, 0, 255], blue), [255, 0, 255, 255]);
+        assert_eq!(
+            blend_pixel_of(BlendMode::Screen, [255, 0, 0, 255], blue),
+            [255, 0, 255, 255]
+        );
         // difference：|cb−cs| → 白底蓝源 = (255,255,0)
-        assert_eq!(blend_pixel_of(BlendMode::Difference, white, blue), [255, 255, 0, 255]);
+        assert_eq!(
+            blend_pixel_of(BlendMode::Difference, white, blue),
+            [255, 255, 0, 255]
+        );
         // darken / lighten：逐通道 min/max
         let dim = [100.0 / 255.0, 150.0 / 255.0, 60.0 / 255.0, 1.0];
-        assert_eq!(blend_pixel_of(BlendMode::Darken, [200, 100, 50, 255], dim), [100, 100, 50, 255]);
-        assert_eq!(blend_pixel_of(BlendMode::Lighten, [200, 100, 50, 255], dim), [200, 150, 60, 255]);
+        assert_eq!(
+            blend_pixel_of(BlendMode::Darken, [200, 100, 50, 255], dim),
+            [100, 100, 50, 255]
+        );
+        assert_eq!(
+            blend_pixel_of(BlendMode::Lighten, [200, 100, 50, 255], dim),
+            [200, 150, 60, 255]
+        );
         // plus-lighter：预乘加法 → 红底蓝源 = (255,0,255)
-        assert_eq!(blend_pixel_of(BlendMode::PlusLighter, [255, 0, 0, 255], blue), [255, 0, 255, 255]);
+        assert_eq!(
+            blend_pixel_of(BlendMode::PlusLighter, [255, 0, 0, 255], blue),
+            [255, 0, 255, 255]
+        );
         // plus-darker：max(0, Db+Ds−1) → 白底蓝源 = (0,0,255)
-        assert_eq!(blend_pixel_of(BlendMode::PlusDarker, white, blue), [0, 0, 255, 255]);
+        assert_eq!(
+            blend_pixel_of(BlendMode::PlusDarker, white, blue),
+            [0, 0, 255, 255]
+        );
         // normal：αs=1 时 = 源（不透明覆盖）
-        assert_eq!(blend_pixel_of(BlendMode::Normal, [255, 0, 0, 255], blue), [0, 0, 255, 255]);
+        assert_eq!(
+            blend_pixel_of(BlendMode::Normal, [255, 0, 0, 255], blue),
+            [0, 0, 255, 255]
+        );
     }
 
     #[test]
@@ -2122,7 +2826,11 @@ mod tests {
         assert_eq!(p, [191, 127, 127, 255], "blend 应包住 opacity 组");
         // 非可分离 luminosity：灰底 + 红源 → 亮度=0.3 → (77,77,77)
         assert_eq!(
-            blend_pixel_of(BlendMode::Luminosity, [100, 100, 100, 255], [1.0, 0.0, 0.0, 1.0]),
+            blend_pixel_of(
+                BlendMode::Luminosity,
+                [100, 100, 100, 255],
+                [1.0, 0.0, 0.0, 1.0]
+            ),
             [77, 77, 77, 255]
         );
     }

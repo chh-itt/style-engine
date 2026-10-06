@@ -488,6 +488,8 @@ fn shorthand_exists(name: &str) -> bool {
             // F3d（ADR-0026）：border-image 简写（<source> || <slice>
             // [/ <width>? [/ <outset>?]?]? || <repeat>）
             | "border-image"
+            // G1（ADR-0032）：transition 简写（<single-transition>#）
+            | "transition"
     )
 }
 
@@ -592,6 +594,14 @@ pub(crate) fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
             P::BorderImageWidth,
             P::BorderImageOutset,
             P::BorderImageRepeat,
+        ],
+        // G1（ADR-0032）：transition 五长手（展开输出全集）
+        "transition" => vec![
+            P::TransitionProperty,
+            P::TransitionDuration,
+            P::TransitionTimingFunction,
+            P::TransitionDelay,
+            P::TransitionBehavior,
         ],
         "grid-column" => vec![P::GridColumnStart, P::GridColumnEnd],
         "grid-area" => vec![
@@ -1494,6 +1504,161 @@ pub(crate) fn expand_shorthand(
             }
             out
         }
+        "transition" => {
+            // G1（ADR-0032）transition 简写：<single-transition>#。组内顺序
+            // 自由：[none|all|<custom-ident>] || <time> || <easing> ||
+            // [normal|allow-discrete]；组内首个 <time>=duration、次个=delay。
+            // 组内缺省部件回初始（property=all、duration=0s、timing=ease、
+            // delay=0s，对齐 Chromium）；behavior 单值非列表——组内出现即
+            // 覆盖、末组胜。空组（空值/前导尾逗号）→ 整条容错丢弃。
+            use crate::css::property::{
+                TransitionBehavior, TransitionPropertyList, TransitionTarget, TransitionTimeList,
+                TransitionTimingList,
+            };
+            let mut props: SmallVec<[TransitionTarget; 2]> = SmallVec::new();
+            let mut durs: SmallVec<[f32; 2]> = SmallVec::new();
+            let mut timings: SmallVec<[crate::css::property::TimingFn; 2]> = SmallVec::new();
+            let mut delays: SmallVec<[f32; 2]> = SmallVec::new();
+            let mut behavior: Option<TransitionBehavior> = None;
+            loop {
+                let mut target: Option<TransitionTarget> = None;
+                let mut dur: Option<f32> = None;
+                let mut delay: Option<f32> = None;
+                let mut timing: Option<crate::css::property::TimingFn> = None;
+                let mut beh: Option<TransitionBehavior> = None;
+                let mut times = 0u32;
+                let mut any = false;
+                loop {
+                    p.skip_whitespace();
+                    // <time>：s/ms → 秒
+                    let time = p.try_parse(|p| -> ValResult<f32> {
+                        let t = p.next()?.clone();
+                        let Token::Dimension { value, unit, .. } = &t else {
+                            return Err(p.new_error_for_next_token());
+                        };
+                        if unit.eq_ignore_ascii_case("s") {
+                            Ok(*value)
+                        } else if unit.eq_ignore_ascii_case("ms") {
+                            Ok(value / 1000.0)
+                        } else {
+                            Err(p.new_error_for_next_token())
+                        }
+                    });
+                    if let Ok(secs) = time {
+                        times += 1;
+                        if times == 1 {
+                            dur = Some(secs);
+                        } else if times == 2 {
+                            delay = Some(secs);
+                        } else {
+                            return Err(p.new_error_for_next_token());
+                        }
+                        any = true;
+                        continue;
+                    }
+                    // <easing>：steps() 函数形 + 关键字（复用 animation 文法）
+                    if timing.is_none()
+                        && let Ok(f) = p.try_parse(crate::css::property::parse_timing_fn_one)
+                    {
+                        timing = Some(f);
+                        any = true;
+                        continue;
+                    }
+                    // behavior 关键字（normal/allow-discrete）
+                    let beh_kw = p.try_parse(|p| -> ValResult<TransitionBehavior> {
+                        let t = p.next()?.clone();
+                        match &t {
+                            Token::Ident(id) if id.eq_ignore_ascii_case("normal") => {
+                                Ok(TransitionBehavior::Normal)
+                            }
+                            Token::Ident(id) if id.eq_ignore_ascii_case("allow-discrete") => {
+                                Ok(TransitionBehavior::AllowDiscrete)
+                            }
+                            _ => Err(p.new_error_for_next_token()),
+                        }
+                    });
+                    if let Ok(b) = beh_kw {
+                        beh = Some(b);
+                        any = true;
+                        continue;
+                    }
+                    // 目标：none | all | custom-ident（--* 与宽关键字拒绝）
+                    if target.is_none() {
+                        let tgt = p.try_parse(|p| -> ValResult<TransitionTarget> {
+                            let t = p.next()?.clone();
+                            match &t {
+                                Token::Ident(id) if id.eq_ignore_ascii_case("none") => {
+                                    Ok(TransitionTarget::None)
+                                }
+                                Token::Ident(id) if id.eq_ignore_ascii_case("all") => {
+                                    Ok(TransitionTarget::All)
+                                }
+                                Token::Ident(id)
+                                    if !id.starts_with("--")
+                                        && !matches!(
+                                            id.to_ascii_lowercase().as_str(),
+                                            "initial"
+                                                | "inherit"
+                                                | "unset"
+                                                | "revert"
+                                                | "revert-layer"
+                                        ) =>
+                                {
+                                    Ok(TransitionTarget::Ident(id.to_string()))
+                                }
+                                _ => Err(p.new_error_for_next_token()),
+                            }
+                        });
+                        if let Ok(tg) = tgt {
+                            target = Some(tg);
+                            any = true;
+                            continue;
+                        }
+                    }
+                    break; // 组尾
+                }
+                if !any {
+                    return Err(p.new_error_for_next_token());
+                }
+                props.push(target.unwrap_or(TransitionTarget::All));
+                durs.push(dur.unwrap_or(0.0));
+                timings.push(timing.unwrap_or(crate::css::property::TimingFn::Ease));
+                delays.push(delay.unwrap_or(0.0));
+                if beh.is_some() {
+                    behavior = beh;
+                }
+                p.skip_whitespace();
+                if p.is_exhausted() {
+                    break;
+                }
+                match p.next()? {
+                    Token::Comma => continue,
+                    _ => return Err(p.new_error_for_next_token()),
+                }
+            }
+            vec![
+                (
+                    P::TransitionProperty,
+                    DeclValue::TransitionProperty(TransitionPropertyList(props)),
+                ),
+                (
+                    P::TransitionDuration,
+                    DeclValue::TransitionTime(TransitionTimeList(durs)),
+                ),
+                (
+                    P::TransitionTimingFunction,
+                    DeclValue::TransitionTiming(TransitionTimingList(timings)),
+                ),
+                (
+                    P::TransitionDelay,
+                    DeclValue::TransitionTime(TransitionTimeList(delays)),
+                ),
+                (
+                    P::TransitionBehavior,
+                    DeclValue::TransitionBehavior(behavior.unwrap_or(TransitionBehavior::Normal)),
+                ),
+            ]
+        }
         "border-radius" => {
             // 第五批⑪椭圆圆角：`<lp>{1,4} [ '/' <lp>{1,4} ]?`（tl tr br bl
             // 各按 CSS 1-4 展开）；无斜杠=圆形角（纵=横），带斜杠但纵组
@@ -2240,6 +2405,8 @@ mod tests {
                 "border-image",
                 "url(a.png) 30% fill / 10px / 5px round space",
             ),
+            // G1（ADR-0032）transition 简写代表值（全组件覆盖）
+            ("transition", "opacity 1s ease 0.2s allow-discrete"),
         ];
         for (name, val) in cases {
             let mut p = cssparser::Parser::new(val);

@@ -14,7 +14,8 @@ use crate::css::property::{
     Align, AnimDirection, AnimFillMode, BackgroundImage, ContainerType, CursorKind, DeclValue,
     Display, FamilyName, FlexDirection, FlexWrap, FontFamilyList, FontStyle, GridAutoFlowKind,
     GridTemplate, LineHeight, OutlineStyle, Overflow, PointerEventsKind, Position, PropertyId,
-    TextAlign, TimingFn, UserSelectKind, WhiteSpace,
+    TextAlign, TimingFn, TransitionBehavior, TransitionPropertyList, TransitionTarget,
+    TransitionTimeList, TransitionTimingList, UserSelectKind, WhiteSpace,
 };
 use crate::css::stylesheet::{MediaEnv, Stylesheet};
 use crate::css::value::{ColorValue, LengthPercentage, ResolveCtx};
@@ -387,6 +388,17 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::AnimationTimingFunction => DeclValue::AnimationTiming(TimingFn::Ease),
         P::AnimationDirection => DeclValue::AnimationDirection(AnimDirection::Normal),
         P::AnimationFillMode => DeclValue::AnimationFillMode(AnimFillMode::None),
+        // transition 描述符（G1，ADR-0032）：all / 0s / ease / 0s / normal。
+        // 不继承（inherits() 白名单未加）。
+        P::TransitionProperty => {
+            DeclValue::TransitionProperty(TransitionPropertyList(smallvec![TransitionTarget::All]))
+        }
+        P::TransitionDuration => DeclValue::TransitionTime(TransitionTimeList(smallvec![0.0])),
+        P::TransitionTimingFunction => {
+            DeclValue::TransitionTiming(TransitionTimingList(smallvec![TimingFn::Ease]))
+        }
+        P::TransitionDelay => DeclValue::TransitionTime(TransitionTimeList(smallvec![0.0])),
+        P::TransitionBehavior => DeclValue::TransitionBehavior(TransitionBehavior::Normal),
         P::MinWidth | P::MinHeight => DeclValue::Len(LengthPercentage::Px(0.0)),
         P::AspectRatio => DeclValue::AspectRatio(None),
         // margin 初始值为 0（CSS）；显式 auto 仍解析为 LenAuto(None) → 居中语义保留
