@@ -1068,6 +1068,13 @@ fn stop_positions(stops: &[ColorStop], line_len: f32) -> Vec<f32> {
             pos[i] = pos[i + 1];
         }
     }
+    // css-images-3 §4.5.2：显式位置逆序时抬至前停位（单调化；
+    // 解析器不夹取，用值期语义归 sink）
+    for i in 1..n {
+        if pos[i] < pos[i - 1] {
+            pos[i] = pos[i - 1];
+        }
+    }
     pos.into_iter().map(|p| p.unwrap_or(0.0)).collect()
 }
 

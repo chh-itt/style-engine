@@ -33,6 +33,40 @@ mod tests {
     use style_engine::tree::StyleNode;
 
     #[test]
+    fn gradient_stop_positions_normalize_and_monotonic() {
+        use style_engine::css::property::ColorStop;
+        use style_engine::css::value::{ColorValue, LengthPercentage};
+        let stop = |position: Option<LengthPercentage>| ColorStop {
+            color: ColorValue::Absolute(vello::peniko::color::AlphaColor::new([
+                1.0, 0.0, 0.0, 1.0,
+            ])),
+            position,
+        };
+        // 200px 渐变线：0% → 0.0；50px → 0.25；缺省 → 邻点均布 0.625；100% → 1.0
+        let out = super::distribute_stops(
+            &[
+                stop(Some(LengthPercentage::Percent(0.0))),
+                stop(Some(LengthPercentage::Px(50.0))),
+                stop(None),
+                stop(Some(LengthPercentage::Percent(1.0))),
+            ],
+            200.0,
+        );
+        let offs: Vec<f32> = out.iter().map(|(o, _)| *o).collect();
+        assert_eq!(offs, [0.0, 0.25, 0.625, 1.0]);
+        // 逆序停点：40% 抬至前停 60%（css-images-3 §4.5.2）
+        let out = super::distribute_stops(
+            &[
+                stop(Some(LengthPercentage::Percent(0.6))),
+                stop(Some(LengthPercentage::Percent(0.4))),
+            ],
+            200.0,
+        );
+        let offs: Vec<f32> = out.iter().map(|(o, _)| *o).collect();
+        assert_eq!(offs, [0.6, 0.6]);
+    }
+
+    #[test]
     fn blend_space_srgb_matches_css_default() {
         // CI 虚拟适配器不稳：windows runner 枚举得到 WARP 类适配器后
         // wgpu 设备创建段错误（0xc0000005，无法进程内捕获）——ci.yml 的
@@ -1133,7 +1167,8 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
     }
 }
 
-/// 引擎 Gradient → peniko Gradient（CSS 渐变线几何；stop 缺省位置均匀分配）。
+/// 引擎 Gradient → peniko Gradient（CSS 渐变线几何；stop 位置按线长/半径
+/// 归一为 0..1 offset，缺省位置自动均布，显式逆序前停夹取）。
 #[allow(clippy::too_many_arguments)] // 渐变几何直传（radial/conic/linear 三族并列）
 fn peniko_gradient(
     g: &style_engine::css::property::Gradient,
@@ -1146,12 +1181,17 @@ fn peniko_gradient(
     h: f32,
     state: &RenderState,
 ) -> Gradient {
+    // stop 位置归一分母：线性=渐变线全长、径向=终止半径、sweep=角分数（1）
+    let mut line_len = 1.0f32;
     let mut out = match &g.kind {
         style_engine::css::property::GradientKind::Linear(angle) => {
             if let Some(gm) = linear {
                 // F3d（ADR-0026）：paint 层已解析渐变线绝对端点（CSS 语义，
                 // 9-slice 等区域共用全盒同一线 = 精确切片）；画刷空间叠
                 // state.offset（与 radial/conic 绝对几何同约定）。
+                line_len = ((gm.end[0] - gm.start[0]).powi(2)
+                    + (gm.end[1] - gm.start[1]).powi(2))
+                .sqrt();
                 Gradient::new_linear(
                     Point::new(
                         f64::from(gm.start[0]) + state.offset.x,
@@ -1169,6 +1209,7 @@ fn peniko_gradient(
                 let dir = Vec2::new(sin as f64, -(cos as f64));
                 // 渐变线长度：|W·sinθ| + |H·cosθ|
                 let line = ((w * sin.abs()) + (h * cos.abs())) as f64 / 2.0;
+                line_len = (2.0 * line) as f32;
                 // 画刷与形状同处用户空间（形状坐标已叠盒原点+偏移）：中心须含盒原点
                 // （第四批⑤修复：此前漏加 (x,y)，非原点盒的线性渐变采样区错位）
                 let cx = f64::from(x) + f64::from(w) / 2.0 + state.offset.x;
@@ -1188,6 +1229,7 @@ fn peniko_gradient(
                 rx: diag,
                 ry: diag,
             });
+            line_len = geom.ry.max(0.5);
             Gradient {
                 kind: GradientKind::Radial(RadialGradientPosition::new(
                     Point::new(
@@ -1231,6 +1273,7 @@ fn peniko_gradient(
                 rx: diag,
                 ry: diag,
             });
+            line_len = geom.ry.max(0.5);
             Gradient {
                 kind: GradientKind::Radial(RadialGradientPosition::new(
                     Point::new(
@@ -1244,7 +1287,7 @@ fn peniko_gradient(
         }
     };
     out.extend = Extend::Pad;
-    for (p, c) in distribute_stops(&g.stops) {
+    for (p, c) in distribute_stops(&g.stops, line_len) {
         out.stops.push(vello::peniko::ColorStop {
             offset: p,
             color: c.into(),
@@ -1254,8 +1297,13 @@ fn peniko_gradient(
 }
 
 /// 按补齐 CSS 语义的 stop 位置构建 (offset, sRGB 颜色) 序列。
+/// Px=沿渐变线 px → 按线长归一为 0..1 offset（vello stop 语义）；
+/// Percent 存储即线长分数直取；其余单位（em/rem/cq…）sink 侧无
+/// 字体/容器上下文，与 soft sink 同约定按缺省自动均布（偏差在案
+/// FEATURES.md）；显式位置逆序时按 css-images-3 §4.5.2 抬至前停位。
 fn distribute_stops(
     stops: &[style_engine::css::property::ColorStop],
+    line_len: f32,
 ) -> Vec<(f32, AlphaColor<Srgb>)> {
     let n = stops.len();
     if n == 0 {
@@ -1264,22 +1312,18 @@ fn distribute_stops(
     let mut positions: Vec<f32> = Vec::with_capacity(n);
     for s in stops {
         match &s.position {
-            Some(p) => positions.push(
-                p.resolve(
-                    &style_engine::css::value::ResolveCtx {
-                        em: 16.0,
-                        rem: 16.0,
-                        viewport_w: 0.0,
-                        viewport_h: 0.0,
-                        // A9：渐变 stop 百分比解析不涉 cq/字体单位，
-                        // 以 base() 缺省补全新字段（cq 回落视口、度量近似）
-                        ..style_engine::css::value::ResolveCtx::base(16.0, 16.0, 0.0, 0.0)
-                    },
-                    0.0,
-                )
-                .unwrap_or(0.0),
+            Some(style_engine::css::value::LengthPercentage::Px(v)) => positions.push(
+                if line_len > 0.0 {
+                    (v / line_len).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
             ),
-            None => positions.push(f32::NAN),
+            Some(style_engine::css::value::LengthPercentage::Percent(f)) => {
+                positions.push(f.clamp(0.0, 1.0))
+            }
+            // None 与 em/rem/cq 等无 sink 上下文的单位：自动均布
+            _ => positions.push(f32::NAN),
         }
     }
     if positions[0].is_nan() {
@@ -1305,6 +1349,13 @@ fn distribute_stops(
         } else {
             last_known = positions[i];
             i += 1;
+        }
+    }
+    // css-images-3 §4.5.2：解析器不夹取位置，后停位 < 前停位时抬至前停位
+    // （用值期语义归 sink；均布值本身已落于邻点之间，不受影响）
+    for i in 1..n {
+        if positions[i] < positions[i - 1] {
+            positions[i] = positions[i - 1];
         }
     }
     stops

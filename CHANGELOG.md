@@ -619,6 +619,18 @@
   + vello 0.11.0 发布注（锁 wgpu 30，升级阶梯候选）、
   SETTLEMENT-PIPELINE.md 行号基准更新（engine.rs 8547 行，符号名
   锚定约定）。全量 **494** 测试绿（492→494）。
+- **渐变停点位置修复（P1-0 批，双 sink 对齐）**：vello sink
+  `distribute_stops` 此前以 basis=0 解析显式停点——Percent 全塌 0、
+  px 未按渐变线长归一（`50px`/`100%` 均按 0 处理）。修复：签名加
+  `line_len: f32`，px→v/line_len 夹 [0,1]、%（存储即分数）夹 [0,1]、
+  其余单位（em/rem/cq）退化为 NaN→自动均布（B 级豁免在案）；NaN
+  填充后按 css-images-3 §4.5.2 逆序停点单调夹取（后停<前停抬至前停；
+  解析器不做夹取、用值期语义归 sink）。各几何臂接线：linear=渐变线
+  长（geom 与回落公式两臂）、radial=ry.max(0.5)（与画刷实际用半径
+  一致）、conic=1.0（sweep 停点=角分数全周）。soft sink
+  `stop_positions` 补同款单调夹取（双 sink 一致性契约）。新增锁定
+  测试 gradient_stop_positions_normalize_and_monotonic（200px 线：
+  0%/50px/缺省/100%→0.0/0.25/0.625/1.0；逆序 60%+40%→[0.6,0.6]）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）
