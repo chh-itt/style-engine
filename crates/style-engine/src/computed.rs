@@ -553,12 +553,12 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
             LengthPercentage::Percent(0.5),
             LengthPercentage::Percent(0.5),
         ),
-        // filter/will-change/isolation/mix-blend-mode/backdrop-filter 初始
-        // 缺席（第四批④ + 第五批㉒ + F4：仅存在性语义位触发 SC）；
+        // filter/backdrop-filter 初始 none（P2，ADR-0031 D1：Filters(vec![])=
+        // 有效声明显式无滤镜，携带函数链本体）；will-change/isolation 仍为
+        // 存在性语义位（第四批④）；mix-blend-mode 具体 BlendMode（P1-2）；
         // clip-path 已升级为形状（F3c，ADR-0025，初始 none）。
-        P::Filter | P::WillChange | P::Isolation | P::MixBlendMode | P::BackdropFilter => {
-            DeclValue::Effect(false)
-        }
+        P::Filter | P::BackdropFilter => DeclValue::Filters(Vec::new()),
+        P::WillChange | P::Isolation | P::MixBlendMode => DeclValue::Effect(false),
         // hyphens 初始 manual（F4，css-text-3 §5.4）。
         P::Hyphens => DeclValue::Hyphens(crate::css::property::HyphensKind::Manual),
         P::Color => DeclValue::Color(ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 0.0, 1.0]))),
@@ -788,18 +788,31 @@ impl ComputedStyle {
         !self.transform().is_empty()
     }
 
-    /// filter 存在性（第四批④：仅 SC 触发语义位，无滤镜效果实现）。
+    /// filter 非 none（P2，ADR-0031 D1：携带函数链本体；非空 = 有效滤镜）。
     pub fn has_filter(&self) -> bool {
-        matches!(self.get(PropertyId::Filter), Some(DeclValue::Effect(true)))
+        matches!(self.get(PropertyId::Filter), Some(DeclValue::Filters(f)) if !f.is_empty())
     }
 
-    /// backdrop-filter 存在性（F4，ADR-0028 D1：非 none 触发 SC；效果
-    /// 本体不在范围，同 filter 先例）。
+    /// backdrop-filter 非 none（P2，ADR-0031 D1/D3：函数链本体化，非空
+    /// 触发 backdrop SC；效果由 sink 实现——soft 原生、vello T2）。
     pub fn has_backdrop_filter(&self) -> bool {
-        matches!(
-            self.get(PropertyId::BackdropFilter),
-            Some(DeclValue::Effect(true))
-        )
+        matches!(self.get(PropertyId::BackdropFilter), Some(DeclValue::Filters(f)) if !f.is_empty())
+    }
+
+    /// filter 函数链本体访问（P2）：空链 = none。绘制层与 dump 消费。
+    pub fn filter_chain(&self) -> &[crate::css::property::FilterFn] {
+        match self.get(PropertyId::Filter) {
+            Some(DeclValue::Filters(f)) => f,
+            _ => &[],
+        }
+    }
+
+    /// backdrop-filter 函数链本体访问（P2）：空链 = none。
+    pub fn backdrop_filter_chain(&self) -> &[crate::css::property::FilterFn] {
+        match self.get(PropertyId::BackdropFilter) {
+            Some(DeclValue::Filters(f)) => f,
+            _ => &[],
+        }
     }
 
     /// hyphens 连字符断字模式（F4，ADR-0028 D2；initial=manual；断词

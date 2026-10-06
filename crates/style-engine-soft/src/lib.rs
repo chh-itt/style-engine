@@ -37,7 +37,7 @@ use style_engine::css::property::{
     BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind,
 };
 use style_engine::css::value::{ColorValue, LengthPercentage};
-use style_engine::paint::{ConicGeom, RadialGeom};
+use style_engine::paint::{ConicGeom, FilterEffect, RadialGeom};
 use style_engine::{DisplayList, PaintOp};
 
 /// 纯软件画布：RGBA8 直 alpha、sRGB 编码值（与 DisplayList 色彩语义一致）。
@@ -192,6 +192,18 @@ struct OpacityLayer {
 struct BlendLayer {
     snapshot: Vec<u8>,
     mode: BlendMode,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// 滤镜层（P2，ADR-0031 D4）：push 时刻快照底图并清空 **padded** 区域
+/// （bbox 外扩模糊/阴影溢出量）——子树内容累积在透明底；pop 时刻对区域
+/// 内容依序应用效果链后与快照 src-over 合成（filter 输出叠在背后画布上）。
+struct FilterLayer {
+    snapshot: Vec<u8>,
+    filters: Vec<FilterEffect>,
     x: u32,
     y: u32,
     w: u32,
@@ -411,6 +423,7 @@ pub fn render_with_fonts(
     let mut mat_stack: Vec<Mat> = Vec::new();
     let mut layers: Vec<OpacityLayer> = Vec::new();
     let mut blends: Vec<BlendLayer> = Vec::new();
+    let mut filters: Vec<FilterLayer> = Vec::new();
     for op in &list.ops {
         apply_op(
             op,
@@ -420,10 +433,33 @@ pub fn render_with_fonts(
             &mut mat_stack,
             &mut layers,
             &mut blends,
+            &mut filters,
             bank,
         );
     }
     canvas
+}
+
+/// 画布区域拷贝（行主序 RGBA，越界行/列钳制画布）——滤镜层提取与
+/// backdrop 采样共用。
+fn region_copy(canvas: &SoftCanvas, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+    let cw = canvas.width as usize;
+    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+    if w == 0 || h == 0 {
+        return out;
+    }
+    for row in 0..h as usize {
+        let sy = y as usize + row;
+        if sy >= canvas.height as usize {
+            break;
+        }
+        let sx = (x as usize).min(cw);
+        let copy_w = (w as usize).min(cw - sx);
+        let src = (sy * cw + sx) * 4;
+        let dst = row * w as usize * 4;
+        out[dst..dst + copy_w * 4].copy_from_slice(&canvas.pixels[src..src + copy_w * 4]);
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -435,6 +471,7 @@ fn apply_op(
     mat_stack: &mut Vec<Mat>,
     layers: &mut Vec<OpacityLayer>,
     blends: &mut Vec<BlendLayer>,
+    filters: &mut Vec<FilterLayer>,
     bank: &FontBank,
 ) {
     match op {
@@ -854,6 +891,138 @@ fn apply_op(
                         for (c, v) in out.iter().enumerate() {
                             canvas.pixels[i + c] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
                         }
+                    }
+                }
+            }
+        }
+        PaintOp::PushFilter {
+            filters: fxs,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            // 滤镜层（P2，ADR-0031 D4）：区域 = op 盒设备包围盒外扩 pad
+            // （blur 3σ = 1.5·半径；drop-shadow 偏移+1.5σ）。快照底图 +
+            // 清空 padded 区域——子树累积在透明底（含越界溢出墨），pop 时
+            // 效果链作用于纯层内容再与底图合成（模糊可取 pad 环外样本）。
+            let pad = filter::effects_pad(fxs);
+            let corners = [
+                mat.apply(*x, *y),
+                mat.apply(x + width, *y),
+                mat.apply(x + width, y + height),
+                mat.apply(*x, y + height),
+            ];
+            let min_x = corners.iter().fold(f32::MAX, |m, p| m.min(p.0));
+            let min_y = corners.iter().fold(f32::MAX, |m, p| m.min(p.1));
+            let max_x = corners.iter().fold(f32::MIN, |m, p| m.max(p.0));
+            let max_y = corners.iter().fold(f32::MIN, |m, p| m.max(p.1));
+            let bx = ((min_x - pad).max(0.0).floor() as u32).min(canvas.width);
+            let by = ((min_y - pad).max(0.0).floor() as u32).min(canvas.height);
+            let ex = ((max_x + pad).min(canvas.width as f32).ceil() as u32).min(canvas.width);
+            let ey = ((max_y + pad).min(canvas.height as f32).ceil() as u32).min(canvas.height);
+            filters.push(FilterLayer {
+                snapshot: canvas.pixels.clone(),
+                filters: fxs.clone(),
+                x: bx,
+                y: by,
+                w: ex.saturating_sub(bx),
+                h: ey.saturating_sub(by),
+            });
+            let x1 = ex.min(canvas.width);
+            let y1 = ey.min(canvas.height);
+            for py in by..y1 {
+                let row = py as usize * canvas.width as usize;
+                for pxc in bx..x1 {
+                    canvas.pixels[(row + pxc as usize) * 4..(row + pxc as usize) * 4 + 4].fill(0);
+                }
+            }
+        }
+        PaintOp::PopFilter => {
+            if let Some(layer) = filters.pop() {
+                let (fw, fh) = (layer.w as usize, layer.h as usize);
+                if fw > 0 && fh > 0 {
+                    let mut buf = region_copy(canvas, layer.x, layer.y, layer.w, layer.h);
+                    filter::apply_effects(&mut buf, fw, fh, &layer.filters);
+                    // 效果输出 src-over 快照（非预乘直排，drop_shadow ③ 同式）
+                    // ——padded 全区写回（blur/shadow 溢出墨落回画布）。
+                    let cw = canvas.width as usize;
+                    let ch = canvas.height as usize;
+                    for row in 0..fh {
+                        let cy = layer.y as usize + row;
+                        if cy >= ch {
+                            break;
+                        }
+                        for col in 0..fw {
+                            let cx = layer.x as usize + col;
+                            if cx >= cw {
+                                break;
+                            }
+                            let i = (row * fw + col) * 4;
+                            let si = (cy * cw + cx) * 4;
+                            let a = buf[i + 3] as f32 / 255.0;
+                            let ab = layer.snapshot[si + 3] as f32 / 255.0;
+                            let ao = a + ab * (1.0 - a);
+                            if ao <= 0.0 {
+                                // 滤镜后全透明 → 保留背后画布
+                                canvas.pixels[si..si + 4]
+                                    .copy_from_slice(&layer.snapshot[si..si + 4]);
+                                continue;
+                            }
+                            for c in 0..3 {
+                                let cs = buf[i + c] as f32 / 255.0;
+                                let cb = layer.snapshot[si + c] as f32 / 255.0;
+                                let co = (cs * a + cb * ab * (1.0 - a)) / ao;
+                                canvas.pixels[si + c] =
+                                    (co * 255.0).round().clamp(0.0, 255.0) as u8;
+                            }
+                            canvas.pixels[si + 3] = (ao * 255.0).round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                }
+            }
+        }
+        PaintOp::BackdropFilter {
+            filters: fxs,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            // 背景滤镜（P2，ADR-0031 D4）：即时 op——padded 区域读主画布
+            // （背后已绘制内容），效果链处理后核心区 **替换** 写回（backdrop
+            // 语义：元素背后画布被滤镜结果改写，pad 环仅作模糊取样）。
+            let pad = filter::effects_pad(fxs);
+            let corners = [
+                mat.apply(*x, *y),
+                mat.apply(x + width, *y),
+                mat.apply(x + width, y + height),
+                mat.apply(*x, y + height),
+            ];
+            let min_x = corners.iter().fold(f32::MAX, |m, p| m.min(p.0));
+            let min_y = corners.iter().fold(f32::MAX, |m, p| m.min(p.1));
+            let max_x = corners.iter().fold(f32::MIN, |m, p| m.max(p.0));
+            let max_y = corners.iter().fold(f32::MIN, |m, p| m.max(p.1));
+            let cx0 = (min_x.max(0.0).floor() as u32).min(canvas.width);
+            let cy0 = (min_y.max(0.0).floor() as u32).min(canvas.height);
+            let cx1 = (max_x.min(canvas.width as f32).ceil() as u32).min(canvas.width);
+            let cy1 = (max_y.min(canvas.height as f32).ceil() as u32).min(canvas.height);
+            let px0 = ((min_x - pad).max(0.0).floor() as u32).min(canvas.width);
+            let py0 = ((min_y - pad).max(0.0).floor() as u32).min(canvas.height);
+            let px1 = ((max_x + pad).min(canvas.width as f32).ceil() as u32).min(canvas.width);
+            let py1 = ((max_y + pad).min(canvas.height as f32).ceil() as u32).min(canvas.height);
+            let (pw, ph) = (px1.saturating_sub(px0), py1.saturating_sub(py0));
+            if pw > 0 && ph > 0 && cx1 > cx0 && cy1 > cy0 {
+                let mut buf = region_copy(canvas, px0, py0, pw, ph);
+                filter::apply_effects(&mut buf, pw as usize, ph as usize, fxs);
+                let cw = canvas.width as usize;
+                for cy in cy0..cy1 {
+                    let ry = (cy - py0) as usize;
+                    for cxs in cx0..cx1 {
+                        let rx = (cxs - px0) as usize;
+                        let si = (cy as usize * cw + cxs as usize) * 4;
+                        let i = (ry * pw as usize + rx) * 4;
+                        canvas.pixels[si..si + 4].copy_from_slice(&buf[i..i + 4]);
                     }
                 }
             }
@@ -2833,5 +3002,83 @@ mod tests {
             ),
             [77, 77, 77, 255]
         );
+    }
+
+    #[test]
+    fn filter_layer_invert_end_to_end() {
+        // P2（ADR-0031 D4）：filter 层端到端——invert(1) 把红色内容反转为
+        // 青色；层外白底不受影响。
+        use style_engine::paint::FilterEffect;
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushFilter {
+            filters: vec![FilterEffect::Invert(1.0)],
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        });
+        list.ops
+            .push(op_fill(0.0, 0.0, 4.0, 4.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopFilter);
+        list.ops
+            .push(op_fill(0.0, 4.0, 4.0, 4.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        let c = render(&list, 4, 8, [255, 255, 255, 255]);
+        let mut p = [0u8; 4];
+        p.copy_from_slice(&c.pixels[0..4]);
+        assert_eq!(p, [0, 255, 255, 255], "层内红 → invert → 青");
+        p.copy_from_slice(&c.pixels[(4 * 4) * 4..(4 * 4) * 4 + 4]);
+        assert_eq!(p, [255, 0, 0, 255], "层外红不受 filter 影响");
+    }
+
+    #[test]
+    fn backdrop_filter_replaces_region_end_to_end() {
+        // P2：backdrop-filter op 对主画布既有内容取作用面——区域内
+        // invert 生效（红→青），区域外保持原内容。
+        use style_engine::paint::FilterEffect;
+        let mut list = DisplayList::default();
+        // 既有背景：整画布红
+        list.ops
+            .push(op_fill(0.0, 0.0, 8.0, 8.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        // backdrop：左半 (0,0,4,8) invert
+        list.ops.push(PaintOp::BackdropFilter {
+            filters: vec![FilterEffect::Invert(1.0)],
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 8.0,
+        });
+        let c = render(&list, 8, 8, [255, 255, 255, 255]);
+        let mut p = [0u8; 4];
+        p.copy_from_slice(&c.pixels[0..4]);
+        assert_eq!(p, [0, 255, 255, 255], "区域内红 → invert → 青");
+        // 区域外采样点 (6,4)：索引 = (y*8+x)*4
+        p.copy_from_slice(&c.pixels[(4 * 8 + 6) * 4..(4 * 8 + 6) * 4 + 4]);
+        assert_eq!(p, [255, 0, 0, 255], "区域外保持红");
+    }
+
+    #[test]
+    fn filter_layer_transparent_content_keeps_snapshot() {
+        // P2：层内内容 filter 后全透明（brightness(0) 作用半透明源→黑色
+        // 半透明）→ src-over 快照合成保留底色形状（不整区替换）。
+        use style_engine::paint::FilterEffect;
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushFilter {
+            filters: vec![FilterEffect::Brightness(0.0)],
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 4.0,
+        });
+        // 层内只画左半，右半 filter 后为全透明 → 快照（白）保留
+        list.ops
+            .push(op_fill(0.0, 0.0, 4.0, 4.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopFilter);
+        let c = render(&list, 8, 4, [255, 255, 255, 255]);
+        let mut p = [0u8; 4];
+        p.copy_from_slice(&c.pixels[0..4]);
+        assert_eq!(p, [0, 0, 0, 255], "brightness(0) 红→黑");
+        // 空内容区采样点 (6,1)：索引 = (y*8+x)*4
+        p.copy_from_slice(&c.pixels[(1 * 8 + 6) * 4..(1 * 8 + 6) * 4 + 4]);
+        assert_eq!(p, [255, 255, 255, 255], "空内容区保留快照白");
     }
 }

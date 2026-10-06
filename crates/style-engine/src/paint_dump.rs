@@ -255,6 +255,128 @@ impl BlendModeDump {
     }
 }
 
+/// 滤镜效果投影（P2，ADR-0031 D6）：绘制域 [`FilterEffect`] 的 serde
+/// 形态（tag = `fn`，kebab-case 函数名与 CSS 文法对应；数值语义同核心）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "fn", rename_all = "kebab-case")]
+pub enum FilterEffectDump {
+    /// blur（半径 px，σ = 半径/2 由 sink 换算）。
+    Blur {
+        /// 半径 px。
+        radius: f32,
+    },
+    /// brightness。
+    Brightness {
+        /// 乘数。
+        amount: f32,
+    },
+    /// contrast。
+    Contrast {
+        /// 系数。
+        amount: f32,
+    },
+    /// grayscale。
+    Grayscale {
+        /// 插值比。
+        amount: f32,
+    },
+    /// sepia。
+    Sepia {
+        /// 插值比。
+        amount: f32,
+    },
+    /// saturate。
+    Saturate {
+        /// 系数。
+        amount: f32,
+    },
+    /// invert。
+    Invert {
+        /// 插值比。
+        amount: f32,
+    },
+    /// opacity。
+    Opacity {
+        /// alpha 乘数。
+        amount: f32,
+    },
+    /// hue-rotate（度）。
+    HueRotate {
+        /// 角度。
+        degrees: f32,
+    },
+    /// drop-shadow。
+    DropShadow {
+        /// x 偏移 px。
+        dx: f32,
+        /// y 偏移 px。
+        dy: f32,
+        /// 模糊半径 px。
+        blur: f32,
+        /// 终结 sRGBA。
+        color: [f32; 4],
+    },
+}
+
+impl FilterEffectDump {
+    /// 核心 FilterEffect → 投影（unknown 兜底不可达于同 crate；
+    /// 前向兼容占位 = brightness 1.0 恒等）。
+    pub(crate) fn from_core(f: &crate::paint::FilterEffect) -> Self {
+        use crate::paint::FilterEffect as F;
+        #[allow(unreachable_patterns)]
+        match f {
+            F::Blur(r) => Self::Blur { radius: *r },
+            F::Brightness(v) => Self::Brightness { amount: *v },
+            F::Contrast(v) => Self::Contrast { amount: *v },
+            F::Grayscale(v) => Self::Grayscale { amount: *v },
+            F::Sepia(v) => Self::Sepia { amount: *v },
+            F::Saturate(v) => Self::Saturate { amount: *v },
+            F::Invert(v) => Self::Invert { amount: *v },
+            F::Opacity(v) => Self::Opacity { amount: *v },
+            F::HueRotate(d) => Self::HueRotate { degrees: *d },
+            F::DropShadow {
+                dx,
+                dy,
+                blur,
+                color,
+            } => Self::DropShadow {
+                dx: *dx,
+                dy: *dy,
+                blur: *blur,
+                color: color.components,
+            },
+            _ => Self::Brightness { amount: 1.0 },
+        }
+    }
+
+    /// 投影 → 核心 FilterEffect；未知变体 → None（重建跳过）。
+    pub(crate) fn to_core(self) -> Option<crate::paint::FilterEffect> {
+        use crate::paint::FilterEffect as F;
+        match self {
+            Self::Blur { radius } => Some(F::Blur(radius)),
+            Self::Brightness { amount } => Some(F::Brightness(amount)),
+            Self::Contrast { amount } => Some(F::Contrast(amount)),
+            Self::Grayscale { amount } => Some(F::Grayscale(amount)),
+            Self::Sepia { amount } => Some(F::Sepia(amount)),
+            Self::Saturate { amount } => Some(F::Saturate(amount)),
+            Self::Invert { amount } => Some(F::Invert(amount)),
+            Self::Opacity { amount } => Some(F::Opacity(amount)),
+            Self::HueRotate { degrees } => Some(F::HueRotate(degrees)),
+            Self::DropShadow {
+                dx,
+                dy,
+                blur,
+                color,
+            } => Some(F::DropShadow {
+                dx,
+                dy,
+                blur,
+                color: ::peniko::color::AlphaColor::new(color),
+            }),
+        }
+    }
+}
+
 /// 停靠点投影。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorStopDump {
@@ -804,6 +926,37 @@ pub enum OpDump {
     /// PopBlend。
     #[serde(rename = "pop_blend")]
     PopBlend,
+    /// PushFilter（P2）。
+    #[serde(rename = "push_filter")]
+    PushFilter {
+        /// 滤镜效果链。
+        filters: Vec<FilterEffectDump>,
+        /// 盒 x。
+        x: f32,
+        /// 盒 y。
+        y: f32,
+        /// 盒宽。
+        width: f32,
+        /// 盒高。
+        height: f32,
+    },
+    /// PopFilter（P2）。
+    #[serde(rename = "pop_filter")]
+    PopFilter,
+    /// BackdropFilter（P2）。
+    #[serde(rename = "backdrop_filter")]
+    BackdropFilter {
+        /// 滤镜效果链。
+        filters: Vec<FilterEffectDump>,
+        /// 盒 x。
+        x: f32,
+        /// 盒 y。
+        y: f32,
+        /// 盒宽。
+        width: f32,
+        /// 盒高。
+        height: f32,
+    },
     /// PushTransform。
     #[serde(rename = "push_transform")]
     PushTransform {
@@ -1073,6 +1226,33 @@ fn op_dump(op: &PaintOp) -> OpDump {
             height: *height,
         },
         PaintOp::PopBlend => OpDump::PopBlend,
+        PaintOp::PushFilter {
+            filters,
+            x,
+            y,
+            width,
+            height,
+        } => OpDump::PushFilter {
+            filters: filters.iter().map(FilterEffectDump::from_core).collect(),
+            x: *x,
+            y: *y,
+            width: *width,
+            height: *height,
+        },
+        PaintOp::PopFilter => OpDump::PopFilter,
+        PaintOp::BackdropFilter {
+            filters,
+            x,
+            y,
+            width,
+            height,
+        } => OpDump::BackdropFilter {
+            filters: filters.iter().map(FilterEffectDump::from_core).collect(),
+            x: *x,
+            y: *y,
+            width: *width,
+            height: *height,
+        },
         PaintOp::PushTransform { affine } => OpDump::PushTransform { affine: *affine },
         PaintOp::PopTransform => OpDump::PopTransform,
         PaintOp::PushScroll { dx, dy } => OpDump::PushScroll { dx: *dx, dy: *dy },
@@ -1346,6 +1526,46 @@ fn op_load(d: &OpDump) -> Option<PaintOp> {
             height: *height,
         },
         OpDump::PopBlend => PaintOp::PopBlend,
+        OpDump::PushFilter {
+            filters,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let mut core = Vec::with_capacity(filters.len());
+            for f in filters {
+                core.extend(f.to_core());
+            }
+            // 全部未知效果 = 无内容层 → 仍重建恒等空链（层对平衡）
+            PaintOp::PushFilter {
+                filters: core,
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+            }
+        }
+        OpDump::PopFilter => PaintOp::PopFilter,
+        OpDump::BackdropFilter {
+            filters,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let mut core = Vec::with_capacity(filters.len());
+            for f in filters {
+                core.extend(f.to_core());
+            }
+            PaintOp::BackdropFilter {
+                filters: core,
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+            }
+        }
         OpDump::PushTransform { affine } => PaintOp::PushTransform { affine: *affine },
         OpDump::PopTransform => PaintOp::PopTransform,
         OpDump::PushScroll { dx, dy } => PaintOp::PushScroll { dx: *dx, dy: *dy },

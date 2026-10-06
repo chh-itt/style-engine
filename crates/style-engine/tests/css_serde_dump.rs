@@ -84,3 +84,63 @@ fn clip_path_dump_round_trip() {
     let rebuilt = back.to_display_list();
     assert_eq!(rebuilt, fr.paint, "结构无损往返");
 }
+
+#[test]
+fn filter_dump_round_trip() {
+    // P2（ADR-0031 D6）：filter/backdrop-filter 层对与 op 的 serde 往返锁
+    //——PushFilter{Blur+DropShadow}/PopFilter/BackdropFilter 全变体
+    // tag="fn" kebab-case 真格式在场；to_dump → JSON → 回建无损。
+    let mut engine: StyleEngine<u64> = StyleEngine::new();
+    engine.set_stylesheet(
+        "#t { width: 100px; height: 100px; \
+             filter: blur(2px) drop-shadow(1px 2px 3px red); } \
+         #p { width: 100px; height: 100px; background-color: blue; \
+             backdrop-filter: invert(1) brightness(0.8); }",
+    );
+    let mut n = StyleNode::default();
+    n.id = Some("t".to_string());
+    engine.insert(None, 1, n).unwrap();
+    let mut m = StyleNode::default();
+    m.id = Some("p".to_string());
+    engine.insert(None, 2, m).unwrap();
+    let fr = engine.frame((300.0, 300.0), 1.0, 0.0);
+    assert!(
+        fr.paint
+            .ops
+            .iter()
+            .any(|op| matches!(op, style_engine::paint::PaintOp::PushFilter { .. })),
+        "PushFilter 在场"
+    );
+    assert!(
+        fr.paint
+            .ops
+            .iter()
+            .any(|op| matches!(op, style_engine::paint::PaintOp::BackdropFilter { .. })),
+        "BackdropFilter 在场"
+    );
+
+    let dump = fr.paint.to_dump();
+    let json = serde_json::to_string(&dump).expect("序列化");
+    assert!(
+        json.contains("\"op\":\"push_filter\""),
+        "push_filter tag 在场"
+    );
+    assert!(
+        json.contains("\"op\":\"pop_filter\""),
+        "pop_filter tag 在场"
+    );
+    assert!(
+        json.contains("\"op\":\"backdrop_filter\""),
+        "backdrop_filter tag 在场"
+    );
+    assert!(json.contains("\"fn\":\"blur\""), "blur 函数 tag 在场");
+    assert!(
+        json.contains("\"fn\":\"drop-shadow\""),
+        "drop-shadow tag 在场"
+    );
+    let back: style_engine::paint_dump::DisplayListDump =
+        serde_json::from_str(&json).expect("反序列化");
+    assert_eq!(back, dump, "JSON 往返相等");
+    let rebuilt = back.to_display_list();
+    assert_eq!(rebuilt, fr.paint, "结构无损往返（含滤镜链数值）");
+}

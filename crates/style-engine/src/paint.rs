@@ -120,6 +120,80 @@ fn text_shadows(style: &ComputedStyle, env: &MediaEnv) -> Vec<TextShadowPaint> {
         .collect()
 }
 
+/// 绘制域滤镜效果（P2，ADR-0031 D3）：`FilterFn` 的 L3 终结形态——
+/// 长度分量（blur/drop-shadow 半径、偏移）已按节点样式换算 px，
+/// currentcolor 已终结具体色（同 Shadow/TextShadowPaint 惯例：DisplayList
+/// 自足、不含样式引用）。数值分量与声明期钳位一致。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum FilterEffect {
+    /// blur(<length>)：模糊半径 px（sink 换算 σ = 半径/2，css-filters-1 §3）。
+    Blur(f32),
+    /// brightness(<number-percentage>)：线性乘。
+    Brightness(f32),
+    /// contrast(<number-percentage>)：仿射对比。
+    Contrast(f32),
+    /// grayscale(<number-percentage>)。
+    Grayscale(f32),
+    /// sepia(<number-percentage>)。
+    Sepia(f32),
+    /// saturate(<number-percentage>)。
+    Saturate(f32),
+    /// invert(<number-percentage>)。
+    Invert(f32),
+    /// opacity(<number-percentage>)：alpha 缩放。
+    Opacity(f32),
+    /// hue-rotate(<angle>)：度。
+    HueRotate(f32),
+    /// drop-shadow：偏移/模糊半径 px + 终结色。
+    DropShadow {
+        /// x 偏移 px。
+        dx: f32,
+        /// y 偏移 px。
+        dy: f32,
+        /// 模糊半径 px（0 = 硬边）。
+        blur: f32,
+        /// 阴影色（currentcolor 已终结）。
+        color: AlphaColor<Srgb>,
+    },
+}
+
+/// `FilterFn` 声明链 → 绘制域效果链（px/颜色终结；未知变体跳过——
+/// non_exhaustive 前向兼容）。
+fn resolve_filter_effects(
+    fns: &[crate::css::property::FilterFn],
+    style: &ComputedStyle,
+    env: &MediaEnv,
+) -> Vec<FilterEffect> {
+    fns.iter()
+        .map(|f| match f {
+            crate::css::property::FilterFn::Blur(len) => FilterEffect::Blur(px(len, style, env)),
+            crate::css::property::FilterFn::Brightness(v) => FilterEffect::Brightness(*v),
+            crate::css::property::FilterFn::Contrast(v) => FilterEffect::Contrast(*v),
+            crate::css::property::FilterFn::Grayscale(v) => FilterEffect::Grayscale(*v),
+            crate::css::property::FilterFn::Sepia(v) => FilterEffect::Sepia(*v),
+            crate::css::property::FilterFn::Saturate(v) => FilterEffect::Saturate(*v),
+            crate::css::property::FilterFn::Invert(v) => FilterEffect::Invert(*v),
+            crate::css::property::FilterFn::Opacity(v) => FilterEffect::Opacity(*v),
+            crate::css::property::FilterFn::HueRotate(v) => FilterEffect::HueRotate(*v),
+            crate::css::property::FilterFn::DropShadow {
+                dx,
+                dy,
+                blur,
+                color,
+            } => FilterEffect::DropShadow {
+                dx: px(dx, style, env),
+                dy: px(dy, style, env),
+                blur: px(blur, style, env),
+                color: resolve_color(color, style, env),
+            },
+            // 同 crate 匹配暂不可达；跨版本新增变体时兜底恒等（前向兼容）
+            #[allow(unreachable_patterns)]
+            _ => FilterEffect::Brightness(1.0),
+        })
+        .collect()
+}
+
 /// 单个绘制基元。坐标相对视口（滚动前）；尺寸为 border-box。
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -337,6 +411,40 @@ pub enum PaintOp {
     },
     /// 混合层结束（对应最近的 PushBlend）。
     PopBlend,
+    /// 滤镜层开始（P2，ADR-0031 D3，css-filters-1）：filter ≠ none 时包住
+    /// 整节点子树——层内容离屏渲染后经 `filters` 函数链依序处理再合成
+    /// （链序 = 语义序）。栈位 opacity 之内（合成序 = opacity(filter(子树))，
+    /// css-filters-1 §3）、blend/clip/transform 之外（clip 裁 filter 输出）。
+    PushFilter {
+        /// 滤镜效果链（绘制域终结值，声明序，空链不会发射）。
+        filters: Vec<FilterEffect>,
+        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
+        x: f32,
+        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
+        y: f32,
+        /// 受影响节点盒宽 px（border-box）。
+        width: f32,
+        /// 受影响节点盒高 px（border-box）。
+        height: f32,
+    },
+    /// 滤镜层结束（对应最近的 PushFilter）。
+    PopFilter,
+    /// 背景滤镜（P2，ADR-0031 D3，css-filters-2）：即时 op（无层对）——
+    /// 对节点 border-box 区域背后已绘制的画布内容应用 `filters` 函数链
+    /// （采样面 v1 近似 = 当前画布区域，stacking context 边界细化 B 级在案）。
+    /// 发射于节点自身内容之前、效果层对之外（作用于主画布）。
+    BackdropFilter {
+        /// 滤镜效果链（绘制域终结值，声明序，空链不会发射）。
+        filters: Vec<FilterEffect>,
+        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
+        x: f32,
+        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
+        y: f32,
+        /// 受影响节点盒宽 px（border-box）。
+        width: f32,
+        /// 受影响节点盒高 px（border-box）。
+        height: f32,
+    },
     /// 2D 仿射变换层开始（ADR-0009）：本节点子树全部绘制经矩阵变换；
     /// 布局盒保持未变换坐标（taffy 不可见 transform）。
     PushTransform {
@@ -1134,10 +1242,29 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     };
     let radius = resolve_radius(style, env);
 
+    // backdrop-filter ≠ none（P2，ADR-0031 D3）：即时 op 先于一切层对与
+    // 自身内容——作用于主画布（背后已绘制内容），区域 = 节点 border-box
+    // （未变换视口坐标）。v1 采样面 = 当前画布（stacking context 边界
+    // 细化 B 级在案）；效果由 sink 实现（soft 原生 / vello T2）。
+    if let Some(DeclValue::Filters(bfs)) = style.get(PropertyId::BackdropFilter)
+        && !bfs.is_empty()
+        && w > 0.0
+        && h > 0.0
+    {
+        out.ops.push(PaintOp::BackdropFilter {
+            filters: resolve_filter_effects(bfs, style, env),
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+    }
+
     // transform ≠ none（ADR-0009）：L3 绘制期仿射终结——translate 百分比基 =
     // 自身 border-box，transform-origin 默认 50% 50%（T(o)·M·T(−o)）；层栈序
-    // transform → clip → filter → opacity（transform 最外）。布局盒保持未变换
-    // 坐标（taffy 不可见 transform）；绘制期终结见 ADR-0009 双时机契约。
+    // transform → clip → blend → opacity → filter（transform 最外、filter 最内；
+    // P2 修订：css-filters-1 §3 合成序 opacity(filter(子树))）。布局盒保持
+    // 未变换坐标（taffy 不可见 transform）；绘制期终结见 ADR-0009 双时机契约。
     let transformed = style.has_transform();
     if transformed {
         out.ops.push(PaintOp::PushTransform {
@@ -1226,10 +1353,10 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     //    覆盖区域=节点 border-box（bbox 外绘制如外阴影不参与混合——B 级
     //    同 opacity 约定）。
     let blend = style.mix_blend();
-    let blend_isolated =
-        (blend != crate::css::property::BlendMode::Normal || style.has_isolation())
-            && w > 0.0
-            && h > 0.0;
+    let blend_isolated = (blend != crate::css::property::BlendMode::Normal
+        || style.has_isolation())
+        && w > 0.0
+        && h > 0.0;
     if blend_isolated {
         out.ops.push(PaintOp::PushBlend {
             mode: blend,
@@ -1256,6 +1383,25 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             height: h,
         });
     }
+
+    // 0c) filter ≠ none（P2，ADR-0031 D3）：整节点（背景/边框/文本/子树）
+    //     包滤镜层——离屏渲染经函数链处理再合成。栈位 opacity 之内
+    //     （css-filters-1 §3：opacity 应用于 filter 输出）→ push 在
+    //     PushOpacity 之后（LIFO：PopFilter 先于 PopOpacity）；节点进 Pos 带
+    //     （SC 谓词 has_filter 已覆盖）。
+    let filtered = match style.get(PropertyId::Filter) {
+        Some(DeclValue::Filters(f)) if !f.is_empty() && w > 0.0 && h > 0.0 => {
+            out.ops.push(PaintOp::PushFilter {
+                filters: resolve_filter_effects(f, style, env),
+                x,
+                y,
+                width: w,
+                height: h,
+            });
+            true
+        }
+        _ => false,
+    };
 
     // 1) 外阴影（CSS 绘制顺序：先于背景）
     if let Some(DeclValue::BoxShadows(shadows)) = style.get(PropertyId::BoxShadow) {
@@ -1982,6 +2128,9 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         if let Some(hc) = ctx.hit {
             hc.borrow_mut().clips.pop();
         }
+    }
+    if filtered {
+        out.ops.push(PaintOp::PopFilter);
     }
     if faded {
         out.ops.push(PaintOp::PopOpacity);
@@ -2858,6 +3007,65 @@ mod tests {
     }
 
     #[test]
+    fn filter_layer_triple_nesting_lifo() {
+        // P2（ADR-0031 D3）：blend+opacity+filter 同节点 → 层序
+        // transform→clip→blend→opacity→filter（合成序
+        // opacity(filter(子树))，css-filters-1 §3），收尾严格 LIFO：
+        // PopFilter→PopOpacity→PopBlend。
+        let (tree, id, style) = setup(
+            "background-color: #101010; opacity: 0.5; mix-blend-mode: multiply; filter: invert(1) blur(2px)",
+            None,
+        );
+        let out = run(&tree, id, style, &HashMap::new());
+        let kinds: Vec<&str> = out
+            .ops
+            .iter()
+            .map(|op| match op {
+                PaintOp::PushBlend { .. } => "push_blend",
+                PaintOp::PushOpacity { .. } => "push_opacity",
+                PaintOp::PushFilter { .. } => "push_filter",
+                PaintOp::PopFilter => "pop_filter",
+                PaintOp::PopOpacity => "pop_opacity",
+                PaintOp::PopBlend => "pop_blend",
+                _ => "content",
+            })
+            .collect();
+        let idx = |k: &str| kinds.iter().position(|x| *x == k).expect(k);
+        assert!(idx("push_blend") < idx("push_opacity"));
+        assert!(idx("push_opacity") < idx("push_filter"));
+        // filter 层对内含内容 fill
+        assert!(idx("push_filter") < idx("content"));
+        assert!(idx("content") < idx("pop_filter"));
+        // 收尾 LIFO
+        assert!(idx("pop_filter") < idx("pop_opacity"));
+        assert!(idx("pop_opacity") < idx("pop_blend"));
+        // 滤镜链解析序保留：invert(1) → Blur(2px)
+        let (tree2, id2, style2) = setup("filter: invert(1) blur(2px)", None);
+        let out2 = run(&tree2, id2, style2, &HashMap::new());
+        let mut saw_invert = false;
+        for op in &out2.ops {
+            match op {
+                PaintOp::PushFilter { filters, .. } => {
+                    assert_eq!(filters.len(), 2);
+                    assert_eq!(filters[0], FilterEffect::Invert(1.0));
+                    assert_eq!(filters[1], FilterEffect::Blur(2.0));
+                    saw_invert = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_invert, "PushFilter 应携带解析序滤镜链");
+        // filter: none（空链）→ 不发射层对
+        let (tree3, id3, style3) = setup("background-color: #101010; filter: none", None);
+        let out3 = run(&tree3, id3, style3, &HashMap::new());
+        assert!(
+            out3.ops
+                .iter()
+                .all(|op| !matches!(op, PaintOp::PushFilter { .. }))
+        );
+    }
+
+    #[test]
     fn repeating_gradient_flag_flows_to_display_list() {
         // P1-3：repeating-* 前缀标记（css::Gradient.repeating）经背景 tile
         // resolved 副本流入 DisplayList——双 sink 据此取模平铺。
@@ -2877,8 +3085,10 @@ mod tests {
         assert!(g.repeating, "repeating 标记应随 op 流入显示列表");
         assert_eq!(g.stops.len(), 2);
         // 同文法无前缀 → false
-        let (tree, id, style) =
-            setup("background-image: linear-gradient(90deg, red 0px, blue 20px)", None);
+        let (tree, id, style) = setup(
+            "background-image: linear-gradient(90deg, red 0px, blue 20px)",
+            None,
+        );
         let out = run(&tree, id, style, &HashMap::new());
         let g = out
             .ops
@@ -3695,7 +3905,8 @@ mod tests {
         assert_eq!(found, 1, "{:?}", out.ops);
     }
 
-    #[cfg(feature = "serde")] // paint_dump 模块随 serde 门控（默认 feature 集下编译不过的既有耦合，P1-2 顺手修正）
+    #[cfg(feature = "serde")]
+    // paint_dump 模块随 serde 门控（默认 feature 集下编译不过的既有耦合，P1-2 顺手修正）
     #[test]
     fn paint_dump_roundtrips_blend_layer() {
         // P1-2：PushBlend{mode}/PopBlend 无损往返（kebab-case 模式名）

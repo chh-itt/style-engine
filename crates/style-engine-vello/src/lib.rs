@@ -10,6 +10,7 @@
 //! - Text 基元跳过（字形 run 随 T5 落地后接入 vello 的 parley 绘制）。
 
 use style_engine::css::value::ColorValue;
+use style_engine::paint::FilterEffect;
 use style_engine::{DisplayList, PaintOp};
 use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point, Stroke, Vec2};
@@ -1213,6 +1214,46 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
         PaintOp::PopBlend => {
             scene.pop_layer();
         }
+        PaintOp::PushFilter {
+            filters,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            // P2（ADR-0031 D5）：vello v1 直映子集 = 纯 opacity 效果链
+            // （alpha 连乘 → vello 层 alpha）；其余效果 warn-once 后降级为
+            // 恒等层（无滤镜近似渲染，B 级偏差在案——soft sink 为原生参照
+            // 实现）。恒等层保证 PopFilter 栈平衡（层对称不变式）。
+            let alpha_only = filters
+                .iter()
+                .all(|f| matches!(f, FilterEffect::Opacity(_)));
+            let alpha = if alpha_only {
+                filters.iter().fold(1.0, |a, f| match f {
+                    FilterEffect::Opacity(v) => a * v,
+                    _ => a,
+                })
+            } else {
+                warn_filter_degraded();
+                1.0
+            };
+            let shape = rect_shape(
+                *x + state.offset.x as f32,
+                *y + state.offset.y as f32,
+                *width,
+                *height,
+                [0.0; 8],
+            );
+            scene.push_layer(Fill::NonZero, Mix::Normal, alpha, state.effective(), &shape);
+        }
+        PaintOp::PopFilter => {
+            scene.pop_layer();
+        }
+        PaintOp::BackdropFilter { .. } => {
+            // P2（ADR-0031 D5）：backdrop 采样需已合成离屏输入，vello v1
+            // 未覆盖（warn-once 后忽略；B 级在案）。
+            warn_backdrop_unsupported();
+        }
         PaintOp::PushScroll { dx, dy } => {
             state.stack.push(state.offset);
             state.offset += Vec2::new(f64::from(*dx), f64::from(*dy));
@@ -1242,6 +1283,28 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
     }
 }
 
+/// 滤镜降级 warn-once（ADR-0031 D5）：每进程一次，避免逐帧刷屏。
+static FILTER_DEGRADED: std::sync::Once = std::sync::Once::new();
+fn warn_filter_degraded() {
+    FILTER_DEGRADED.call_once(|| {
+        eprintln!(
+            "style-engine-vello: filter 效果超出 opacity() 直映子集，降级为无滤镜渲染（T2；\
+             style-engine-soft 为原生参照实现）"
+        );
+    });
+}
+
+/// backdrop-filter 不支持 warn-once（ADR-0031 D5）。
+static BACKDROP_UNSUPPORTED: std::sync::Once = std::sync::Once::new();
+fn warn_backdrop_unsupported() {
+    BACKDROP_UNSUPPORTED.call_once(|| {
+        eprintln!(
+            "style-engine-vello: backdrop-filter 暂不支持，已忽略（T2；\
+             style-engine-soft 为原生参照实现）"
+        );
+    });
+}
+
 /// 引擎 Gradient → peniko Gradient（CSS 渐变线几何；stop 位置按线长/半径
 /// 归一为 0..1 offset，缺省位置自动均布，显式逆序前停夹取）。
 #[allow(clippy::too_many_arguments)] // 渐变几何直传（radial/conic/linear 三族并列）
@@ -1264,9 +1327,8 @@ fn peniko_gradient(
                 // F3d（ADR-0026）：paint 层已解析渐变线绝对端点（CSS 语义，
                 // 9-slice 等区域共用全盒同一线 = 精确切片）；画刷空间叠
                 // state.offset（与 radial/conic 绝对几何同约定）。
-                line_len = ((gm.end[0] - gm.start[0]).powi(2)
-                    + (gm.end[1] - gm.start[1]).powi(2))
-                .sqrt();
+                line_len =
+                    ((gm.end[0] - gm.start[0]).powi(2) + (gm.end[1] - gm.start[1]).powi(2)).sqrt();
                 Gradient::new_linear(
                     Point::new(
                         f64::from(gm.start[0]) + state.offset.x,
@@ -1411,19 +1473,11 @@ fn repeating_peniko(mut out: Gradient, stops: Vec<(f32, AlphaColor<Srgb>)>) -> G
             // 非 repeating 路径恒为 new(center, r)：r0=0、end_center=圆心。
             let r = pos.end_radius;
             let c = pos.end_center;
-            *pos = RadialGradientPosition::new_two_point(
-                c,
-                first * r,
-                c,
-                first * r + period * r,
-            );
+            *pos = RadialGradientPosition::new_two_point(c, first * r, c, first * r + period * r);
         }
         GradientKind::Sweep(pos) => {
-            let (center, start, total) = (
-                pos.center,
-                pos.start_angle,
-                pos.end_angle - pos.start_angle,
-            );
+            let (center, start, total) =
+                (pos.center, pos.start_angle, pos.end_angle - pos.start_angle);
             let s2 = start + total * first;
             *pos = SweepGradientPosition::new(center, s2, s2 + total * period);
         }
@@ -1479,13 +1533,13 @@ fn distribute_stops(
     let mut positions: Vec<f32> = Vec::with_capacity(n);
     for s in stops {
         match &s.position {
-            Some(style_engine::css::value::LengthPercentage::Px(v)) => positions.push(
-                if line_len > 0.0 {
+            Some(style_engine::css::value::LengthPercentage::Px(v)) => {
+                positions.push(if line_len > 0.0 {
                     (v / line_len).clamp(0.0, 1.0)
                 } else {
                     0.0
-                },
-            ),
+                })
+            }
             Some(style_engine::css::value::LengthPercentage::Percent(f)) => {
                 positions.push(f.clamp(0.0, 1.0))
             }

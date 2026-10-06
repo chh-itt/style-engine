@@ -3077,26 +3077,150 @@ mod tests {
     }
 
     #[test]
-    fn backdrop_filter_parse_presence() {
-        // F4（ADR-0028 D1）：值 ≠ none → Effect(true) 存在；none → Effect(false)
-        // 缺席（与 filter 同型，parse_sc_effect 复用）；函数块宽容吞咽
+    fn filter_parse_strict() {
+        use crate::css::property::{FilterFn, PropertyId};
+        // P2（ADR-0031 D1/D2）：全函数族 + 钳位 + 缺省 + 链序
         for (src, want) in [
-            ("backdrop-filter: none", false),
-            ("backdrop-filter: blur(2px)", true),
-            ("backdrop-filter: blur(4px) saturate(1.5)", true),
-            ("backdrop-filter: brightness(1.2)", true),
+            ("filter: none", vec![]),
+            (
+                "filter: blur(2px)",
+                vec![FilterFn::Blur(LengthPercentage::Px(2.0))],
+            ),
+            // 长度族：em 承载（绘制期终结）
+            (
+                "filter: blur(0.5em)",
+                vec![FilterFn::Blur(LengthPercentage::Em(0.5))],
+            ),
+            ("filter: brightness(1.2)", vec![FilterFn::Brightness(1.2)]),
+            // 钳位（浏览器行为：grayscale/sepia/invert/opacity > 1 → 1）
+            ("filter: grayscale(2)", vec![FilterFn::Grayscale(1.0)]),
+            ("filter: sepia(150%)", vec![FilterFn::Sepia(1.0)]),
+            ("filter: brightness(-1)", vec![FilterFn::Brightness(0.0)]),
+            ("filter: opacity(50%)", vec![FilterFn::Opacity(0.5)]),
+            ("filter: hue-rotate(90deg)", vec![FilterFn::HueRotate(90.0)]),
+            // 裸数字角度宽容（parse_angle_deg 仓库惯例）
+            ("filter: hue-rotate(90)", vec![FilterFn::HueRotate(90.0)]),
+            // 缺省实参
+            ("filter: brightness()", vec![FilterFn::Brightness(1.0)]),
+            ("filter: hue-rotate()", vec![FilterFn::HueRotate(0.0)]),
+            (
+                "filter: blur()",
+                vec![FilterFn::Blur(LengthPercentage::Px(0.0))],
+            ),
+            // drop-shadow：color 后置（规范序）
+            (
+                "filter: drop-shadow(1px 2px 3px red)",
+                vec![FilterFn::DropShadow {
+                    dx: LengthPercentage::Px(1.0),
+                    dy: LengthPercentage::Px(2.0),
+                    blur: LengthPercentage::Px(3.0),
+                    color: ColorValue::Absolute(::peniko::color::AlphaColor::new([
+                        1.0, 0.0, 0.0, 1.0,
+                    ])),
+                }],
+            ),
+            // drop-shadow：color 前置（&& 任意序）+ blur 缺省
+            (
+                "filter: drop-shadow(#00f 4px 5px)",
+                vec![FilterFn::DropShadow {
+                    dx: LengthPercentage::Px(4.0),
+                    dy: LengthPercentage::Px(5.0),
+                    blur: LengthPercentage::Px(0.0),
+                    color: ColorValue::Absolute(::peniko::color::AlphaColor::new([
+                        0.0, 0.0, 1.0, 1.0,
+                    ])),
+                }],
+            ),
+            // 链序保留（css-filters-1 有序表：invert→brightness ≠ 反序）
+            (
+                "filter: invert(1) brightness(0.5) blur(2px)",
+                vec![
+                    FilterFn::Invert(1.0),
+                    FilterFn::Brightness(0.5),
+                    FilterFn::Blur(LengthPercentage::Px(2.0)),
+                ],
+            ),
+        ] {
+            let (b, r) = block(&format!("filter: {src}").replace("filter: filter: ", "filter: "));
+            assert!(r.is_clean(), "{src}: {r:?}");
+            match parsed(&b.decls[0]) {
+                DeclValue::Filters(fns) => assert_eq!(fns, &want, "{src}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // 严格拒绝面（D2）：百分比长度 / 未知函数 / url()（T2，cssparser
+        // Token::Url → 空表）/ 逗号分隔（文法无逗号）/ 未知单位
+        for src in [
+            "filter: blur(50%)",
+            "filter: wat(2px)",
+            "filter: url(#f)",
+            "filter: blur(2px), invert(1)",
+            "filter: blur(2qx)",
+            "filter: drop-shadow(1px)",
+            "filter: brightness(abc)",
+        ] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+        // none 覆盖语义：Filters(vec![]) 有效声明（级联胜出非缺席）
+        let (b, r) = block("filter: none");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::Filters(f) if f.is_empty()
+        ),);
+        let _ = PropertyId::Filter;
+    }
+
+    #[test]
+    fn backdrop_filter_parse_strict() {
+        use crate::css::property::{FilterFn, PropertyId};
+        // P2（ADR-0031 D2，推翻 ADR-0028 D1 宽容面）：严格文法
+        // `none | <filter-function>+`；none = Filters(vec![]) 有效声明；
+        // 未知函数/参数非法/裸值 → 整条拒绝（is_clean=false）
+        for (src, want) in [
+            ("backdrop-filter: none", vec![]),
+            (
+                "backdrop-filter: blur(2px)",
+                vec![FilterFn::Blur(LengthPercentage::Px(2.0))],
+            ),
+            (
+                "backdrop-filter: blur(4px) saturate(1.5)",
+                vec![
+                    FilterFn::Blur(LengthPercentage::Px(4.0)),
+                    FilterFn::Saturate(1.5),
+                ],
+            ),
+            (
+                "backdrop-filter: brightness(1.2)",
+                vec![FilterFn::Brightness(1.2)],
+            ),
         ] {
             let (b, r) = block(src);
             assert!(r.is_clean(), "{src}: {r:?}");
             match parsed(&b.decls[0]) {
-                DeclValue::Effect(present) => assert_eq!(*present, want, "{src}"),
+                DeclValue::Filters(fns) => assert_eq!(fns, &want, "{src}"),
                 other => panic!("{src}: {other:?}"),
             }
         }
-        // 宽容存在性契约（与 filter 同型）：任意非 none 值=存在（css 文法
-        // 严格性不作校验，parse_sc_effect 设计如此——ADR-0028 D1）
-        let (b, r) = block("backdrop-filter: 10px junk(");
-        assert!(r.is_clean(), "宽容存在性：{r:?}");
-        assert!(matches!(parsed(&b.decls[0]), DeclValue::Effect(true)));
+        // 严格拒绝契约（D2）：裸值+垃圾 token / 未知函数 / 百分比 blur /
+        // url() 引用（T2）→ 整条丢弃（不宽容存在性）
+        for src in [
+            "backdrop-filter: 10px junk(",
+            "backdrop-filter: wat(2px)",
+            "backdrop-filter: blur(50%)",
+            "backdrop-filter: url(#f)",
+        ] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+        // none 胜出覆盖语义（P2 微调③）：Filters(vec![]) 有效声明非缺席
+        let (b, r) = block("backdrop-filter: none");
+        assert!(r.is_clean());
+        assert!(matches!(
+            parsed(&b.decls[0]),
+            DeclValue::Filters(f) if f.is_empty()
+        ),);
+        let _ = PropertyId::BackdropFilter;
     }
 }

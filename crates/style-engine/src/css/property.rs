@@ -1458,6 +1458,10 @@ pub enum DeclValue {
     TransitionTiming(TransitionTimingList),
     /// transition-behavior — 离散属性过渡策略（单值，非列表）。
     TransitionBehavior(TransitionBehavior),
+    /// filter / backdrop-filter（P2 批，ADR-0031 D1）：有序 filter 函数
+    /// 链（`Filters(vec![])` = none，有效声明显式无滤镜）。旧 Effect(bool)
+    /// 存在性语义退役（will-change/isolation 仍用 Effect）。
+    Filters(Vec<FilterFn>),
     /// filter 存在性（第四批④）：true = 值 ≠ none，仅作 SC 触发
     /// 语义位（ADR-0008 全集），不携带也不实现滤镜效果。
     /// （clip-path 已升级为 ClipPath(ClipShape) 形状值，F3c，ADR-0025。）
@@ -1749,6 +1753,47 @@ pub enum TransformFn {
     Skew(f32, f32),
     /// matrix(a, b, c, d, e, f)：x' = a·x + c·y + e。
     Matrix(f32, f32, f32, f32, f32, f32),
+}
+
+/// CSS filter 函数（P2 批，ADR-0031 D1）：`<filter-function-list>` 的有序
+/// 表元素（链序保留——invert→brightness ≠ brightness→invert）。
+/// 数值参数按 css-filters-1「clamped, not invalid」解析期钳位；
+/// percentage 归一为小数（0.5 = 50%）。长度分量经 `LengthPercentage`
+/// 承载（em/rem/vw/vh/calc 合法，绘制期终结——同 transform 惯例）；
+/// 颜色经 `ColorValue`（缺省 currentcolor，绘制期 pick_scheme 终结）。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum FilterFn {
+    /// blur(<length>?)：高斯模糊，绘制层 σ = 参数/2。
+    Blur(LengthPercentage),
+    /// brightness(<number-percentage>?)：线性乘（1 = 原样），钳 ≥ 0。
+    Brightness(f32),
+    /// contrast(<number-percentage>?)：c·a+(0.5−0.5a) 仿射，钳 ≥ 0。
+    Contrast(f32),
+    /// grayscale(<number-percentage>?)：sRGB 去饱和矩阵插值，钳 [0,1]。
+    Grayscale(f32),
+    /// sepia(<number-percentage>?)：sRGB 泛黄矩阵插值，钳 [0,1]。
+    Sepia(f32),
+    /// saturate(<number-percentage>?)：sRGB 饱和矩阵插值，钳 ≥ 0。
+    Saturate(f32),
+    /// invert(<number-percentage>?)：c'=(1−2a)c+a，钳 [0,1]。
+    Invert(f32),
+    /// opacity(<number-percentage>?)：alpha 缩放，钳 [0,1]。
+    Opacity(f32),
+    /// hue-rotate(<angle>?)：度（sRGB 线性近似矩阵，W3C §4 表）。
+    HueRotate(f32),
+    /// drop-shadow(<length>{2,3} && <color>?)：偏移 + 可选模糊半径
+    /// （spread 不存在，区别于 box-shadow）+ 颜色（缺省 currentcolor）。
+    DropShadow {
+        /// x 偏移。
+        dx: LengthPercentage,
+        /// y 偏移。
+        dy: LengthPercentage,
+        /// 模糊半径（0 = 硬边）。
+        blur: LengthPercentage,
+        /// 阴影色（缺省 currentcolor）。
+        color: ColorValue,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3091,26 +3136,147 @@ pub fn parse_transform(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::Transform(fns))
 }
 
-/// filter 的 v0 解析（第四批④，ADR-0008 触发全集）：不实现滤镜效果，
-/// 仅保留「值 ≠ none」存在性语义位（`DeclValue::Effect`）供 SC
-/// 判定与带序消费。任意函数/值宽容吞下，终止符（`;`/EOF）不消费交回声明循环。
-fn parse_sc_effect(p: &mut Parser) -> ValResult<DeclValue> {
-    let mut present = false;
+/// filter / backdrop-filter（P2 批，ADR-0031 D2，推翻 ADR-0028 D1 宽容面）：
+/// 严格文法 `none | <filter-function>+`（白空格分隔，无逗号）。未知函数 /
+/// 参数非法 → 整条声明拒绝（Err → 丢弃 + warn，is_clean=false）。
+/// none = 有效声明显式无滤镜（`Filters(vec![])`，级联覆盖下位 origin）。
+/// 旧 `parse_sc_effect` 宽容存在性退役；will-change/isolation 仍用 Effect。
+pub fn parse_filter_value_list(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let none = p.try_parse(|p| -> ValResult<()> {
+        match p.next()? {
+            Token::Ident(name) if name.eq_ignore_ascii_case("none") => Ok(()),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if none.is_ok() {
+        return Ok(DeclValue::Filters(Vec::new()));
+    }
+    let mut fns = Vec::new();
     loop {
-        match p.next() {
-            Ok(Token::Function(_)) => {
-                // parse_nested_block 走 parse_entirely（块内容须耗尽），须显式吞块
-                p.parse_nested_block(skip_block_content)?;
-                present = true;
-            }
-            // none：仅在值首（尚未见其他值）时缺席
-            Ok(Token::Ident(name)) if !present && name.eq_ignore_ascii_case("none") => {}
-            Ok(Token::Semicolon) => break,
-            Ok(_) => present = true,
+        // 列表头：Function → 严格解析；EOF/`;`/`}`/其他 token → 终止
+        // （不消费终止符，交回声明循环）。函数块解析失败整条拒绝（`?`）。
+        let name = match p.next() {
+            Ok(Token::Function(name)) => name.to_ascii_lowercase(),
+            Ok(_) => break,
             Err(_) => break, // EOF：值流尽
+        };
+        let f = p.parse_nested_block(|p| parse_filter_fn_args(p, &name))?;
+        fns.push(f);
+    }
+    if fns.is_empty() {
+        // 非 none 且无任何函数（如 `filter:;`）→ 无效声明
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(DeclValue::Filters(fns))
+}
+
+/// 单个 filter 函数的参数解析（已在 parse_nested_block 块内）。
+fn parse_filter_fn_args(p: &mut Parser<'_>, name: &str) -> ValResult<FilterFn> {
+    match name {
+        "blur" => {
+            let len = parse_filter_opt_length(p)?.unwrap_or(LengthPercentage::Px(0.0));
+            Ok(FilterFn::Blur(len))
+        }
+        "brightness" => Ok(FilterFn::Brightness(parse_filter_amount(p, 1.0)?.max(0.0))),
+        "contrast" => Ok(FilterFn::Contrast(parse_filter_amount(p, 1.0)?.max(0.0))),
+        "grayscale" => Ok(FilterFn::Grayscale(
+            parse_filter_amount(p, 1.0)?.clamp(0.0, 1.0),
+        )),
+        "sepia" => Ok(FilterFn::Sepia(
+            parse_filter_amount(p, 1.0)?.clamp(0.0, 1.0),
+        )),
+        "saturate" => Ok(FilterFn::Saturate(parse_filter_amount(p, 1.0)?.max(0.0))),
+        "invert" => Ok(FilterFn::Invert(
+            parse_filter_amount(p, 1.0)?.clamp(0.0, 1.0),
+        )),
+        "opacity" => Ok(FilterFn::Opacity(
+            parse_filter_amount(p, 1.0)?.clamp(0.0, 1.0),
+        )),
+        "hue-rotate" => Ok(FilterFn::HueRotate(
+            parse_filter_opt_angle(p)?.unwrap_or(0.0),
+        )),
+        "drop-shadow" => parse_filter_drop_shadow(p),
+        // css-filters-1 §4：url(#svg) 引用 = T2——cssparser 将 url( lex 为
+        // Token::Url（非 Function），在列表循环即 break → 空表整条拒绝。
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// `<number-percentage>?`（函数参数可缺省 → default）：number 直取、
+/// percentage unit_value（已 /100）归一。块尽 → default；他 token → 拒。
+fn parse_filter_amount(p: &mut Parser<'_>, default: f32) -> ValResult<f32> {
+    match p.next() {
+        Ok(Token::Number { value, .. }) => Ok(*value),
+        Ok(Token::Percentage { unit_value, .. }) => Ok(*unit_value),
+        Ok(_) => Err(p.new_error_for_next_token()),
+        Err(_) => Ok(default), // 块尽：缺省实参
+    }
+}
+
+/// `<length>?`（拒百分比——css-filters-1 blur/drop-shadow 仅长度文法；
+/// 裸 0 由 value.rs 长度解析器按 px 承接）。块尽 → None（缺省实参）。
+fn parse_filter_opt_length(p: &mut Parser<'_>) -> ValResult<Option<LengthPercentage>> {
+    let start = p.state();
+    match parse_length_percentage(p) {
+        Ok(LengthPercentage::Percent(_)) => Err(p.new_error_for_next_token()),
+        Ok(lenp) => Ok(Some(lenp)),
+        Err(e) => {
+            p.reset(&start);
+            match p.next() {
+                Err(_) => Ok(None), // 块尽：缺省
+                Ok(_) => Err(e),    // 有实参但非法 → 严格拒绝
+            }
         }
     }
-    Ok(DeclValue::Effect(present))
+}
+
+/// `<angle>?`（裸数字按 deg 宽容——同 parse_angle_deg 仓库惯例）。
+fn parse_filter_opt_angle(p: &mut Parser<'_>) -> ValResult<Option<f32>> {
+    let start = p.state();
+    match parse_angle_deg(p) {
+        Ok(a) => Ok(Some(a)),
+        Err(e) => {
+            p.reset(&start);
+            match p.next() {
+                Err(_) => Ok(None),
+                Ok(_) => Err(e),
+            }
+        }
+    }
+}
+
+/// drop-shadow(<length>{2,3} && <color>?)：`&&` 任意序——color 前置或
+/// 后置两序均收；2 length = 无模糊，3 length = blur；color 缺省
+/// currentcolor（绘制期 pick_scheme 终结）。
+fn parse_filter_drop_shadow(p: &mut Parser<'_>) -> ValResult<FilterFn> {
+    let mut color: Option<ColorValue> = None;
+    let start = p.state();
+    match parse_color_value(p) {
+        Ok(c) => color = Some(c),
+        Err(_) => p.reset(&start),
+    }
+    let dx = match parse_filter_opt_length(p)? {
+        Some(v) => v,
+        None => return Err(p.new_error_for_next_token()), // dx 必需
+    };
+    let dy = match parse_filter_opt_length(p)? {
+        Some(v) => v,
+        None => return Err(p.new_error_for_next_token()), // dy 必需
+    };
+    let blur = parse_filter_opt_length(p)?.unwrap_or(LengthPercentage::Px(0.0));
+    if color.is_none() {
+        let start = p.state();
+        match parse_color_value(p) {
+            Ok(c) => color = Some(c),
+            Err(_) => p.reset(&start),
+        }
+    }
+    Ok(FilterFn::DropShadow {
+        dx,
+        dy,
+        blur,
+        color: color.unwrap_or(ColorValue::CurrentColor),
+    })
 }
 
 /// will-change 的 v0 解析（第五批㉒ SC 触发全集）：列表含「非初始即生成
@@ -3260,19 +3426,6 @@ pub fn parse_transform_origin(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         x.unwrap_or(LengthPercentage::Percent(0.5)),
         y.unwrap_or(LengthPercentage::Percent(0.5)),
     ))
-}
-
-/// 吞掉一个嵌套块的全部内容（递归处理内嵌函数）——满足 parse_nested_block
-/// 经 parse_entirely 的 expect_exhausted 契约；闭合符由外层消费，块内
-/// next() 到达边界时返回 Err 即视为耗尽。
-fn skip_block_content(p: &mut Parser) -> ValResult<()> {
-    loop {
-        match p.next() {
-            Ok(Token::Function(_)) => p.parse_nested_block(skip_block_content)?,
-            Ok(_) => {}
-            Err(_) => return Ok(()),
-        }
-    }
 }
 
 fn parse_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
@@ -5428,7 +5581,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::TransitionTimingFunction => parse_transition_timing(p),
         P::TransitionBehavior => parse_transition_behavior(p),
         P::Hyphens => parse_hyphens(p),
-        P::BackdropFilter => parse_sc_effect(p),
+        P::BackdropFilter => parse_filter_value_list(p),
         P::TextOverflow => parse_text_overflow(p),
         P::WebkitLineClamp => parse_webkit_line_clamp(p),
         P::TextDecorationLine => parse_text_decoration_line(p),
@@ -5449,7 +5602,7 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::OverflowX | P::OverflowY => parse_overflow(p),
         P::BoxSizing => parse_box_sizing(p),
         P::Transform => parse_transform(p),
-        P::Filter => parse_sc_effect(p),
+        P::Filter => parse_filter_value_list(p),
         P::JustifyContent | P::AlignItems | P::AlignSelf | P::AlignContent => parse_align(p),
         P::FlexDirection => parse_flex_direction(p),
         P::FlexWrap => parse_flex_wrap(p),

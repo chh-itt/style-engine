@@ -732,6 +732,28 @@
   19 件（解析 5 + 驱动 7 + none/all + steps 采样点 + 离散双语义 +
   动画覆盖 + 稳态幂等 + 文本 color 过渡）。全量 **545** 测试绿
   （518→545）。
+- **filter / backdrop-filter 本体化（P2 批，ADR-0031）**：F4 批宽容存在性
+  （值丢弃 → Effect(bool)）升级为全函数族本体——①解析：`FilterFn` 十函数
+  枚举（Blur/Brightness/Contrast/Grayscale/Sepia/Saturate/Invert/Opacity/
+  HueRotate/DropShadow；长度/颜色活到计算期：`LengthPercentage`/`ColorValue`
+  承载，绘制域 `paint::FilterEffect` 终结），`parse_filter_value_list`
+  严格文法取代 `parse_sc_effect`（白空格分隔无逗号、未知函数/参数非法
+  整条拒绝、`url()` 拒绝=T2、钳位不拒绝 grayscale/sepia/invert/opacity∈[0,1]），
+  `none` → `Filters(vec![])` 有效声明覆盖语义（级联胜出，非缺席）；
+  ②绘制：`PushFilter/PopFilter` 层对（bbox 同 PushOpacity）+
+  `BackdropFilter` 单点即时 op（节点最前发射、主画布区域替换），
+  层序 transform→clip→blend→opacity→filter（合成序 opacity(filter(子树))，
+  css-filters-1 §3），收尾严格 LIFO；③soft 原生逐像素管线（P1-4 盒模糊
+  基建扩展）：颜色矩阵族（css-filters-1 §4 sRGB 表）/仿射/blur(σ=r/2)/
+  drop-shadow（遮罩模糊平移着色先影后源）/opacity 全函数集，FilterLayer
+  快照-清空-回合成，非预乘直排 src-over（filter 后全透明 → 保留快照）；
+  ④vello：纯 opacity 链 alpha 连乘直映，其余 warn-once 恒等层降级
+  （B 级在案，等待 vello filter 原语）；⑤serde：`FilterEffectDump`
+  （tag="fn" kebab-case）+ OpDump 三变体往返。锁定测试 +6：严格解析
+  （18 正例 7 拒绝例）、backdrop 严格契约重写、三重嵌套 LIFO、SC op 增量
+  （filter+2 层对/backdrop+1/will-change+0）、soft 端到端像素三件
+  （invert 层/backdrop 区域替换/透明保留快照）。全量 **551** 测试绿
+  （545→551）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

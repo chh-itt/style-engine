@@ -8067,15 +8067,42 @@ mod tests {
         let plain = build("");
         let (blue, red) = (find(&plain, [0.0, 0.0, 1.0]), find(&plain, [1.0, 0.0, 0.0]));
         assert!(blue < red, "控制组应树序绘制（blue={blue:?} red={red:?}）");
-        for (label, ops) in [
-            ("filter", build(" filter: blur(0px);")),
-            ("will-change", build(" will-change: transform;")),
-            ("backdrop-filter", build(" backdrop-filter: blur(2px);")),
+        for (label, trigger, extra) in [
+            // P2（ADR-0031）：filter 本体化 → PushFilter/PopFilter 层对
+            //（blur(0px) 非空链仍触发 SC）；
+            ("filter", " filter: blur(0px);", 2usize),
+            ("will-change", " will-change: transform;", 0),
+            // backdrop-filter → BackdropFilter op（无配对 pop）
+            ("backdrop-filter", " backdrop-filter: blur(2px);", 1),
         ] {
+            let ops = build(trigger);
             let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
             assert!(blue > red, "{label} SC 应后画（blue={blue:?} red={red:?}）");
-            assert_eq!(ops.len(), plain.len(), "{label} 不应产生额外 PaintOp");
+            assert_eq!(ops.len(), plain.len() + extra, "{label} PaintOp 增量");
         }
+        // filter 层对位置：PushFilter 包住子树 fill（blue），PopFilter 收尾。
+        let ops = build(" filter: blur(0px);");
+        let blue = find(&ops, [0.0, 0.0, 1.0]).unwrap();
+        let pf = ops
+            .iter()
+            .position(|o| matches!(o, crate::paint::PaintOp::PushFilter { .. }))
+            .expect("PushFilter 应发射");
+        let popf = ops
+            .iter()
+            .position(|o| matches!(o, crate::paint::PaintOp::PopFilter))
+            .expect("PopFilter 应发射");
+        assert!(
+            pf < blue && blue < popf,
+            "层对包住子树: pf={pf} blue={blue} popf={popf}"
+        );
+        // backdrop op 发射在节点内容之前（主画布即时作用）。
+        let ops = build(" backdrop-filter: blur(2px);");
+        let blue = find(&ops, [0.0, 0.0, 1.0]).unwrap();
+        let bf = ops
+            .iter()
+            .position(|o| matches!(o, crate::paint::PaintOp::BackdropFilter { .. }))
+            .expect("BackdropFilter 应发射");
+        assert!(bf < blue, "backdrop op 先于内容: bf={bf} blue={blue}");
         // P1-2：isolation（Normal 隔离组）/mix-blend-mode（具体模式）层对。
         for (label, trigger, expected) in [
             (

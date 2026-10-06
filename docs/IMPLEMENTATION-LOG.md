@@ -1693,3 +1693,62 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
   登记：ADR-0032（新建）、CHANGELOG P1-5 条、FEATURES.md（@keyframes
   条追记结束恢复+steps 修正；:26 状态与动画行改写 transition 全量；
   新建 transition-* 条目）。
+
+## P2 批 — filter / backdrop-filter 本体化（goal-c293e543 round 12–13）
+
+**ADR-0031 六决策落地 + 三处实施修订**（修订已写回 ADR：D1 长度/颜色
+LengthPercentage/ColorValue 承载+绘制域 FilterEffect 终结、D1 none→
+Filters(vec![]) 有效覆盖声明、D3 层序 blend→opacity→filter 合成序
+opacity(filter(子树))、D5 纯 opacity 链直映超集）。
+
+- **解析**（property.rs）：parse_sc_effect 整体退役删除 →
+  parse_filter_value_list（none→Filters(vec![])；Function 列表严格解析，
+  Ok(_)/Err(_) break 不消费终止符；空表 Err；url( 经 Token::Url → 空表 →
+  Err=T2 自然达成）；辅助 parse_filter_fn_args/parse_filter_amount/
+  parse_filter_opt_length（拒 Percent）/parse_filter_opt_angle（裸数字→deg）/
+  parse_filter_drop_shadow（color 前置/后置两序、dx dy 必需、blur 缺省
+  Px(0)、color 缺省 CurrentColor）；调用点 P::Filter/P::BackdropFilter 改道。
+- **计算**（computed.rs）：初始值 Filter/BackdropFilter=Filters(vec![])、
+  WillChange/Isolation/MixBlendMode=Effect(false)；has_filter()/
+  has_backdrop_filter()=Filters 非空；filter_chain()/backdrop_filter_chain()。
+- **绘制**（paint.rs）：FilterEffect 枚举（non_exhaustive）+
+  resolve_filter_effects（px()/resolve_color 终结）；PaintOp 三变体
+  PushFilter{filters,x,y,width,height}/PopFilter/BackdropFilter；
+  发射点：backdrop 在 paint_node 最前（transform 判定前）；filter 层对在
+  PushOpacity 后（层序 transform→clip→blend→opacity→filter，css-filters-1
+  §3——旧注释「filter 在 opacity 外」系错误已改正）；收尾 PopFilter 在
+  PopOpacity 前（LIFO）；push/pop 均以 w>0&&h>0 与链非空为条件。
+- **soft**（style-engine-soft）：filter.rs 管线（P1-4 基建扩展：
+  apply_effects 声明序、matrix_opacity、effects_pad=blur 1.5r/shadow
+  max(|dx|+1.5blur,|dy|)）；lib.rs FilterLayer{snapshot,filters,x,y,w,h}
+  快照+清空 padded 区（同 BlendLayer 法）；apply_op 签名 +filters 参数；
+  PopFilter=区域提取→apply_effects→src-over 快照写回 padded 全区（非预乘
+  直排 ao=a+ab(1-a)，filter 全透明→保留快照）；BackdropFilter=padded 读
+  主画布→apply→核心区替换写回（pad 环仅取样）；region_copy（越界钳制）。
+- **vello**：纯 opacity 链 alpha 连乘→vello 层 alpha；其余 warn-once 后
+  恒等层降级（Normal/1.0 push 保 PopFilter 栈平衡）；BackdropFilter
+  warn-once 忽略；static Once + eprintln 零新依赖。
+- **serde**（paint_dump.rs）：FilterEffectDump（tag="fn" kebab-case，
+  DropShadow color=[f32;4]）+ OpDump 三变体 + op_dump/op_load 臂同步
+  （op_load 统一返回 PaintOp——首写多包 Some 编译错两轮；未知效果重建
+  跳过、全未知仍建空链层对）。
+- **测试 +6（551=545→551，workspace --all-features 全绿）**：
+  filter_parse_strict（18 正例 7 拒绝例：百分比长度/未知函数/url/逗号
+  分隔/未知单位/单参 drop-shadow/非数 amount）；backdrop_filter_parse_
+  strict 重写；filter_layer_triple_nesting_lifo（blend+opacity+filter
+  push 序+内容+LIFO 收尾+链序 FilterEffect 相等+none 不发射）；
+  filter_clip_path_trigger_stacking_context_order 重基线（增量拆分
+  filter+2/will-change+0/backdrop+1 + PushFilter 包住子树位置 +
+  BackdropFilter 先于内容位置）；soft 三件 filter_layer_invert_end_to_end/
+  backdrop_filter_replaces_region_end_to_end/
+  filter_layer_transparent_content_keeps_snapshot；
+  filter_dump_round_trip（serde）。
+- **教训**：①sepia(150%) 期望 1.5 系测试错——clamp 语义=浏览器行为
+  （grayscale(2)→1.0 同理），改期望非改实现；②像素测试索引 (y·w+x)·4
+  两次算错（backdrop 区域外/透明空区采样点），引擎无罪测试修正；③
+  collapsible_if 两处（let-chains 合并/match 收拢发射+filtered 一体化）。
+- **纪律**：clippy lib 零警告；rustfmt 仅本批 11 文件（全局 fmt 会把
+  vello lib.rs/margin_collapse 写回 fmt 态——P1 教训复用）。
+  登记：ADR-0031（落地记录+修订写回）、CHANGELOG P2 条、FEATURES.md
+  （T0 段新建 filter 本体条/F4 条追注/偏差核对条改写/T1 text-align 条
+  追注）、本段。

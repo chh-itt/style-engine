@@ -170,6 +170,36 @@
   20px：x=0/5/10 手算 (249,0,6)/(185,0,70)/(121,0,134)、x 与 x+20
   同色；周期 0 画布不变）。
 - mix-blend-mode / isolation 实混合层（P1-2，css-compositing-1/2）：mix-blend-mode 全 18 值（css-compositing-1 16 标准模式含 normal + plus-lighter/plus-darker）+ isolation（isolate/auto）从「仅 SC 触发位」升级真实混合层——公共枚举 `BlendMode`（`DeclValue::BlendMode` 替换旧 `Effect(bool)` 存在位）；`PaintOp::PushBlend{mode,x,y,width,height}/PopBlend` 层对（bbox=border-box 同 PushOpacity）；混合层须最外——PushOpacity 先 push、PopOpacity 后 pop，合成序=blend(背后画布, opacity(子树))；`isolation: isolate` ≡ `PushBlend{Normal}` 隔离组边界（子树内混合不越界，修复旧「isolate 内混合穿透祖先画布」缺口）。sink 覆盖：soft sink 全 18 值原生像素合成（可分离模式全式 Co=αs(1−αb)Cs+αs·αb·B+(1−αs)αbCb、非可分离按 W3C Lum/Sat、plus 族按预乘加法）；vello sink 16/18——peniko `Mix` 枚举 16 标准模式一一映射，plus-lighter/plus-darker 不在 peniko Mix 枚举（上游缺口，见 DEPENDENCIES.md）退 Mix::Normal=B 级。测试：SC 层对发射/发射序（blend 包 opacity）、解析语义重基线（isolation/mix-blend 各 +2 op）、soft 像素锁 ×10（可分离/加法/非可分离/嵌套 opacity）、BlendMode serde 往返（kebab-case 模式名）。
+- filter / backdrop-filter 本体化（P2，css-filters-1/2）：F4 存在性语义
+  升级全函数族本体——①类型：`css::property::FilterFn`（#[non_exhaustive]
+  十函数：Blur/Brightness/Contrast/Grayscale/Sepia/Saturate/Invert/Opacity/
+  HueRotate/DropShadow；长度/颜色活到计算期 `LengthPercentage`/`ColorValue`）
+  + `DeclValue::Filters(Vec<FilterFn>)`（替换 Effect(bool) 承载，
+  Effect 变体保留给 will-change/isolation/mix-blend-mode）；`none` →
+  `Filters(vec![])` **有效覆盖声明**（级联胜出，非缺席）。②解析：
+  `parse_filter_value_list` 严格文法（`none | <filter-function>+` 白空格
+  分隔无逗号、percentage /100 归一、钳位不拒绝 grayscale/sepia/invert/
+  opacity∈[0,1]（浏览器行为 sepia(150%)→1.0）、brightness/contrast/
+  saturate≥0、缺省实参（brightness()=1、hue-rotate()=0、blur()=0）、
+  drop-shadow 两序 `<length>{2,3} && <color>?`、未知函数/参数非法/`url()`
+  整条拒绝）。③绘制：`paint::FilterEffect` 绘制域终结形态 +
+  `PushFilter{filters,x,y,width,height}/PopFilter` 层对（bbox=border-box）
+  + `BackdropFilter` 单点即时 op（节点最前发射、主画布区域替换写回、
+  pad 环仅取样）；层序 transform→clip→blend→opacity→filter（合成序
+  opacity(filter(子树))，css-filters-1 §3）收尾严格 LIFO（三重嵌套锁）；
+  SC 谓词 has_filter()/has_backdrop_filter() 改读 Filters 非空。
+  ④soft 原生逐像素全函数管线：颜色矩阵族按 css-filters-1 §4 sRGB 表
+  3×4 乘、brightness/contrast 仿射、blur σ=r/2 盒模糊（P1-4 同源）、
+  drop-shadow 遮罩→模糊→平移→着色→影先源后、opacity alpha 缩放；
+  FilterLayer 快照-清空-回合成、非预乘直排 src-over（filter 后全透明
+  保留快照）。⑤vello：纯 opacity 链 alpha 连乘直映，其余 warn-once
+  恒等层降级（栈平衡保持；B 级在案）。⑥serde：`FilterEffectDump`
+  （tag="fn" kebab-case）+ OpDump push_filter/pop_filter/backdrop_filter
+  往返。测试 +6（551=545→551）：filter_parse_strict（18 正例 7 拒绝例）、
+  backdrop_filter_parse_strict 重写、filter_layer_triple_nesting_lifo、
+  SC op 增量（filter+2/backdrop+1/will-change+0）+层对位置、soft 端到端
+  像素三件（invert 层/backdrop 区域替换/透明保留快照）、
+  filter_dump_round_trip。
 - margin collapsing 重估 + padding 长手修复（P1-1，css2.1 §8.3.1）：块流
   折叠语义全路径正确并首次锁定——父首子顶塌穿（父无 padding/border 时
   mt 出父外）、兄弟间距=max(正和)+min(负)（负 margin 入 max）、空块自塌
@@ -397,8 +427,9 @@
   型存在性语义位（parse_sc_effect 复用：值 ≠ none → `Effect(true)`、none
   缺席、函数块宽容吞咽）；css-filters-2 非 none 即触发 stacking context，
   paint SC 谓词并入 `has_backdrop_filter()`（非定位触发者进 Pos 带键 0，
-  触发表锁扩 backdrop-filter 行）；效果本体=T2（同 filter 先例，
-  vello 0.10 无滤镜管线）。②**hyphens**——`HyphensKind{#[default]
+  触发表锁扩 backdrop-filter 行）；效果本体后于 P2 本体化（ADR-0031，
+  strict 文法+PushFilter/BackdropFilter ops+soft 全函数管线，见下）。
+  ②**hyphens**——`HyphensKind{#[default]
   Manual,None,Auto}` 属性层（css-text-3 §5.4 initial=manual、继承属性入
   inherits 白名单）；断词效果三值 v1 一致=上游边界（显式断点 U+00AD/
   U+2010 由 parley UAX 14 分段、auto 无词典、none 无法抑制上游断点——
@@ -406,8 +437,8 @@
   追加 Hyphens=162/BackdropFilter=163、动画描述符整体后移 ×2 至
   164..171（0.x 破坏性=SLOT_COUNT 169→171 + PropertyId/DeclValue 变体
   加性）。锁：decl.rs `hyphens_parse_modes`（三关键字+非法拒绝+initial
-  manual）、`backdrop_filter_parse_presence`（none/函数/宽容存在性）+
-  engine SC 触发表扩行。全量测试绿（当时 **492**=490→492；现值 ≥512，以 CI 为准）。
+  manual）、`backdrop_filter_parse_strict`（P2 重写：none/函数正例+
+  宽容存在性拒绝）+ engine SC 触发表扩行。全量测试绿（当时 **492**=490→492；现值 ≥551，以 CI 为准）。
 - T0 零容忍收敛（二期⑤）：conformance 全量绿且零 xfail——Numeric 16 用例（仅存 xfail 项 calc-width 已于二期①转正）+ Pixel 3 用例（二期④通道转正）；9 manifest 显式 xfail=false、其余 serde 默认 false，零 xfail 资产存续，T0 范围内 Class 3–5 零违规；含文本/变换用例暂不入 Pixel 通道属 ⑦ 能力缺口（非 xfail，⑦ 转正后并入）
 
 ## T1 — v0.2+
@@ -415,7 +446,7 @@
 - @keyframes 动画（第五批⑰已落地）：解析——`@keyframes name { from/to/百分比 [,分组] { decls } }`（-webkit-keyframes 别名；坏帧选择器整帧容错丢弃+告警）；描述符——animation-name/duration/delay/iteration-count(infinite)/timing-function(linear/ease 系三次贝塞尔二分求值/steps(n[,start|end]))/direction(normal/reverse/alternate/alternate-reverse)/fill-mode(none/forwards/backwards/both) + animation 简写（单动画组：`<time>` 首现=duration 次现=delay、关键字先行消歧、余下 ident=名；多动画组逗号分隔=残余偏差）；采样——engine.frame 每帧 apply_animations（级联后、布局前覆写）：fill 语义（未开始 backwards/both、结束 forwards/both，否则回底层值）、方向折叠、缓动按关键帧段施加、插值=lerp_decl（颜色 pick_scheme 终结后 sRGBA 直排混合、长度同变体线性跨单位离散、transform 同名函数逐参、圆角/origin 双组件、不可插值离散取段进度 0.5 界）；**结束恢复底层值（P1-5 补齐）**——已结束且无 forwards/both 填充时写回 anim_underlying 底层值副本（原「不覆写」残留最后采样值；首见快照、外部重算自动刷新、节点移除三处卫生同步）；steps 语义修正（P1-5：jump-end=⌊p·n⌋/n，原分支写反走 ceil）；锁定测试 keyframes_parse + keyframes_animation_sampling（0/0.25/0.5/1 插值、fill both 端点保持、无 fill 回底层）
 - CSS Transitions transition-* 全量（P1-5 批已落地，ADR-0032）：①属性面——transition-property（None/All/Ident 列表；custom-ident 合法保留=未知名不产生过渡不报错）、duration（拒负）/delay（允负快进）、timing-function（复用 TimingFn）、behavior（Normal/AllowDiscrete）+ 简写 `<single-transition>#`（顺序自由、首 time=duration 次=delay、三 time/负 duration 报错整条忽略）；②reconciliation（restyle 提交点 styles.insert 前，css-transitions-2 §3 精化序）：新值==活动过渡 to → 保持运行（容器收敛环保护）→ 新级联==生效值 → 取消 → combined≤0 → 取消/不启动 → 重定向（from=当前插值中间值）→ 可插值探针（离散对需 allow-discrete）→ 动画覆盖槽抑制启动（偏差在案：动画层高于过渡层）；描述符槽自身不可过渡；首帧无 before-change 不过渡；③采样挂点 frame()（restyle 后、apply_animations 前——animation 层高于 transition 层同槽覆写）：延迟段写 from、进度≥1 写 to 移除、离散 50% 翻转；start_time=变更提交帧时刻；过渡表空=稳态零写入（frame() 逐位一致）；锁定测试 tests/transition.rs 19 件（解析 5+驱动 7+none/all+steps 采样点+离散双语义+动画覆盖+稳态幂等+文本 color 过渡）
 - bidi 与多 run 混排（第五批⑲已落地评估）：parley 0.11 内建 Unicode bidi 算法（analysis 以 base_level=None 调 resolve）——引擎文本栈零成本继承混排重排（first-strong 基向、嵌段层级、簇视觉序经 line items 直出）；锁定测试 bidi_mixed_direction_first_strong（混排串 LTR+RTL 双 run 划分、纯 RTL 串全 run 奇数层级、advance 不塌缩，DejaVu 覆盖希伯来字形）；残余偏差：CSS direction 属性无显式基向管道（parley 0.11 硬编码 first-strong，上游暴露 builder 级基向后接入）
-- text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter 触发的 stacking context 已落地（第四批④：仅 SC 触发、不做滤镜效果，见偏差核对 filter 条）；clip-path 已升实裁剪（F3c，见 T0 段条目）；容器查询已落地（阶段2③，见 T0 段条目）
+- text-align（消费已落地——第五批⑳：折行后 parley align，justify 实际消费，测量不变宽）；filter 触发的 stacking context 已落地（第四批④），效果本体已落地（P2，ADR-0031：严格文法+PushFilter/PopFilter 层对+BackdropFilter op+soft 全函数管线+vello opacity 直映，见偏差核对 filter 条）；clip-path 已升实裁剪（F3c，见 T0 段条目）；容器查询已落地（阶段2③，见 T0 段条目）
 - T1 用例覆盖（二期⑥）：conformance 新增 2 用例入 Numeric 通道（合计 18，零 xfail）——①keyframes-layout（动画布局不变性：.a/.b 挂 animation 简写+@keyframes（背景色/透明度插值），golden 与静态布局逐位一致，实证 apply_animations 每帧采样不扰动布局；transform 动画刻意不用——getBoundingClientRect 含变换、像素截图时机非确定，动画终值像素验收待 ⑦）；②bidi-mixed（混排一致性：相对容器 600×200 内 3 个 absolute 文本叶——拉丁+希伯来混排串/纯 RTL 串/声明宽 140px 折行串，宽 203.1/42.4/140、高 19/19/38 与 Chromium 153 golden 零超差，parley first-strong 基向两侧一致）；随用例修复两缺陷：restyle 的 absolute 宽例外改查本地 cs（原 is_absolute 查 self.styles 而本节点 cs 到函数尾才 insert 恒 None——auto 宽绝对文本叶测量宽丢失，taffy 绝对布局对 auto 叶无测量回退得 0）与 T5d 换行宽声明优先（原一律用 shrink 夹紧宽，声明 140px 被无界测量 233px 盖过漏折行；percent 基准暂取夹紧宽 v1 近似）；引擎锁定测试 absolute_text_leaf_sizes（混排/RTL 测量宽正负号回归+声明宽折行高）
 - 第二软 Sink 转正：Text + Transform（二期⑦）——style-engine-soft 从 FillRect/Gradient/Shadow/Image/Border/Clip/Opacity/Scroll 八算子扩至全算子：①Transform 逆映射光栅化（DisplayList 级组合矩阵 cur=[f32;6]+栈消费 PushTransform（cur=M∘cur）/PushScroll（平移折叠）/Pop*；dest 包围盒=变换后角点，逐像素中心逆仿射回源空间做矩形/圆角/clip 判定，color_at 源坐标采样——旋转 90/180° 轴对齐整数边缘无 AA，与 Chromium 逐位一致，transform-pixel 实测 diff 0/120000）；②Text 最小 TrueType 光栅化（soft::ttf 纯 std：sfnt/head/hhea/maxp/hmtx/loca/glyf 简单+复合字形（平移+双轴缩放，点匹配与 2×2 按单位阵近似记录偏差）、cmap format 4 BMP、二次曲线 16 段折线化（2048 upm 偏差≲0.06px@16px）、4×4 超采样 16 级 AA；FontBank 族名→字节注入（零副作用原则，宿主推字体），render_with_fonts 接管 Text op（基线=y+(行高−(asc+desc))/2+asc，normal 行高=round(asc)+round(desc) 与引擎㉔/Chromium 同式）；v1 边界：无合成粗斜体/kerning/spans/换行/align 消费）；③Pixel 通道转正新增 3 用例（合计 6）——transform-pixel（rotate(180)×2 非对称渐变盒+非对称 border-top 宽盒，预算 0.001 实测逐位一致）、text-pixel（DejaVu 16/20px 单行短词，预算 0.01 实测 0.00585）、table-basic 并入（预算 0.005 实测 0.002875）；④随用例修复引擎缺陷：resolve_transform_affine 漏传盒偏移——op 坐标为视口系而 origin 按 (w/2,h/2) 解析，offset 盒绕错中心旋转、子树整体错位/消失（既有单测盒在 (0,0) 故盲），paint.rs paint_node 改传 (x,y)、origin=(x,y)+盒内百分比基点，锁定测试 transform_origin_includes_box_offset（盒 (10,20,100,50) rotate(180) → e=120/f=90）
 
@@ -435,13 +466,14 @@
   常量化等偏差见该条诚实边界。
 - 打印 / @media print / 分页：媒体查询求值按视口（screen 语义），无 page box 与 fragmentation。重估条件：分页布局需求出现（page 模型+跨页断行是独立工程量级）。
 - 3D 变换（matrix3d/translate3d/rotate3d/scale3d/perspective 等，ADR-0009）：解析期 warn 拒绝、声明丢弃=none——vello 0.10 纯 2D 仿射管线（[f32;6]）。重估条件：sink 升级 3D 或换渲染后端。
-- filter / backdrop-filter 效果本体：仅 stacking context
-  触发语义位（第四批④/第五批㉒/F4 ADR-0028——两者解析与 SC 触发均在
-  场，backdrop-filter 同 filter 型 `Effect` 存在位），不产生任何 PaintOp——
-  无滤镜、无背景回采实现（clip-path 裁剪已于 F3c 落地，见 T0 段条目；
-  mix-blend-mode / isolation 混合层已于 P1-2 落地，见 T0 段混合层条）。
-  重估条件：vello 滤镜/图像效果管线可用（backdrop-filter 另需
-  已绘制内容回采语义）。
+- filter / backdrop-filter 效果本体：**已于 P2 落地（ADR-0031）**——
+  十函数枚举 `FilterFn` 严格解析（钳位不拒绝、`url()`/未知函数整条拒绝、
+  `none` 为有效覆盖声明）、`PushFilter/PopFilter` 层对 + `BackdropFilter`
+  即时 op（层序 opacity(filter(子树))）；soft sink 原生逐像素全函数管线
+  （颜色矩阵族 sRGB 表/blur σ=r/2/drop-shadow 影先源后），vello 纯 opacity
+  链直映、其余 warn-once 恒等层降级（见 T0 段混合层后滤镜条）。残余 B 级：
+  vello 像素效果等待 vello filter/fragment brush 原语；层内 backdrop 域
+  近似主画布区域。
 - @container style() 查询：未支持——依赖容器自定义属性计算值快照与样式重算反馈回路。（其伴生条目 cqw/cqh/cqi/cqb 单位已于 A9 落地：延迟结算+容器基值结算期现查+small viewport 回落，见 T0 A9 条。）重估条件：容器 custom property 快照管线 + 依赖失效模型。
 - @layer 跨样式表：**主体已落地（B2）**——文档全局层树（各表层树附着
   期经 remap_layers_to_doc 重映射并入 doc_layers，跨表同名层 = 同层、
