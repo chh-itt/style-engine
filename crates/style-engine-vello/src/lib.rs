@@ -15,7 +15,8 @@ use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Point, Stroke, Vec2};
 use vello::peniko::color::{AlphaColor, Srgb};
 use vello::peniko::{
-    Brush, Extend, Fill, Gradient, GradientKind, Mix, RadialGradientPosition, SweepGradientPosition,
+    Brush, Extend, Fill, Gradient, GradientKind, LinearGradientPosition, Mix,
+    RadialGradientPosition, SweepGradientPosition,
 };
 
 #[cfg(test)]
@@ -64,6 +65,52 @@ mod tests {
         );
         let offs: Vec<f32> = out.iter().map(|(o, _)| *o).collect();
         assert_eq!(offs, [0.6, 0.6]);
+    }
+
+    #[test]
+    fn repeating_peniko_linear_shrinks_segment_and_offsets() {
+        use vello::kurbo::Point;
+        use vello::peniko::color::{AlphaColor, Srgb};
+        use vello::peniko::{Extend, Gradient, GradientKind};
+        // P1-3（css-images-3）：200px 线上 red 0 / blue 100px → 周期 0.5，
+        // 画刷段收缩为半长 (100px)、stops 归一到周期内 [0,1]、Extend::Repeat。
+        let out = Gradient::new_linear(Point::new(0.0, 0.0), Point::new(200.0, 0.0));
+        let stops = vec![
+            (0.0, AlphaColor::<Srgb>::new([1.0, 0.0, 0.0, 1.0])),
+            (0.5, AlphaColor::<Srgb>::new([0.0, 0.0, 1.0, 1.0])),
+        ];
+        let g = super::repeating_peniko(out, stops);
+        assert_eq!(g.extend, Extend::Repeat);
+        match g.kind {
+            GradientKind::Linear(pos) => {
+                // 段收缩：start 不动 (0,0)，end = start + period·len = (100, 0)
+                assert_eq!((pos.start.x, pos.start.y), (0.0, 0.0));
+                assert_eq!((pos.end.x, pos.end.y), (100.0, 0.0));
+            }
+            ref other => panic!("应为线性画刷：{other:?}"),
+        }
+        let offs = [g.stops[0].offset, g.stops[1].offset];
+        assert_eq!(offs, [0.0, 1.0]);
+    }
+
+    #[test]
+    fn repeating_peniko_zero_period_transparent() {
+        use vello::kurbo::Point;
+        use vello::peniko::color::{AlphaColor, Srgb};
+        use vello::peniko::{Extend, Gradient};
+        // 周期 0（首末停点重合）：透明黑两 stop + Pad——source-over 无操作。
+        let out = Gradient::new_linear(Point::new(0.0, 0.0), Point::new(100.0, 0.0));
+        let red = AlphaColor::<Srgb>::new([1.0, 0.0, 0.0, 1.0]);
+        let g = super::repeating_peniko(out, vec![(0.4, red), (0.4, red)]);
+        assert_eq!(g.extend, Extend::Pad);
+        assert_eq!(g.stops.len(), 2);
+        for i in 0..g.stops.len() {
+            let s = &g.stops[i];
+            let c: [f32; 4] = s.color.components;
+            assert_eq!(c, [0.0, 0.0, 0.0, 0.0]);
+        }
+        let offs = [g.stops[0].offset, g.stops[1].offset];
+        assert_eq!(offs, [0.0, 1.0]);
     }
 
     #[test]
@@ -1314,8 +1361,12 @@ fn peniko_gradient(
             }
         }
     };
+    let stops = distribute_stops(&g.stops, line_len);
+    if g.repeating {
+        return repeating_peniko(out, stops);
+    }
     out.extend = Extend::Pad;
-    for (p, c) in distribute_stops(&g.stops, line_len) {
+    for (p, c) in stops {
         out.stops.push(vello::peniko::ColorStop {
             offset: p,
             color: c.into(),
@@ -1324,11 +1375,69 @@ fn peniko_gradient(
     out
 }
 
-/// 按补齐 CSS 语义的 stop 位置构建 (offset, sRGB 颜色) 序列。
-/// Px=沿渐变线 px → 按线长归一为 0..1 offset（vello stop 语义）；
-/// Percent 存储即线长分数直取；其余单位（em/rem/cq…）sink 侧无
-/// 字体/容器上下文，与 soft sink 同约定按缺省自动均布（偏差在案
-/// FEATURES.md）；显式位置逆序时按 css-images-3 §4.5.2 抬至前停位。
+/// repeating-*-gradient（css-images-3，P1-3）vello 终结：把画刷几何收缩为
+/// 「一个周期」——线性=首末停点间线段、径向=r0/r1 两圆（`new_two_point`，
+/// r0 承载首停相位）、sweep=起终角弧段——stop 位置平移归一到周期内，
+/// `Extend::Repeat` 沿参数轴无限平铺（垂直条带方向不重复，与 CSS repeating
+/// 语义一致）。周期 ≤ 0（显式停点经 §4.5.2 抬升后首末重合等）按规范渲染
+/// 透明黑——source-over 之下等价无操作。停点全缺省（自动均布 0..1）时
+/// 周期=全长，平铺退化为与非 repeating 等价（无偏差）。
+fn repeating_peniko(mut out: Gradient, stops: Vec<(f32, AlphaColor<Srgb>)>) -> Gradient {
+    let first = stops.first().map_or(0.0, |s| s.0);
+    let period = stops.last().map_or(0.0, |s| s.0) - first;
+    if !(period.is_finite() && period > 1e-6) || stops.len() < 2 {
+        out.extend = Extend::Pad;
+        for p in [0.0f32, 1.0] {
+            out.stops.push(vello::peniko::ColorStop {
+                offset: p,
+                color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 0.0]).into(),
+            });
+        }
+        return out;
+    }
+    match &mut out.kind {
+        GradientKind::Linear(pos) => {
+            let (s, e) = (pos.start, pos.end);
+            let d = Vec2::new(e.x - s.x, e.y - s.y);
+            let len = (d.x * d.x + d.y * d.y).sqrt();
+            if len > 0.0 {
+                let unit = d / len;
+                let s2 = s + unit * (f64::from(first) * len);
+                let e2 = s2 + unit * (f64::from(period) * len);
+                *pos = LinearGradientPosition::new(s2, e2);
+            }
+        }
+        GradientKind::Radial(pos) => {
+            // 非 repeating 路径恒为 new(center, r)：r0=0、end_center=圆心。
+            let r = pos.end_radius;
+            let c = pos.end_center;
+            *pos = RadialGradientPosition::new_two_point(
+                c,
+                first * r,
+                c,
+                first * r + period * r,
+            );
+        }
+        GradientKind::Sweep(pos) => {
+            let (center, start, total) = (
+                pos.center,
+                pos.start_angle,
+                pos.end_angle - pos.start_angle,
+            );
+            let s2 = start + total * first;
+            *pos = SweepGradientPosition::new(center, s2, s2 + total * period);
+        }
+    }
+    out.extend = Extend::Repeat;
+    for (p, c) in stops {
+        out.stops.push(vello::peniko::ColorStop {
+            offset: (p - first) / period,
+            color: c.into(),
+        });
+    }
+    out
+}
+
 /// 核心 BlendMode → peniko Mix（P1-2）。16 标准模式一一对应；
 /// PlusLighter/PlusDarker 不在 Mix 枚举内，退 Normal（B 级偏差在案）。
 fn to_peniko_mix(mode: &style_engine::css::property::BlendMode) -> Mix {
@@ -1354,6 +1463,11 @@ fn to_peniko_mix(mode: &style_engine::css::property::BlendMode) -> Mix {
     }
 }
 
+/// 按补齐 CSS 语义的 stop 位置构建 (offset, sRGB 颜色) 序列。
+/// Px=沿渐变线 px → 按线长归一为 0..1 offset（vello stop 语义）；
+/// Percent 存储即线长分数直取；其余单位（em/rem/cq…）sink 侧无
+/// 字体/容器上下文，与 soft sink 同约定按缺省自动均布（偏差在案
+/// FEATURES.md）；显式位置逆序时按 css-images-3 §4.5.2 抬至前停位。
 fn distribute_stops(
     stops: &[style_engine::css::property::ColorStop],
     line_len: f32,

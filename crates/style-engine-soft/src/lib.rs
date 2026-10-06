@@ -345,8 +345,8 @@ fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
                 };
             }
             out[3] = ao;
-            for c in 0..3 {
-                out[c] /= ao;
+            for v in &mut out[..3] {
+                *v /= ao;
             }
             out
         }
@@ -521,6 +521,17 @@ fn apply_op(
             let line_len = lin
                 .map(|g| ((g.end[0] - g.start[0]).powi(2) + (g.end[1] - g.start[1]).powi(2)).sqrt())
                 .unwrap_or(line.2);
+            // repeating（css-images-3，P1-3）：停点模式周期 = 首末停点跨距
+            // （全线索引分数）；采样 t 取模回周期内再插值。周期 0（显式停点
+            // 逆序抬升后首末重合等）→ 透明黑（source-over 之下 = 无操作）。
+            let repeating = if gradient.repeating {
+                let pos = stop_positions(&gradient.stops, line_len);
+                let first = pos.first().copied().unwrap_or(0.0);
+                let period = pos.last().copied().unwrap_or(0.0) - first;
+                Some((first, period))
+            } else {
+                None
+            };
             fill_rect(
                 canvas,
                 clips,
@@ -560,6 +571,15 @@ fn apply_op(
                             }
                         }
                     };
+                    if let Some((first, period)) = repeating {
+                        if !(period.is_finite() && period > 1e-6) {
+                            return [0.0, 0.0, 0.0, 0.0];
+                        }
+                        // t 可越出 [0,1]（CSS repeating 沿轴无限平铺）：
+                        // u = first + mod(t − first, period) 落回首末停点间
+                        let u = first + (t - first).rem_euclid(period);
+                        return stop_at(&stops, u.clamp(0.0, 1.0), line_len);
+                    }
                     stop_at(&stops, t.clamp(0.0, 1.0), line_len)
                 },
             );
@@ -1513,6 +1533,7 @@ mod tests {
             height: 8.0,
             radius: [0.0; 8],
             gradient: Gradient {
+                repeating: false,
                 kind: GradientKind::Conic(ConicSpec {
                     from: Angle(0.0),
                     position: (
@@ -1584,6 +1605,7 @@ mod tests {
             height: 2.0,
             radius: [0.0; 8],
             gradient: Gradient {
+                repeating: false,
                 kind: GradientKind::Linear(Angle(90.0)),
                 stops: vec![
                     ColorStop {
@@ -1609,6 +1631,96 @@ mod tests {
             &[239, 239, 239],
             "右缘应为 t=15/16 灰"
         );
+    }
+
+    #[test]
+    fn repeating_linear_gradient_tiles_period() {
+        // P1-3（css-images-3）：40px 盒 repeating-linear-gradient(90deg,
+        // red 0px, blue 20px) → 周期 20px（线长分数 0.5），沿轴无限平铺；
+        // 像素中心采样 t=fx/40，u=mod(t,0.5)，k=u/0.5。
+        let grad = |repeating: bool| {
+            let mut list = DisplayList::default();
+            list.ops.push(PaintOp::Gradient {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 2.0,
+                radius: [0.0; 8],
+                gradient: Gradient {
+                    repeating,
+                    kind: GradientKind::Linear(Angle(90.0)),
+                    stops: vec![
+                        ColorStop {
+                            color: ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0])),
+                            position: Some(LengthPercentage::Px(0.0)),
+                        },
+                        ColorStop {
+                            color: ColorValue::Absolute(rgba([0.0, 0.0, 1.0, 1.0])),
+                            position: Some(LengthPercentage::Px(20.0)),
+                        },
+                    ],
+                },
+                radial: None,
+                conic: None,
+                linear: None,
+            });
+            list
+        };
+        let c = render(&grad(true), 40, 2, [255, 255, 255, 255]);
+        let at = |x: usize| {
+            let i = x * 4;
+            [&c.pixels[i], &c.pixels[i + 1], &c.pixels[i + 2]]
+        };
+        // 手算锁值：x=0（中心 0.5px）k=0.025 → (249,0,6)；
+        // x=5（中心 5.5px）k=0.275 → (185,0,70)；x=10 k=0.525 → (121,0,134)。
+        assert_eq!(at(0), [&249, &0, &6]);
+        assert_eq!(at(5), [&185, &0, &70]);
+        assert_eq!(at(10), [&121, &0, &134]);
+        // 周期性：x 与 x+20 同色（模式沿轴平铺）
+        assert_eq!(at(5), at(25), "周期 20px：x=5 与 x=25 应同色");
+        assert_eq!(at(10), at(30), "周期 20px：x=10 与 x=30 应同色");
+        // 非 repeating 对照：t≥0.5 全取末色 blue（超出末停即 clamp）
+        let c2 = render(&grad(false), 40, 2, [255, 255, 255, 255]);
+        let i = 30 * 4;
+        assert_eq!(
+            [&c2.pixels[i], &c2.pixels[i + 1], &c2.pixels[i + 2]],
+            [&0, &0, &255],
+            "非 repeating 右半应整体取末停 blue"
+        );
+    }
+
+    #[test]
+    fn repeating_gradient_zero_period_transparent() {
+        // 周期 0：red 20px / blue 20px（首末停点重合）→ 透明黑，画布不变。
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::Gradient {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 2.0,
+            radius: [0.0; 8],
+            gradient: Gradient {
+                repeating: true,
+                kind: GradientKind::Linear(Angle(90.0)),
+                stops: vec![
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0])),
+                        position: Some(LengthPercentage::Px(20.0)),
+                    },
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([0.0, 0.0, 1.0, 1.0])),
+                        position: Some(LengthPercentage::Px(20.0)),
+                    },
+                ],
+            },
+            radial: None,
+            conic: None,
+            linear: None,
+        });
+        let c = render(&list, 40, 2, [255, 255, 255, 255]);
+        assert_eq!(&c.pixels[0..4], &[255, 255, 255, 255], "周期 0 应无操作");
+        let i = 20 * 4;
+        assert_eq!(&c.pixels[i..i + 4], &[255, 255, 255, 255]);
     }
 
     #[test]

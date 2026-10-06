@@ -323,3 +323,53 @@ fn unregistered_image_reference_skips() {
         .all(|op| !matches!(op, PaintOp::Image { .. }));
     assert!(none, "未注册引用不应产生 Image op");
 }
+
+// ---------------------------------------------------------------- repeating 解析
+
+/// repeating- 前缀三族（P1-3，css-images-3）：内层文法逐一相同，
+/// 仅 repeating 标记不同；非 repeating 族仍为 false。
+#[test]
+fn repeating_gradient_flags_all_families() {
+    for (css, kind_name) in [
+        ("repeating-linear-gradient(45deg, red, blue)", "linear"),
+        ("repeating-radial-gradient(circle, red, blue)", "radial"),
+        ("repeating-conic-gradient(red, blue)", "conic"),
+    ] {
+        let mut e = engine_img(
+            &format!("#t {{ width: 60px; height: 40px; background-image: {css}; }}"),
+            None,
+            false,
+        );
+        let _ = e.frame((800.0, 600.0), 1.0, 0.0);
+        let style = e.computed_style(2).unwrap().clone();
+        let Some(DeclValue::BackgroundImage(images)) = style.get(PropertyId::BackgroundImage)
+        else {
+            panic!("{css}: 背景图应为渐变");
+        };
+        let Some(BackgroundImage::Gradient(g)) = images.first() else {
+            panic!("{css}: 背景图应为渐变");
+        };
+        assert!(g.repeating, "{css}: 应带 repeating 标记");
+        match (&g.kind, kind_name) {
+            (GradientKind::Linear(_), "linear")
+            | (GradientKind::Radial(_), "radial")
+            | (GradientKind::Conic(_), "conic") => {}
+            _ => panic!("{css}: kind 应为 {kind_name}"),
+        }
+    }
+    // 非 repeating：同文法无前缀 → false
+    let mut e = engine_img(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(red, blue); }",
+        None,
+        false,
+    );
+    let _ = e.frame((800.0, 600.0), 1.0, 0.0);
+    let style = e.computed_style(2).unwrap().clone();
+    let Some(DeclValue::BackgroundImage(images)) = style.get(PropertyId::BackgroundImage) else {
+        panic!("背景图应为渐变");
+    };
+    let Some(BackgroundImage::Gradient(g)) = images.first() else {
+        panic!("背景图应为渐变");
+    };
+    assert!(!g.repeating);
+}

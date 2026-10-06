@@ -2351,6 +2351,10 @@ pub enum ClipRadius {
 pub struct Gradient {
     /// 渐变类型与几何参数。
     pub kind: GradientKind,
+    /// 是否 repeating（css-images-3：`repeating-*-gradient()`——停点模式沿
+    /// 渐变线/半径/角度无限平铺，周期 = 首末停点跨距；周期为 0 时透明黑）。
+    /// P1-3 起解析；几何平铺由 sink 终结（vello Extend::Repeat / soft 取模采样）。
+    pub repeating: bool,
     /// 颜色停靠点序列（至少 1 个）。
     pub stops: Vec<ColorStop>,
 }
@@ -3748,16 +3752,22 @@ pub(crate) fn parse_background_image_one(p: &mut Parser<'_>) -> ValResult<Backgr
             })?;
             Ok(BackgroundImage::Url(url))
         }
-        Token::Function(name) if name.eq_ignore_ascii_case("linear-gradient") => {
-            let g = p.parse_nested_block(parse_linear_gradient)?;
-            Ok(BackgroundImage::Gradient(g))
-        }
-        Token::Function(name) if name.eq_ignore_ascii_case("radial-gradient") => {
-            let g = p.parse_nested_block(parse_radial_gradient)?;
-            Ok(BackgroundImage::Gradient(g))
-        }
-        Token::Function(name) if name.eq_ignore_ascii_case("conic-gradient") => {
-            let g = p.parse_nested_block(parse_conic_gradient)?;
+        Token::Function(name) => {
+            // linear/radial/conic-gradient 与 repeating- 前缀族（P1-3，
+            // css-images-3）：内层文法逐一相同，仅 repeating 标记不同。
+            let lower = name.to_ascii_lowercase();
+            let (base, repeating) = match lower.strip_prefix("repeating-") {
+                Some(b) => (b, true),
+                None => (lower.as_str(), false),
+            };
+            let parser: fn(&mut Parser<'_>) -> ValResult<Gradient> = match base {
+                "linear-gradient" => parse_linear_gradient,
+                "radial-gradient" => parse_radial_gradient,
+                "conic-gradient" => parse_conic_gradient,
+                _ => return Err(p.new_error_for_next_token()),
+            };
+            let mut g = p.parse_nested_block(parser)?;
+            g.repeating = repeating;
             Ok(BackgroundImage::Gradient(g))
         }
         _ => Err(p.new_error_for_next_token()),
@@ -4555,7 +4565,11 @@ fn parse_linear_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
         p.expect_comma().map_err(cssparser::ParseError::from)?;
     }
     let stops = parse_gradient_stops(p)?;
-    Ok(Gradient { kind, stops })
+    Ok(Gradient {
+        kind,
+        repeating: false, // 分派器（parse_background_image_one）按函数名改写
+        stops,
+    })
 }
 
 /// Dimension 数值+单位 → 度。
@@ -4645,6 +4659,7 @@ fn parse_radial_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
     }
     let stops = parse_gradient_stops(p)?;
     Ok(Gradient {
+        repeating: false, // 分派器按函数名改写
         kind: GradientKind::Radial(RadialSpec {
             shape: shape.unwrap_or(RadialShape::Ellipse),
             size: size.unwrap_or(RadialSize::FarthestCorner),
@@ -4699,6 +4714,7 @@ fn parse_conic_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
     }
     let stops = parse_gradient_stops(p)?;
     Ok(Gradient {
+        repeating: false, // 分派器按函数名改写
         kind: GradientKind::Conic(ConicSpec {
             from: from.unwrap_or(Angle(0.0)),
             position: position.unwrap_or((

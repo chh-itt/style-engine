@@ -652,6 +652,23 @@
   FEATURES T2 条目改写（filter/
   backdrop-filter 保持暂缓）+ T0 混合层新条 + DEPENDENCIES vello Mix
   缺口节。全量 **499** 测试绿（494→499）。
+- **repeating-*-gradient 解析与双 sink 平铺（P1-3 批，css-images-3）**：
+  `repeating-linear/radial/conic-gradient()` 三族全收——分派器按函数名
+  strip `repeating-` 前缀复用三解析器（内层文法逐一相同），
+  `css::Gradient.repeating: bool` 随 BackgroundImage→PaintOp::Gradient
+  流入双 sink。周期=首末停点跨距，停点模式沿渐变轴无限平铺；显式逆序
+  抬升后首末重合 → 周期 0 → 透明黑（source-over 无操作）；全缺省停点
+  退化为非 repeating。vello 终结：画刷几何收缩为「一个周期」
+  （linear 单位向量缩段 / radial `new_two_point` 两圆承载 r0 首停相位 /
+  sweep 起终角弧段）+ stops 平移归一 + `Extend::Repeat`——径向必须
+  new_two_point（r0=0 平移 stops 会丢相位 first）；soft 终结：采样
+  `u = first + (t − first).rem_euclid(period)` 回停点序列插值（t 不
+  夹取，CSS 无限平铺）。`GradientDump.repeating` serde 往返
+  （`#[serde(default)]` 旧 dump 兼容）。锁定：解析三族 flag/kind、
+  标记流入 DisplayList、serde 往返+旧 dump 回落、vello 段收缩与周期 0
+  纯 fn 两件、soft 像素锁两件（周期 20px 手算 (249,0,6)/(185,0,70)/
+  (121,0,134)、x 与 x+20 同色；周期 0 画布不变）。全量 **506** 测试绿
+  （499→506）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

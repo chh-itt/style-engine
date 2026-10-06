@@ -114,6 +114,9 @@ fn color_load(d: &ColorValueDump) -> ColorValue {
 pub struct GradientDump {
     /// 类型+几何。
     pub kind: GradientKindDump,
+    /// repeating（css-images-3，P1-3；缺省 false 兼容旧 dump）。
+    #[serde(default)]
+    pub repeating: bool,
     /// 停靠点。
     pub stops: Vec<ColorStopDump>,
 }
@@ -289,6 +292,7 @@ fn gradient_dump(g: &Gradient) -> GradientDump {
     };
     GradientDump {
         kind,
+        repeating: g.repeating,
         stops: g
             .stops
             .iter()
@@ -339,6 +343,7 @@ fn gradient_load(d: &GradientDump) -> Gradient {
     };
     Gradient {
         kind,
+        repeating: d.repeating,
         stops: d
             .stops
             .iter()

@@ -148,6 +148,26 @@
   PushClip、position 关键字与 px 偏移；image 叶自然 40×20/声明宽 80px→
   80×40；未注册零 op）+ soft conic 象限像素一件（45°/135°/225°/315°
   红蓝交替）。
+- repeating-*-gradient（P1-3，css-images-3）：`repeating-linear/radial/conic-gradient()`
+  三族全收——分派器按函数名 strip `repeating-` 前缀后复用三解析器
+  （内层文法逐一相同），`css::Gradient.repeating: bool` 标记随
+  BackgroundImage→PaintOp::Gradient（内嵌 gradient 副本）流入双 sink。
+  语义=停点模式沿渐变轴无限平铺（周期=首末停点跨距；显式 Px 停点经
+  线长归一、逆序按 §4.5.2 抬升后首末重合 → 周期 0 → 透明黑=source-over
+  无操作；全缺省停点周期=全长退化为非 repeating）。sink 终结：vello
+  画刷几何收缩为「一个周期」（linear=单位向量缩段/radial=
+  RadialGradientPosition::new_two_point 两圆承载 r0 首停相位/sweep=
+  起终角弧段）+ stops 平移归一 [0,1] + Extend::Repeat（r0=0 平移 stops
+  会丢相位 first——径向必须 new_two_point）；soft 采样 t 不夹取改
+  u=first+(t−first).rem_euclid(period) 回停点序列插值（垂直条带方向
+  不重复，与 CSS 一致）。em/rem/cq 相对停点双 sink 同约定均布（既有
+  偏差延续）。0.x 破坏性：css::Gradient +repeating、GradientDump
+  +repeating（#[serde(default)] 旧 dump 兼容）。锁定：css_images.rs
+  repeating 三族 flag+kind 一件；paint.rs repeating 标记流入
+  DisplayList 一件 + serde 往返/旧 dump 回落一件；vello
+  repeating_peniko 段收缩+周期 0 两件；soft 像素锁两件（40px 盒周期
+  20px：x=0/5/10 手算 (249,0,6)/(185,0,70)/(121,0,134)、x 与 x+20
+  同色；周期 0 画布不变）。
 - ::selection / ::placeholder（C4，css-pseudo-4 / ADR-0018）：非盒生成
   伪元素双通道——`PseudoElement` +`Selection`/`Placeholder`（单冒号形
   拒绝），匹配=origin 直配（pseudo==None 即命中；实体化伪节点恒不

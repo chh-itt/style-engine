@@ -152,7 +152,8 @@ pub enum PaintOp {
         height: f32,
         /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
         radius: [f32; 8],
-        /// 渐变参数（CSS linear-gradient/radial-gradient）。
+        /// 渐变参数（CSS linear-gradient/radial-gradient；repeating 标记在
+        /// Gradient.repeating，P1-3 平铺语义由 sink 终结）。
         gradient: Gradient,
         /// 径向几何（T4c）：圆心与半径已按盒子解析为绝对 px（线性渐变为 None）。
         radial: Option<RadialGeom>,
@@ -604,6 +605,7 @@ fn paint_border_image(
         BackgroundImage::Gradient(g) => {
             let gradient = Gradient {
                 kind: g.kind.clone(),
+                repeating: g.repeating,
                 stops: g
                     .stops
                     .iter()
@@ -1363,6 +1365,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 if let Some(g) = gradient {
                     let resolved = Gradient {
                         kind: g.kind.clone(),
+                        repeating: g.repeating,
                         stops: g
                             .stops
                             .iter()
@@ -2855,6 +2858,40 @@ mod tests {
     }
 
     #[test]
+    fn repeating_gradient_flag_flows_to_display_list() {
+        // P1-3：repeating-* 前缀标记（css::Gradient.repeating）经背景 tile
+        // resolved 副本流入 DisplayList——双 sink 据此取模平铺。
+        let (tree, id, style) = setup(
+            "background-image: repeating-linear-gradient(90deg, red 0px, blue 20px)",
+            None,
+        );
+        let out = run(&tree, id, style, &HashMap::new());
+        let g = out
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                PaintOp::Gradient { gradient, .. } => Some(gradient),
+                _ => None,
+            })
+            .expect("应有渐变 op");
+        assert!(g.repeating, "repeating 标记应随 op 流入显示列表");
+        assert_eq!(g.stops.len(), 2);
+        // 同文法无前缀 → false
+        let (tree, id, style) =
+            setup("background-image: linear-gradient(90deg, red 0px, blue 20px)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        let g = out
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                PaintOp::Gradient { gradient, .. } => Some(gradient),
+                _ => None,
+            })
+            .expect("应有渐变 op");
+        assert!(!g.repeating);
+    }
+
+    #[test]
     fn radial_gradient_geometry() {
         // 显式半径 + 关键字圆心：circle 20px at left top → (0,0,r=20)
         let (tree, id, style) = setup(
@@ -3723,6 +3760,7 @@ mod tests {
             radius: [0.0; 8],
             gradient: crate::css::property::Gradient {
                 kind: crate::css::property::GradientKind::Linear(crate::css::value::Angle(90.0)),
+                repeating: false,
                 stops: vec![],
             },
             radial: None,
@@ -3765,6 +3803,55 @@ mod tests {
                     })
                 );
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(feature = "serde")] // paint_dump 模块随 serde 门控
+    #[test]
+    fn paint_dump_roundtrips_repeating_gradient() {
+        // P1-3：Gradient.repeating serde 往返；旧 dump（无该字段）经
+        // #[serde(default)] 兼容回落 false。
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::Gradient {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 40.0,
+            radius: [0.0; 8],
+            gradient: crate::css::property::Gradient {
+                kind: crate::css::property::GradientKind::Linear(crate::css::value::Angle(90.0)),
+                repeating: true,
+                stops: vec![],
+            },
+            radial: None,
+            conic: None,
+            linear: Some(LinearGeom {
+                start: [0.0, 0.0],
+                end: [40.0, 0.0],
+            }),
+        });
+        let dump = list.to_dump();
+        let json = serde_json::to_string(&dump).expect("json");
+        assert!(json.contains("\"repeating\":true"));
+        let rebuilt = serde_json::from_str::<crate::paint_dump::DisplayListDump>(&json)
+            .expect("parse")
+            .to_display_list();
+        match &rebuilt.ops[0] {
+            PaintOp::Gradient { gradient, .. } => assert!(gradient.repeating),
+            other => panic!("{other:?}"),
+        }
+        // 旧 dump 兼容：抹去 repeating 字段（serde_json::Value 手术）→ default false
+        let mut v: serde_json::Value = serde_json::from_str(&json).expect("value");
+        v["ops"][0]["gradient"]
+            .as_object_mut()
+            .expect("gradient obj")
+            .remove("repeating");
+        let old = serde_json::from_value::<crate::paint_dump::DisplayListDump>(v)
+            .expect("parse")
+            .to_display_list();
+        match &old.ops[0] {
+            PaintOp::Gradient { gradient, .. } => assert!(!gradient.repeating),
             other => panic!("{other:?}"),
         }
     }
