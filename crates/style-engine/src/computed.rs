@@ -821,12 +821,18 @@ impl ComputedStyle {
         )
     }
 
-    /// mix-blend-mode ≠ normal（第五批㉒：仅触发，无混合效果实现）。
+    /// mix-blend-mode 计算值（P1-2）：缺席或 normal →
+    /// [`BlendMode::Normal`]。
+    pub fn mix_blend(&self) -> crate::css::property::BlendMode {
+        match self.get(PropertyId::MixBlendMode) {
+            Some(crate::css::property::DeclValue::BlendMode(m)) => *m,
+            _ => crate::css::property::BlendMode::Normal,
+        }
+    }
+
+    /// mix-blend-mode ≠ normal（第五批㉒ 起 SC 触发；P1-2 起携带效果）。
     pub fn has_mix_blend(&self) -> bool {
-        matches!(
-            self.get(PropertyId::MixBlendMode),
-            Some(DeclValue::Effect(true))
-        )
+        self.mix_blend() != crate::css::property::BlendMode::Normal
     }
 
     /// overflow-x（默认 visible）。

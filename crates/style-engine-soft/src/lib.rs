@@ -19,6 +19,7 @@
 //! | PushClip/PopClip | ✓ | 矩形+圆角裁剪栈（裁剪矩节点随所在变换层） |
 //! | PushClipPath/PopClip | ✓ | 多边形裁剪（nonzero/evenodd 射线法，F3c） |
 //! | PushOpacity/PopOpacity | ✓ | 有界组 alpha（快照回混，ADR-0008；bbox 随变换层） |
+//! | PushBlend/PopBlend | ✓ | 混合组全 18 种模式（快照底 + 清区累积，pop 按模式合成；P1-2，css-compositing-1；plus-lighter/darker=预乘加法惯例） |
 //! | PushScroll/PopScroll | ✓ | 平移折叠进变换矩阵（嵌套累加） |
 //! | PushTransform/PopTransform | ✓ | 逆映射逐像素反解 + 4×4 子采样覆盖；无旋转缩放时走中心采样快路径（与整数盒逐位一致）；斜向边缘为锯齿（无 AA，记录） |
 //! | Text | ✓ 近似 | 最小 TrueType（cmap4/glyf 简单+复合字形）折线扫描线 16 级覆盖；基线 = Chromium 同法（hhea 取整 + 半行距）；无 kerning/GSUB、无合成粗斜体、span 覆盖忽略、仅 Start 对齐、max_advance 不折行（记录） |
@@ -32,7 +33,7 @@
 mod ttf;
 
 use style_engine::css::property::{
-    BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind,
+    BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind,
 };
 use style_engine::css::value::{ColorValue, LengthPercentage};
 use style_engine::paint::{ConicGeom, RadialGeom};
@@ -184,6 +185,205 @@ struct OpacityLayer {
     h: u32,
 }
 
+/// 混合层（P1-2，css-compositing-1）：push 时刻快照底图，pop 时刻按
+/// [`BlendMode`] 将层内容与底图逐像素合成。全 18 种模式原生实现
+/// （含 vello Mix 枚举没有的 plus-lighter/plus-darker）。
+struct BlendLayer {
+    snapshot: Vec<u8>,
+    mode: BlendMode,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+// ===== 混合模式数学（css-compositing-1 §4；直排 sRGB RGBA，分量 [0,1]）=====
+
+/// 逐通道可分离混合函数 B(Cb,Cs)。
+fn blend_separable(mode: BlendMode, cb: f32, cs: f32) -> f32 {
+    match mode {
+        BlendMode::Multiply => cb * cs,
+        BlendMode::Screen => cb + cs - cb * cs,
+        BlendMode::Darken => cb.min(cs),
+        BlendMode::Lighten => cb.max(cs),
+        BlendMode::ColorDodge => {
+            if cb <= 0.0 {
+                0.0
+            } else if cs >= 1.0 {
+                1.0
+            } else {
+                (cb / (1.0 - cs)).min(1.0)
+            }
+        }
+        BlendMode::ColorBurn => {
+            if cb >= 1.0 {
+                1.0
+            } else if cs <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - cb) / cs).min(1.0)
+            }
+        }
+        BlendMode::HardLight => {
+            if cs <= 0.5 {
+                blend_separable(BlendMode::Multiply, cb, 2.0 * cs)
+            } else {
+                blend_separable(BlendMode::Screen, cb, 2.0 * cs - 1.0)
+            }
+        }
+        // Overlay(Cb,Cs) = HardLight(Cs,Cb)
+        BlendMode::Overlay => {
+            if cb <= 0.5 {
+                blend_separable(BlendMode::Multiply, cs, 2.0 * cb)
+            } else {
+                blend_separable(BlendMode::Screen, cs, 2.0 * cb - 1.0)
+            }
+        }
+        BlendMode::SoftLight => {
+            // D(x)（W3C 分段定义）
+            let d = |x: f32| {
+                if x <= 0.25 {
+                    ((16.0 * x - 12.0) * x + 4.0) * x
+                } else {
+                    x.sqrt()
+                }
+            };
+            if cs <= 0.5 {
+                cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
+            } else {
+                cb + (2.0 * cs - 1.0) * (d(cb) - cb)
+            }
+        }
+        BlendMode::Difference => (cb - cs).abs(),
+        BlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
+        _ => cs, // 不可达：调用方保证可分离模式分派
+    }
+}
+
+/// 亮度（W3C 系数）。
+fn blend_lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+/// 夹取 RGB 到单位立方（沿亮度线投影）。
+fn blend_clip_color(mut c: [f32; 3]) -> [f32; 3] {
+    let l = blend_lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    if n < 0.0 {
+        for v in &mut c {
+            *v = l + (*v - l) * l / (l - n);
+        }
+    }
+    if x > 1.0 {
+        for v in &mut c {
+            *v = l + (*v - l) * (1.0 - l) / (x - l);
+        }
+    }
+    c
+}
+
+/// 设定亮度。
+fn blend_set_lum(mut c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - blend_lum(c);
+    for v in &mut c {
+        *v += d;
+    }
+    blend_clip_color(c)
+}
+
+/// 饱和度 = max − min。
+fn blend_sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+/// 设定饱和度（max/mid/min 通道重标定）。
+fn blend_set_sat(mut c: [f32; 3], s: f32) -> [f32; 3] {
+    let mut idx = [0usize, 1, 2];
+    idx.sort_by(|&a, &b| c[a].total_cmp(&c[b]));
+    let (mn, md, mx) = (idx[0], idx[1], idx[2]);
+    if c[mx] > c[mn] {
+        c[md] = (c[md] - c[mn]) * s / (c[mx] - c[mn]);
+        c[mx] = s;
+    } else {
+        c[md] = 0.0;
+        c[mx] = 0.0;
+    }
+    c[mn] = 0.0;
+    c
+}
+
+/// 非可分离混合函数 B(Cb,Cs)（Hue/Saturation/Color/Luminosity）。
+fn blend_non_separable(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    match mode {
+        BlendMode::Hue => blend_set_lum(blend_set_sat(cs, blend_sat(cb)), blend_lum(cb)),
+        BlendMode::Saturation => blend_set_lum(blend_set_sat(cb, blend_sat(cs)), blend_lum(cb)),
+        BlendMode::Color => blend_set_lum(cs, blend_lum(cb)),
+        BlendMode::Luminosity => blend_set_lum(cb, blend_lum(cs)),
+        _ => cs, // 不可达：调用方保证非可分离模式分派
+    }
+}
+
+/// 单像素混合合成（css-compositing-1 §5.1 全式；直排 RGBA，返回 4 分量）。
+fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
+    let (cb, ab) = (back, back[3]);
+    let (cs, a_s) = (src, src[3]);
+    let ao = (a_s + ab * (1.0 - a_s)).clamp(0.0, 1.0);
+    if ao <= 0.0 {
+        return [0.0; 4];
+    }
+    match mode {
+        // 加法族按预乘定义（PDF/CG 惯例；css-compositing-2 附录），
+        // 合成后 straight 化。
+        BlendMode::PlusLighter | BlendMode::PlusDarker => {
+            let mut out = [0.0f32; 4];
+            for c in 0..3 {
+                let premul = cb[c] * ab + cs[c] * a_s;
+                out[c] = match mode {
+                    BlendMode::PlusDarker => (premul - 1.0).max(0.0),
+                    _ => premul.clamp(0.0, 1.0),
+                };
+            }
+            out[3] = ao;
+            for c in 0..3 {
+                out[c] /= ao;
+            }
+            out
+        }
+        BlendMode::Normal => {
+            // B = Cs → 全式退化为 src-over（直排）：αs·Cs + (1−αs)·αb·Cb
+            let mut out = [0.0f32; 4];
+            for c in 0..3 {
+                out[c] = a_s * cs[c] + ab * (1.0 - a_s) * cb[c];
+            }
+            out[3] = ao;
+            out
+        }
+        BlendMode::Hue
+        | BlendMode::Saturation
+        | BlendMode::Color
+        | BlendMode::Luminosity => {
+            let b = blend_non_separable(mode, [cb[0], cb[1], cb[2]], [cs[0], cs[1], cs[2]]);
+            let mut out = [0.0f32; 4];
+            for c in 0..3 {
+                out[c] = a_s * (1.0 - ab) * cs[c] + a_s * ab * b[c] + ab * (1.0 - a_s) * cb[c];
+            }
+            out[3] = ao;
+            out
+        }
+        mode => {
+            let mut out = [0.0f32; 4];
+            for c in 0..3 {
+                let b = blend_separable(mode, cb[c], cs[c]);
+                out[c] =
+                    a_s * (1.0 - ab) * cs[c] + a_s * ab * b + ab * (1.0 - a_s) * cb[c];
+            }
+            out[3] = ao;
+            out
+        }
+    }
+}
+
 /// 4×4 子采样偏移（像素内 16 点网格中心）。
 const SUBS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
 
@@ -213,6 +413,7 @@ pub fn render_with_fonts(
     let mut mat = Mat::identity();
     let mut mat_stack: Vec<Mat> = Vec::new();
     let mut layers: Vec<OpacityLayer> = Vec::new();
+    let mut blends: Vec<BlendLayer> = Vec::new();
     for op in &list.ops {
         apply_op(
             op,
@@ -221,6 +422,7 @@ pub fn render_with_fonts(
             &mut mat,
             &mut mat_stack,
             &mut layers,
+            &mut blends,
             bank,
         );
     }
@@ -235,6 +437,7 @@ fn apply_op(
     mat: &mut Mat,
     mat_stack: &mut Vec<Mat>,
     layers: &mut Vec<OpacityLayer>,
+    blends: &mut Vec<BlendLayer>,
     bank: &FontBank,
 ) {
     match op {
@@ -549,6 +752,76 @@ fn apply_op(
                                 .round()
                                 .clamp(0.0, 255.0)
                                 as u8;
+                        }
+                    }
+                }
+            }
+        }
+        PaintOp::PushBlend {
+            mode,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            // 混合区域 = op 盒经当前矩阵的设备包围盒（同 PushOpacity 约定）。
+            // push 时快照底图并**清空区域**：子树内容先累积在透明底上，
+            // pop 时整体与快照按 mode 合成——这保证混合语义以整组内容
+            // 与背后画布发生，而非逐笔画叠加。
+            let corners = [
+                mat.apply(*x, *y),
+                mat.apply(x + width, *y),
+                mat.apply(x + width, y + height),
+                mat.apply(*x, y + height),
+            ];
+            let min_x = corners.iter().fold(f32::MAX, |m, p| m.min(p.0));
+            let min_y = corners.iter().fold(f32::MAX, |m, p| m.min(p.1));
+            let max_x = corners.iter().fold(f32::MIN, |m, p| m.max(p.0));
+            let max_y = corners.iter().fold(f32::MIN, |m, p| m.max(p.1));
+            let bx = (min_x.max(0.0).floor() as u32).min(canvas.width);
+            let by = (min_y.max(0.0).floor() as u32).min(canvas.height);
+            let ex = (max_x.min(canvas.width as f32).ceil() as u32).min(canvas.width);
+            let ey = (max_y.min(canvas.height as f32).ceil() as u32).min(canvas.height);
+            blends.push(BlendLayer {
+                snapshot: canvas.pixels.clone(),
+                mode: *mode,
+                x: bx,
+                y: by,
+                w: ex.saturating_sub(bx),
+                h: ey.saturating_sub(by),
+            });
+            let x1 = ex.min(canvas.width);
+            let y1 = ey.min(canvas.height);
+            for py in by..y1 {
+                let row = py as usize * canvas.width as usize;
+                for px in bx..x1 {
+                    canvas.pixels[(row + px as usize) * 4..(row + px as usize) * 4 + 4]
+                        .fill(0);
+                }
+            }
+        }
+        PaintOp::PopBlend => {
+            if let Some(layer) = blends.pop() {
+                let x1 = (layer.x + layer.w).min(canvas.width);
+                let y1 = (layer.y + layer.h).min(canvas.height);
+                for py in layer.y..y1 {
+                    for px in layer.x..x1 {
+                        let i = (py as usize * canvas.width as usize + px as usize) * 4;
+                        let back = [
+                            layer.snapshot[i] as f32 / 255.0,
+                            layer.snapshot[i + 1] as f32 / 255.0,
+                            layer.snapshot[i + 2] as f32 / 255.0,
+                            layer.snapshot[i + 3] as f32 / 255.0,
+                        ];
+                        let src = [
+                            canvas.pixels[i] as f32 / 255.0,
+                            canvas.pixels[i + 1] as f32 / 255.0,
+                            canvas.pixels[i + 2] as f32 / 255.0,
+                            canvas.pixels[i + 3] as f32 / 255.0,
+                        ];
+                        let out = blend_pixel(layer.mode, back, src);
+                        for (c, v) in out.iter().enumerate() {
+                            canvas.pixels[i + c] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
                         }
                     }
                 }
@@ -1654,5 +1927,91 @@ mod tests {
         let eo = render_with(false);
         assert_eq!(px(&eo, 30, 30), [255, 255, 255, 255], "evenodd 中心镂空");
         assert_eq!(px(&eo, 30, 10), [255, 0, 0, 255], "角臂两规则均填");
+    }
+
+    /// P1-2 测试辅助：全画布混合层 + 单个不透明填充，返回首像素 RGBA。
+    fn blend_pixel_of(mode: BlendMode, base: [u8; 4], src: [f32; 4]) -> [u8; 4] {
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushBlend {
+            mode,
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        });
+        list.ops
+            .push(op_fill(0.0, 0.0, 4.0, 4.0, [0.0; 8], src));
+        list.ops.push(PaintOp::PopBlend);
+        let c = render(&list, 4, 4, base);
+        let mut p = [0u8; 4];
+        p.copy_from_slice(&c.pixels[0..4]);
+        p
+    }
+
+    #[test]
+    fn blend_modes_pixel_exact() {
+        // P1-2：可分离/加法族手算精确值（css-compositing-1 §4；8bit 直排）。
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let white = [255, 255, 255, 255];
+        // multiply：cb·cs 逐通道 → 红底蓝源 = 乘黑 (0,0,0)
+        assert_eq!(blend_pixel_of(BlendMode::Multiply, [255, 0, 0, 255], blue), [0, 0, 0, 255]);
+        // screen：cb+cs−cb·cs → 红底蓝源 = (255,0,255)
+        assert_eq!(blend_pixel_of(BlendMode::Screen, [255, 0, 0, 255], blue), [255, 0, 255, 255]);
+        // difference：|cb−cs| → 白底蓝源 = (255,255,0)
+        assert_eq!(blend_pixel_of(BlendMode::Difference, white, blue), [255, 255, 0, 255]);
+        // darken / lighten：逐通道 min/max
+        let dim = [100.0 / 255.0, 150.0 / 255.0, 60.0 / 255.0, 1.0];
+        assert_eq!(blend_pixel_of(BlendMode::Darken, [200, 100, 50, 255], dim), [100, 100, 50, 255]);
+        assert_eq!(blend_pixel_of(BlendMode::Lighten, [200, 100, 50, 255], dim), [200, 150, 60, 255]);
+        // plus-lighter：预乘加法 → 红底蓝源 = (255,0,255)
+        assert_eq!(blend_pixel_of(BlendMode::PlusLighter, [255, 0, 0, 255], blue), [255, 0, 255, 255]);
+        // plus-darker：max(0, Db+Ds−1) → 白底蓝源 = (0,0,255)
+        assert_eq!(blend_pixel_of(BlendMode::PlusDarker, white, blue), [0, 0, 255, 255]);
+        // normal：αs=1 时 = 源（不透明覆盖）
+        assert_eq!(blend_pixel_of(BlendMode::Normal, [255, 0, 0, 255], blue), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn blend_partial_alpha_and_non_separable() {
+        // 半透明源 × multiply：白底 + 50% 红组（fill 写 u8 后 α=128/255）
+        // → Co_R = αs·B_R(=αs) + (1−αs) = 0.25196+0.49804 = 0.75 → 191；
+        //   Co_G/B = (1−αs) = 127
+        let half_red = [1.0, 0.0, 0.0, 0.5];
+        assert_eq!(
+            blend_pixel_of(BlendMode::Multiply, [255, 255, 255, 255], half_red),
+            [191, 127, 127, 255]
+        );
+        // 混合组内 opacity 嵌套（blend 外层包 opacity 内层）：
+        // 白底 + blend(multiply) + opacity(0.5)(红) → opacity 出口像素
+        // (128,0,0,128)，multiply 合成 → (191,127,127)
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushBlend {
+            mode: BlendMode::Multiply,
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        });
+        list.ops.push(PaintOp::PushOpacity {
+            alpha: 0.5,
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        });
+        list.ops
+            .push(op_fill(0.0, 0.0, 4.0, 4.0, [0.0; 8], [1.0, 0.0, 0.0, 1.0]));
+        list.ops.push(PaintOp::PopOpacity);
+        list.ops.push(PaintOp::PopBlend);
+        let c = render(&list, 4, 4, [255, 255, 255, 255]);
+        let mut p = [0u8; 4];
+        p.copy_from_slice(&c.pixels[0..4]);
+        assert_eq!(p, [191, 127, 127, 255], "blend 应包住 opacity 组");
+        // 非可分离 luminosity：灰底 + 红源 → 亮度=0.3 → (77,77,77)
+        assert_eq!(
+            blend_pixel_of(BlendMode::Luminosity, [100, 100, 100, 255], [1.0, 0.0, 0.0, 1.0]),
+            [77, 77, 77, 255]
+        );
     }
 }

@@ -631,6 +631,27 @@
   `stop_positions` 补同款单调夹取（双 sink 一致性契约）。新增锁定
   测试 gradient_stop_positions_normalize_and_monotonic（200px 线：
   0%/50px/缺省/100%→0.0/0.25/0.625/1.0；逆序 60%+40%→[0.6,0.6]）。
+- **mix-blend-mode / isolation 原生混合层（P1-2 批，css-compositing-1/2）**：
+  两属性从「仅 SC 触发位」升级为真实混合层——新公共枚举 `BlendMode`
+  （16 标准模式 + plus-lighter/plus-darker 全 18 值）、`DeclValue::BlendMode`
+  入库（替换旧 `Effect(bool)` 存在位）、`PaintOp::PushBlend{mode,x,y,width,
+  height}/PopBlend` 层对（bbox=border-box 同 PushOpacity；混合层须最外——
+  先 PushOpacity push、后 PopOpacity pop，合成序=blend(背后画布,
+  opacity(子树))）。`isolation: isolate` ≡ `PushBlend{Normal}` 隔离组
+  边界（子树内混合不越界，修旧「isolate 内混合穿透祖先画布」缺口）。
+  vello sink：peniko `Mix` 16 标准模式一一映射（plus 族不在 Mix 枚举退
+  Normal=B 级，上游缺口记 DEPENDENCIES）；soft sink：全 18 种原生像素
+  合成（快照底+清区累积+pop 按模式全式合成 Co=αs(1−αb)Cs+αs·αb·B+
+  (1−αs)αbCb；非可分离按 W3C Lum/Sat 定义；plus 族按预乘加法惯例——
+  Normal 臂漏全式中项的 bug 即由像素锁测试捕获后修复）。测试：SC 层对
+  发射/发射序（blend 包 opacity）、解析语义重基线（isolation/mix-blend
+  各 +2 op）、soft 像素锁 ×10（可分离/加法/非可分离/嵌套 opacity）、
+  serde 往返（kebab-case 模式名）。顺修既有耦合：paint_dump 三个 serde 往返
+  测试补 `#[cfg(feature = "serde")]` 门（默认 feature 集下 `cargo test
+  -p style-engine --lib` 因此编译不过，属 P1-2 之前已存在的问题）。文档：
+  FEATURES T2 条目改写（filter/
+  backdrop-filter 保持暂缓）+ T0 混合层新条 + DEPENDENCIES vello Mix
+  缺口节。全量 **499** 测试绿（494→499）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

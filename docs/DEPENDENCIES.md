@@ -67,6 +67,12 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - 缓解：TextSystem 探针缓存（主族+字号+字重+italic → normal 值），同键组合免探针遍（两遍法退单遍，`add_font` 时清空）；稳态摊销实测见 FEATURES ㉚（50 文本叶帧 0.757ms vs 首帧 3.905ms，单叶摊销 14.5µs）。
 - 升级路径：引入 skrifa（parley 传递依赖，已在树内）直读 OS/2/hhea 表自算 typo 度量，可彻底免探针——但需与 parley RunMetrics 口径逐位对齐（fontique 内部取表路径），列为特性票不排期。
 
+## vello 混合模式枚举缺口（P1-2，2026-10）
+
+- css-compositing-1 定义 16 种标准 mix-blend-mode（peniko `Mix` 一一映射，vello sink 已原生接通）；css-compositing-2 的 plus-lighter/plus-darker **不在 `Mix` 枚举内**——vello sink 退 `Mix::Normal`（B 级偏差在案）。
+- 缓解：soft sink 全 18 种模式原生像素合成（含 plus 族按预乘加法惯例），像素级验收路径不受影响；plus 族在 GPU 路径的缺口升级时自然闭合（vello/peniko 增补枚举或 sink 手工双 pass）。
+- 上游观察点：peniko issue tracker 的 `Mix` 扩展讨论；升级 vello 0.11 代时复查。
+
 ## 字体资产与 LFS 评估（2026-09）
 
 现状：仓库内字体 ≈19.2MB（DejaVu Regular/Bold ≈1.4MB + Noto Sans SC 可变字体 ≈17.8MB），随用例增长只会更多（conformance 需与浏览器强制同字体，ADR-0003）。

@@ -1258,6 +1258,48 @@ pub enum WideKeyword {
     RevertLayer,
 }
 
+/// mix-blend-mode 值族（P1-2，css-compositing-1 §3 + css-compositing-2
+/// plus-lighter）：16 标准混合模式 + plus-lighter/darker。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendMode {
+    /// normal —— 仅 alpha 合成（无混合；隔离组仍由层对提供）。
+    Normal,
+    /// multiply —— Cb×Cs（正片叠底）。
+    Multiply,
+    /// screen —— Cb+Cs−Cb×Cs。
+    Screen,
+    /// overlay —— Cs≤0.5 按 multiply、否则 screen（HardLight 的换位）。
+    Overlay,
+    /// darken —— 逐通道 min。
+    Darken,
+    /// lighten —— 逐通道 max。
+    Lighten,
+    /// color-dodge —— 提亮背景（Cb/(1−Cs) 截 1）。
+    ColorDodge,
+    /// color-burn —— 压暗背景（1−(1−Cb)/Cs 截 0）。
+    ColorBurn,
+    /// hard-light —— Cs≤0.5 按 multiply、否则 screen。
+    HardLight,
+    /// soft-light —— W3C 软光（D 函数分段式）。
+    SoftLight,
+    /// difference —— |Cb−Cs|。
+    Difference,
+    /// exclusion —— Cb+Cs−2·Cb·Cs。
+    Exclusion,
+    /// hue —— 取 Cs 色相 + Cb 饱和度/亮度（非可分离）。
+    Hue,
+    /// saturation —— 取 Cs 饱和度 + Cb 色相/亮度（非可分离）。
+    Saturation,
+    /// color —— 取 Cs 色相/饱和度 + Cb 亮度（非可分离）。
+    Color,
+    /// luminosity —— 取 Cb 亮度 + Cs 色相/饱和度（非可分离）。
+    Luminosity,
+    /// plus-lighter（css-compositing-2）—— 预乘加法。
+    PlusLighter,
+    /// plus-darker（PDF/CG）—— 预乘 max(0, Db+Ds−1)。
+    PlusDarker,
+}
+
 /// 值族：按文法形状复用的声明值表示（不含简写；简写在解析期展开）。
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -1380,6 +1422,9 @@ pub enum DeclValue {
     /// 语义位（ADR-0008 全集），不携带也不实现滤镜效果。
     /// （clip-path 已升级为 ClipPath(ClipShape) 形状值，F3c，ADR-0025。）
     Effect(bool),
+    /// mix-blend-mode（P1-2）：具体混合模式（16 标准模式 +
+    /// plus-lighter/darker；normal = BlendMode::Normal）。
+    BlendMode(BlendMode),
     /// container-type（阶段2③）：normal|size|inline-size。
     ContainerType(ContainerType),
     /// container-name（阶段2③）：none → 空 Vec；custom-ident# → 名单。
@@ -3067,9 +3112,8 @@ fn parse_isolation(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     })
 }
 
-/// mix-blend-mode（第五批㉒）：非 normal 置位（SC 触发）；混合效果实现
-/// 不在范围（vello sink 后续票）。16 标准混合模式 + plus-lighter/darker
-/// 全部接受。
+/// mix-blend-mode（P1-2）：具体模式入库（`DeclValue::BlendMode`）——
+/// 16 标准混合模式 + plus-lighter/darker 全部接受。
 /// border-*-radius（第五批⑪椭圆圆角）：长手文法 `<lp>{1,2}`——第二值=
 /// 纵向半径，缺省=横向（圆形角）。（斜杠语法仅属简写，见 decl.rs。）
 fn parse_corner_radius(p: &mut Parser<'_>) -> ValResult<DeclValue> {
@@ -3081,16 +3125,31 @@ fn parse_corner_radius(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 }
 
 fn parse_mix_blend_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    use BlendMode as B;
     keyword(p, |s| {
         Some(match_ignore_ascii_case!(s,
-            "normal" => DeclValue::Effect(false),
-            "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color-dodge"
-            | "color-burn" | "hard-light" | "soft-light" | "difference" | "exclusion"
-            | "hue" | "saturation" | "color" | "luminosity" | "plus-lighter"
-            | "plus-darker" => DeclValue::Effect(true),
+            "normal" => B::Normal,
+            "multiply" => B::Multiply,
+            "screen" => B::Screen,
+            "overlay" => B::Overlay,
+            "darken" => B::Darken,
+            "lighten" => B::Lighten,
+            "color-dodge" => B::ColorDodge,
+            "color-burn" => B::ColorBurn,
+            "hard-light" => B::HardLight,
+            "soft-light" => B::SoftLight,
+            "difference" => B::Difference,
+            "exclusion" => B::Exclusion,
+            "hue" => B::Hue,
+            "saturation" => B::Saturation,
+            "color" => B::Color,
+            "luminosity" => B::Luminosity,
+            "plus-lighter" => B::PlusLighter,
+            "plus-darker" => B::PlusDarker,
             _ => return None,
         ))
     })
+    .map(DeclValue::BlendMode)
 }
 
 /// transform-origin（第五批⑬）：v1 二维子集——1~2 个组件（length-percentage

@@ -7580,9 +7580,11 @@ mod tests {
     #[test]
     fn filter_clip_path_trigger_stacking_context_order() {
         // 第四批④：非定位 filter/clip-path ≠ none → SC（Pos 带键 0），后画
-        // 覆盖树序控制组；效果触发组（filter/will-change/isolation/mix-blend）
+        // 覆盖树序控制组；效果触发组（filter/will-change/backdrop-filter）
         // 不产生效果 PaintOp。F3c（ADR-0025）：clip-path 升级为真实裁剪
         // 语义——inset(0) 恰产生 PushClip+PopClip 对（包住自身与子树）。
+        // P1-2：isolation/mix-blend-mode 升级为真实混合层——各自产生
+        // PushBlend/PopBlend 层对（isolation=Normal 模式，mix-blend=具体模式）。
         let node = |classes: &str| StyleNode {
             name: Some("div".into()),
             classes: std::iter::once(classes.to_string()).collect(),
@@ -7614,13 +7616,41 @@ mod tests {
         for (label, ops) in [
             ("filter", build(" filter: blur(0px);")),
             ("will-change", build(" will-change: transform;")),
-            ("isolation", build(" isolation: isolate;")),
-            ("mix-blend-mode", build(" mix-blend-mode: multiply;")),
             ("backdrop-filter", build(" backdrop-filter: blur(2px);")),
         ] {
             let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
             assert!(blue > red, "{label} SC 应后画（blue={blue:?} red={red:?}）");
             assert_eq!(ops.len(), plain.len(), "{label} 不应产生额外 PaintOp");
+        }
+        // P1-2：isolation（Normal 隔离组）/mix-blend-mode（具体模式）层对。
+        for (label, trigger, expected) in [
+            (
+                "isolation",
+                " isolation: isolate;",
+                crate::css::property::BlendMode::Normal,
+            ),
+            (
+                "mix-blend-mode",
+                " mix-blend-mode: multiply;",
+                crate::css::property::BlendMode::Multiply,
+            ),
+        ] {
+            let ops = build(trigger);
+            let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
+            assert!(blue > red, "{label} SC 应后画（blue={blue:?} red={red:?}）");
+            assert_eq!(ops.len(), plain.len() + 2, "{label} 应产生层对");
+            assert_eq!(
+                ops.iter().filter(|op| matches!(op, crate::paint::PaintOp::PushBlend { .. })).count(),
+                1,
+                "{label} 应恰一个 PushBlend"
+            );
+            assert!(
+                ops.iter().any(|op| matches!(
+                    op,
+                    crate::paint::PaintOp::PushBlend { mode, .. } if *mode == expected
+                )),
+                "{label} PushBlend 模式应为 {expected:?}"
+            );
         }
         // F3c：clip-path = SC 后画 + 恰一对 PushClip/PopClip（无其它效果 op）。
         let clip_ops = build(" clip-path: inset(0);");
@@ -7641,6 +7671,56 @@ mod tests {
             clip_ops
                 .iter()
                 .any(|op| matches!(op, crate::paint::PaintOp::PushClip { .. }))
+        );
+    }
+
+    #[test]
+    fn blend_layer_pair_wraps_subtree_and_opacity() {
+        // P1-2：mix-blend-mode 升级为真实混合层——PushBlend{mode}/PopBlend
+        // 包住自身与子树；与 opacity 同用时混合层必须最外
+        //（合成序 = blend(背后画布, opacity(子树))，css-compositing-1）。
+        let node = |classes: &str| StyleNode {
+            name: Some("div".into()),
+            classes: std::iter::once(classes.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine
+            .set_stylesheet(
+                "div.p { width: 40px; height: 40px; background-color: #ff0000; } \
+                 div.c { width: 20px; height: 20px; mix-blend-mode: multiply; opacity: 0.5; background-color: #0000ff; }",
+            )
+            .is_clean());
+        assert!(engine.insert(None, Key(1), node("p")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), node("c")).is_ok());
+        let ops = engine.frame((800.0, 600.0), 1.0, 0.0).paint.ops.to_vec();
+        let find = |tag: &str| {
+            ops.iter().position(|op| match op {
+                crate::paint::PaintOp::PushBlend { mode, .. }
+                    if tag == "push_blend" && *mode == crate::css::property::BlendMode::Multiply =>
+                {
+                    true
+                }
+                crate::paint::PaintOp::PopBlend if tag == "pop_blend" => true,
+                crate::paint::PaintOp::PushOpacity { .. } if tag == "push_opacity" => true,
+                crate::paint::PaintOp::PopOpacity if tag == "pop_opacity" => true,
+                crate::paint::PaintOp::FillRect { color, .. } if tag == "fill" => {
+                    color.components[2] == 1.0 && color.components[0] == 0.0
+                }
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!("{tag} 未找到于 {ops:?}"))
+        };
+        let (b, po, f, oo, pb) = (
+            find("push_blend"),
+            find("push_opacity"),
+            find("fill"),
+            find("pop_opacity"),
+            find("pop_blend"),
+        );
+        assert!(
+            b < po && po < f && f < oo && oo < pb,
+            "序应为 blend→opacity→fill→popO→popB（b={b} po={po} f={f} oo={oo} pb={pb}）"
         );
     }
 
@@ -7705,18 +7785,23 @@ mod tests {
                         && color.components[2] == rgb[2])
             })
         };
-        // 触发（b 应后画：blue > red），且不产生任何效果 PaintOp
-        for (css, label) in [
-            (" will-change: transform;", "will-change 触发属性"),
-            (" will-change: transform, color;", "will-change 混合列表"),
-            (" will-change: color, opacity;", "will-change 尾部触发"),
-            (" isolation: isolate;", "isolation"),
-            (" mix-blend-mode: multiply;", "mix-blend-mode"),
+        // 触发（b 应后画：blue > red）。will-change 仍不产生效果 PaintOp；
+        // isolation/mix-blend-mode 自 P1-2 起产生 PushBlend/PopBlend 层对
+        for (css, label, extra_ops) in [
+            (" will-change: transform;", "will-change 触发属性", 0),
+            (" will-change: transform, color;", "will-change 混合列表", 0),
+            (" will-change: color, opacity;", "will-change 尾部触发", 0),
+            (" isolation: isolate;", "isolation", 2),
+            (" mix-blend-mode: multiply;", "mix-blend-mode", 2),
         ] {
             let ops = build(css);
             let (blue, red) = (find(&ops, [0.0, 0.0, 1.0]), find(&ops, [1.0, 0.0, 0.0]));
             assert!(blue > red, "{label} 应触发 SC（blue={blue:?} red={red:?}）");
-            assert_eq!(ops.len(), build("").len(), "{label} 不应产生额外 PaintOp");
+            assert_eq!(
+                ops.len(),
+                build("").len() + extra_ops,
+                "{label} 额外 PaintOp 数不符"
+            );
         }
         // 不触发（树序：blue < red）
         for (css, label) in [

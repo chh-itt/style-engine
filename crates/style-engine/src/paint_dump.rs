@@ -1,6 +1,6 @@
 //! F3a2（ADR-0023）：DisplayList 可序列化投影（feature = "serde" 门控）。
 //!
-//! PaintOp 全 14 变体的 typed tagged-enum 镜像（serde derive；色=[f32;4]
+//! PaintOp 全 16 变体的 typed tagged-enum 镜像（serde derive；色=[f32;4]
 //! sRGBA 分量、ImageRes 像素=Vec<u8> 直序列）；枚举值以 canonical 名字符
 //! 串承载（重建=名匹配+缺省回退——non_exhaustive 值族演进的诚实边界：
 //! 未知 op/单位/枚举名降级或跳过，不 panic）。
@@ -156,6 +156,100 @@ pub enum RadialSizeDump {
         /// 垂直半径（椭圆第二个；缺省 None）。
         ry: Option<LPDump>,
     },
+}
+
+/// 混合模式投影（P1-2；kebab-case 序列化，与 CSS 关键字同名）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlendModeDump {
+    /// normal。
+    Normal,
+    /// multiply。
+    Multiply,
+    /// screen。
+    Screen,
+    /// overlay。
+    Overlay,
+    /// darken。
+    Darken,
+    /// lighten。
+    Lighten,
+    /// color-dodge。
+    ColorDodge,
+    /// color-burn。
+    ColorBurn,
+    /// hard-light。
+    HardLight,
+    /// soft-light。
+    SoftLight,
+    /// difference。
+    Difference,
+    /// exclusion。
+    Exclusion,
+    /// hue。
+    Hue,
+    /// saturation。
+    Saturation,
+    /// color。
+    Color,
+    /// luminosity。
+    Luminosity,
+    /// plus-lighter。
+    PlusLighter,
+    /// plus-darker。
+    PlusDarker,
+}
+
+impl BlendModeDump {
+    /// 核心 BlendMode → 投影。
+    pub(crate) fn from_core(m: &crate::css::property::BlendMode) -> Self {
+        use crate::css::property::BlendMode as B;
+        match m {
+            B::Normal => Self::Normal,
+            B::Multiply => Self::Multiply,
+            B::Screen => Self::Screen,
+            B::Overlay => Self::Overlay,
+            B::Darken => Self::Darken,
+            B::Lighten => Self::Lighten,
+            B::ColorDodge => Self::ColorDodge,
+            B::ColorBurn => Self::ColorBurn,
+            B::HardLight => Self::HardLight,
+            B::SoftLight => Self::SoftLight,
+            B::Difference => Self::Difference,
+            B::Exclusion => Self::Exclusion,
+            B::Hue => Self::Hue,
+            B::Saturation => Self::Saturation,
+            B::Color => Self::Color,
+            B::Luminosity => Self::Luminosity,
+            B::PlusLighter => Self::PlusLighter,
+            B::PlusDarker => Self::PlusDarker,
+        }
+    }
+
+    /// 投影 → 核心 BlendMode。
+    pub(crate) fn to_core(self) -> crate::css::property::BlendMode {
+        use crate::css::property::BlendMode as B;
+        match self {
+            Self::Normal => B::Normal,
+            Self::Multiply => B::Multiply,
+            Self::Screen => B::Screen,
+            Self::Overlay => B::Overlay,
+            Self::Darken => B::Darken,
+            Self::Lighten => B::Lighten,
+            Self::ColorDodge => B::ColorDodge,
+            Self::ColorBurn => B::ColorBurn,
+            Self::HardLight => B::HardLight,
+            Self::SoftLight => B::SoftLight,
+            Self::Difference => B::Difference,
+            Self::Exclusion => B::Exclusion,
+            Self::Hue => B::Hue,
+            Self::Saturation => B::Saturation,
+            Self::Color => B::Color,
+            Self::Luminosity => B::Luminosity,
+            Self::PlusLighter => B::PlusLighter,
+            Self::PlusDarker => B::PlusDarker,
+        }
+    }
 }
 
 /// 停靠点投影。
@@ -688,6 +782,23 @@ pub enum OpDump {
     /// PopOpacity。
     #[serde(rename = "pop_opacity")]
     PopOpacity,
+    /// PushBlend。
+    #[serde(rename = "push_blend")]
+    PushBlend {
+        /// 混合模式。
+        mode: BlendModeDump,
+        /// 盒 x。
+        x: f32,
+        /// 盒 y。
+        y: f32,
+        /// 盒宽。
+        width: f32,
+        /// 盒高。
+        height: f32,
+    },
+    /// PopBlend。
+    #[serde(rename = "pop_blend")]
+    PopBlend,
     /// PushTransform。
     #[serde(rename = "push_transform")]
     PushTransform {
@@ -943,6 +1054,20 @@ fn op_dump(op: &PaintOp) -> OpDump {
             height: *height,
         },
         PaintOp::PopOpacity => OpDump::PopOpacity,
+        PaintOp::PushBlend {
+            mode,
+            x,
+            y,
+            width,
+            height,
+        } => OpDump::PushBlend {
+            mode: BlendModeDump::from_core(mode),
+            x: *x,
+            y: *y,
+            width: *width,
+            height: *height,
+        },
+        PaintOp::PopBlend => OpDump::PopBlend,
         PaintOp::PushTransform { affine } => OpDump::PushTransform { affine: *affine },
         PaintOp::PopTransform => OpDump::PopTransform,
         PaintOp::PushScroll { dx, dy } => OpDump::PushScroll { dx: *dx, dy: *dy },
@@ -1202,6 +1327,20 @@ fn op_load(d: &OpDump) -> Option<PaintOp> {
             height: *height,
         },
         OpDump::PopOpacity => PaintOp::PopOpacity,
+        OpDump::PushBlend {
+            mode,
+            x,
+            y,
+            width,
+            height,
+        } => PaintOp::PushBlend {
+            mode: mode.to_core(),
+            x: *x,
+            y: *y,
+            width: *width,
+            height: *height,
+        },
+        OpDump::PopBlend => PaintOp::PopBlend,
         OpDump::PushTransform { affine } => PaintOp::PushTransform { affine: *affine },
         OpDump::PopTransform => PaintOp::PopTransform,
         OpDump::PushScroll { dx, dy } => PaintOp::PushScroll { dx: *dx, dy: *dy },

@@ -318,6 +318,24 @@ pub enum PaintOp {
     },
     /// 透明度层结束（对应最近的 PushOpacity）。
     PopOpacity,
+    /// 混合层开始（P1-2，css-compositing-1）：mix-blend-mode ≠ normal 或
+    /// isolation: isolate 时包住整节点子树——层内容以 `mode` 与背后画布
+    /// 合成（Normal = 纯隔离组边界）。混合层必须最外（opacity 层之内）：
+    /// 合成序 = blend(背后画布, opacity(子树))。
+    PushBlend {
+        /// 混合模式（16 标准模式 + plus-lighter/darker）。
+        mode: crate::css::property::BlendMode,
+        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
+        x: f32,
+        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
+        y: f32,
+        /// 受影响节点盒宽 px（border-box）。
+        width: f32,
+        /// 受影响节点盒高 px（border-box）。
+        height: f32,
+    },
+    /// 混合层结束（对应最近的 PushBlend）。
+    PopBlend,
     /// 2D 仿射变换层开始（ADR-0009）：本节点子树全部绘制经矩阵变换；
     /// 布局盒保持未变换坐标（taffy 不可见 transform）。
     PushTransform {
@@ -1198,7 +1216,29 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         }
     }
 
-    // 0) opacity < 1（ADR-0008）：整节点（背景/边框/文本/子树）包 alpha 合成层；
+    // 0) 混合/隔离层（P1-2，css-compositing-1）：mix-blend-mode ≠ normal 或
+    //    isolation: isolate → PushBlend/PopBlend 包住整节点（背景/边框/
+    //    文本/子树）。混合层必须最外（先于 opacity push）：合成序 =
+    //    blend(背后画布, opacity(子树))；isolation 复用 Normal 混合层对
+    //    =隔离组边界（子树内混合模式不越界，css-compositing-1 §5.1）。
+    //    覆盖区域=节点 border-box（bbox 外绘制如外阴影不参与混合——B 级
+    //    同 opacity 约定）。
+    let blend = style.mix_blend();
+    let blend_isolated =
+        (blend != crate::css::property::BlendMode::Normal || style.has_isolation())
+            && w > 0.0
+            && h > 0.0;
+    if blend_isolated {
+        out.ops.push(PaintOp::PushBlend {
+            mode: blend,
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+    }
+
+    // 0b) opacity < 1（ADR-0008）：整节点（背景/边框/文本/子树）包 alpha 合成层；
     //    opacity 触发 stacking context，节点进 Pos 带（见子树分带）。
     let opacity = match style.get(PropertyId::Opacity) {
         Some(DeclValue::Number(n)) => (*n).clamp(0.0, 1.0),
@@ -1883,9 +1923,10 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         );
         // SC 触发（ADR-0008 全集 / ADR-0009）：transform ≠ none、
         // filter/clip-path ≠ none（第四批④）或 will-change 含触发属性 /
-        // isolation: isolate / mix-blend-mode ≠ normal（第五批㉒）/
+        // isolation: isolate / mix-blend-mode ≠ normal（第五批㉒触发；
+        // P1-2 起二者经 PushBlend/PopBlend 层对携带效果）/
         // backdrop-filter ≠ none（F4，ADR-0028，css-filters-2 同 filter
-        // 语义）——均仅触发、无效果实现、不产生任何 PaintOp；非定位
+        // 语义）——其余仅触发、不产生 PaintOp；非定位
         // 触发者进 Pos 带键 0
         let sc = cstyle.has_transform()
             || cstyle.has_filter()
@@ -1941,6 +1982,9 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     }
     if faded {
         out.ops.push(PaintOp::PopOpacity);
+    }
+    if blend_isolated {
+        out.ops.push(PaintOp::PopBlend);
     }
     if transformed {
         out.ops.push(PaintOp::PopTransform);
@@ -3614,6 +3658,44 @@ mod tests {
         assert_eq!(found, 1, "{:?}", out.ops);
     }
 
+    #[cfg(feature = "serde")] // paint_dump 模块随 serde 门控（默认 feature 集下编译不过的既有耦合，P1-2 顺手修正）
+    #[test]
+    fn paint_dump_roundtrips_blend_layer() {
+        // P1-2：PushBlend{mode}/PopBlend 无损往返（kebab-case 模式名）
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::PushBlend {
+            mode: crate::css::property::BlendMode::ColorDodge,
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        });
+        list.ops.push(PaintOp::PopBlend);
+        let dump = list.to_dump();
+        let json = serde_json::to_string(&dump).expect("json");
+        assert!(json.contains("\"push_blend\""));
+        assert!(json.contains("\"color-dodge\""));
+        let rebuilt = serde_json::from_str::<crate::paint_dump::DisplayListDump>(&json)
+            .expect("parse")
+            .to_display_list();
+        assert_eq!(rebuilt.ops.len(), 2);
+        match &rebuilt.ops[0] {
+            PaintOp::PushBlend {
+                mode,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                assert_eq!(*mode, crate::css::property::BlendMode::ColorDodge);
+                assert_eq!((*x, *y, *width, *height), (1.0, 2.0, 3.0, 4.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(&rebuilt.ops[1], PaintOp::PopBlend));
+    }
+
+    #[cfg(feature = "serde")] // paint_dump 模块随 serde 门控
     #[test]
     fn paint_dump_roundtrips_image_src_window_and_linear_geom() {
         // serde 镜像：Image src 子域 + Gradient linear 绝对几何无损往返
@@ -3739,6 +3821,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serde")] // paint_dump 模块随 serde 门控
     #[test]
     fn paint_dump_roundtrips_text_font_fields() {
         // serde 镜像：Text 深化字体四字段无损往返

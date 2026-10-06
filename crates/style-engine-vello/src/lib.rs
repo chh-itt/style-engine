@@ -1138,6 +1138,34 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
         PaintOp::PopOpacity => {
             scene.pop_layer();
         }
+        PaintOp::PushBlend {
+            mode,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            // P1-2（css-compositing-1）：混合层——层内容以 mode 与背后画布
+            // 合成。plus-lighter/darker 超出 vello Mix 枚举（16 标准模式），
+            // 退 Normal（B 级偏差在案——soft sink 原生实现全 18 种）。
+            let shape = rect_shape(
+                *x + state.offset.x as f32,
+                *y + state.offset.y as f32,
+                *width,
+                *height,
+                [0.0; 8],
+            );
+            scene.push_layer(
+                Fill::NonZero,
+                to_peniko_mix(mode),
+                1.0,
+                state.effective(),
+                &shape,
+            );
+        }
+        PaintOp::PopBlend => {
+            scene.pop_layer();
+        }
         PaintOp::PushScroll { dx, dy } => {
             state.stack.push(state.offset);
             state.offset += Vec2::new(f64::from(*dx), f64::from(*dy));
@@ -1301,6 +1329,31 @@ fn peniko_gradient(
 /// Percent 存储即线长分数直取；其余单位（em/rem/cq…）sink 侧无
 /// 字体/容器上下文，与 soft sink 同约定按缺省自动均布（偏差在案
 /// FEATURES.md）；显式位置逆序时按 css-images-3 §4.5.2 抬至前停位。
+/// 核心 BlendMode → peniko Mix（P1-2）。16 标准模式一一对应；
+/// PlusLighter/PlusDarker 不在 Mix 枚举内，退 Normal（B 级偏差在案）。
+fn to_peniko_mix(mode: &style_engine::css::property::BlendMode) -> Mix {
+    use style_engine::css::property::BlendMode as B;
+    match mode {
+        B::Normal => Mix::Normal,
+        B::Multiply => Mix::Multiply,
+        B::Screen => Mix::Screen,
+        B::Overlay => Mix::Overlay,
+        B::Darken => Mix::Darken,
+        B::Lighten => Mix::Lighten,
+        B::ColorDodge => Mix::ColorDodge,
+        B::ColorBurn => Mix::ColorBurn,
+        B::HardLight => Mix::HardLight,
+        B::SoftLight => Mix::SoftLight,
+        B::Difference => Mix::Difference,
+        B::Exclusion => Mix::Exclusion,
+        B::Hue => Mix::Hue,
+        B::Saturation => Mix::Saturation,
+        B::Color => Mix::Color,
+        B::Luminosity => Mix::Luminosity,
+        B::PlusLighter | B::PlusDarker => Mix::Normal,
+    }
+}
+
 fn distribute_stops(
     stops: &[style_engine::css::property::ColorStop],
     line_len: f32,
