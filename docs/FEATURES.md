@@ -168,6 +168,20 @@
   repeating_peniko 段收缩+周期 0 两件；soft 像素锁两件（40px 盒周期
   20px：x=0/5/10 手算 (249,0,6)/(185,0,70)/(121,0,134)、x 与 x+20
   同色；周期 0 画布不变）。
+- margin collapsing 重估 + padding 长手修复（P1-1，css2.1 §8.3.1）：块流
+  折叠语义全路径正确并首次锁定——父首子顶塌穿（父无 padding/border 时
+  mt 出父外）、兄弟间距=max(正和)+min(负)（负 margin 入 max）、空块自塌
+  穿、浮动子不参与折叠、结算 pass（tables/columns/floats/lines）不扰动
+  塌缩；taffy 原生 CollapsibleMarginSet 承载块流折叠（引擎块流直通无二
+  次折叠），浮动仍由 settle_floats 手管（taffy 无 float 映射，历史结论
+  维持）。新增 tests/css_margin_collapse.rs 七件锁。**A 级修复**：padding
+  物理与逻辑八长手（padding-top/right/bottom/left、padding-inline/block
+  四向）解析误路由 parse_corner_radius 产出 Radius 值族，而计算/布局/
+  绘制读取方全只认 Len → 长手写法整链静默归零（简写不受影响故既有测试
+  未暴露）——解析派发改 parse_len（Radius 四角不变），
+  cascade_layers.rs 固化断言改回 Len 族；锁定长手生效+折叠共存、
+  calc 正腿、padding-inline-start、inherit 逐字复制。遗留（既有在案）：
+  末子 margin-bottom 与父塌陷时父盒被下移（见三期②条 B 级注）。
 - ::selection / ::placeholder（C4，css-pseudo-4 / ADR-0018）：非盒生成
   伪元素双通道——`PseudoElement` +`Selection`/`Placeholder`（单冒号形
   拒绝），匹配=origin 直配（pseudo==None 即命中；实体化伪节点恒不

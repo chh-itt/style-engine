@@ -5332,11 +5332,13 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
                 parse_len_auto(p)
             }
         }
-        P::PaddingTop
-        | P::PaddingRight
-        | P::PaddingBottom
-        | P::PaddingLeft
-        | P::BorderTopLeftRadius
+        // padding 物理四长手 = 单一 <length-percentage> → Len（与简写展开
+        // decl.rs "padding" 同族同型；computed 初始值亦 Len）。历史 bug：
+        // 曾误路由 parse_corner_radius → Radius 值族，读取方 cs.padding()
+        // 的 len() 只认 Len → 全部长手静默归零（简写/calc 直通路径不受
+        // 影响，故既有测试未暴露；P1-1 边距重估探针实证）。
+        P::PaddingTop | P::PaddingRight | P::PaddingBottom | P::PaddingLeft => parse_len(p),
+        P::BorderTopLeftRadius
         | P::BorderTopRightRadius
         | P::BorderBottomRightRadius
         | P::BorderBottomLeftRadius => parse_corner_radius(p),
@@ -5490,11 +5492,12 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         | P::InsetInlineEnd
         | P::InsetBlockStart
         | P::InsetBlockEnd => parse_len_auto(p),
-        P::PaddingInlineStart
-        | P::PaddingInlineEnd
-        | P::PaddingBlockStart
-        | P::PaddingBlockEnd
-        | P::BorderStartStartRadius
+        // 逻辑 padding 同修：单一 <length-percentage> → Len（computed 期
+        // direction 定夺映射物理槽位，落点仍是 Len 族读取）。
+        P::PaddingInlineStart | P::PaddingInlineEnd | P::PaddingBlockStart | P::PaddingBlockEnd => {
+            parse_len(p)
+        }
+        P::BorderStartStartRadius
         | P::BorderStartEndRadius
         | P::BorderEndStartRadius
         | P::BorderEndEndRadius => parse_corner_radius(p),

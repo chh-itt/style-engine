@@ -218,18 +218,13 @@ fn wide_inherit_forces_non_inherited_property() {
     assert!(!f.boxes.is_empty());
     let cs = engine.computed_style(3).unwrap();
     match cs.value(PropertyId::PaddingLeft) {
-        // padding 长手经 parse_corner_radius（A8 路由）→ Radius 值族；
-        // inherit 逐字复制父槽位值
-        Some(DeclValue::Radius(w, h)) => {
-            let style_engine::css::value::LengthPercentage::Px(x) = *w else {
-                panic!("padding-left radius 分量异常: {w:?}");
-            };
-            let style_engine::css::value::LengthPercentage::Px(y) = *h else {
-                panic!("padding-left radius 分量异常: {h:?}");
-            };
+        // padding 长手 = 单一 <length-percentage> → Len 值族（与简写展开
+        // 同型；P1-1 批修复——曾误路由 parse_corner_radius → Radius，
+        // 布局读取方 len() 只认 Len 导致长手静默归零）
+        Some(DeclValue::Len(style_engine::css::value::LengthPercentage::Px(x))) => {
             assert!(
-                (x - 40.0).abs() < 0.01 && (y - 40.0).abs() < 0.01,
-                "padding-left: inherit 应=40px，实际 {x}/{y}"
+                (x - 40.0).abs() < 0.01,
+                "padding-left: inherit 应=40px，实际 {x}"
             );
         }
         other => panic!("padding-left: {other:?}"),

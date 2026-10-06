@@ -669,6 +669,30 @@
   纯 fn 两件、soft 像素锁两件（周期 20px 手算 (249,0,6)/(185,0,70)/
   (121,0,134)、x 与 x+20 同色；周期 0 画布不变）。全量 **506** 测试绿
   （499→506）。
+- **margin collapsing 重估与 padding 长手修复（P1-1 批）**：
+  ①**重估结论（css2.1 §8.3.1 / css-box-4）**：块流父子-兄弟 margin 折叠
+  在结算管线全路径正确——父首子顶塌穿（父无 padding/border/clear 时
+  mt 出父外）、兄弟正负取 max(|max正|+|min负|)、空块自塌穿、浮动子
+  不参与折叠、结算 pass（tables/columns/floats/lines）不扰动塌缩；
+  taffy 原生 `CollapsibleMarginSet` 自 0.10 起承载块流折叠语义，引擎
+  块流直通 taffy 无二次折叠，浮动由引擎 `settle_floats` 手管（taffy
+  Style 不映射 float，历史结论维持）。此前「margin 折叠缺口」疑虑
+  解除：浮动/清除/折叠三面均有像素级锁定。新增
+  `tests/css_margin_collapse.rs` 七件锁（塌穿/空块/负 margin/浮动/
+  结算穿越/简写+padding 阻断折叠/calc 与逻辑 padding）。
+  ②**A 级修复：padding 物理与逻辑八长手静默归零**——解析层误路由
+  `parse_corner_radius` 产出 `DeclValue::Radius`，而计算（`len()`）、
+  布局（padding Rect→`lp_defer(CalcAxis::Padding*)`）、绘制
+  （`.len(PaddingTop)`）全部只认 `DeclValue::Len` → padding-top/left
+  等长手写法整条链失效（仅简写 `padding:`/`padding-inline:` 正常）；
+  既有测试全走简写未暴露，calc 长手钳位测试腿为虚掩（丢弃→0 与钳位
+  →0 同值）。修复：`property.rs` 解析派发 `PaddingTop/Right/Bottom/
+  Left` 与 `PaddingInline/Block 四向` 改路由 `parse_len`（radius 四角
+  不变）；`wide_inherit_forces_non_inherited_property` 断言由固化
+  Radius 族改回 Len 族。锁定：长手生效+折叠共存、calc(0%+10px)
+  正腿、padding-inline-start 逻辑向、inherit 逐字复制。
+  全量 **513** 测试绿（506→513；cascade_layers 修正为断言重写不计新增，
+  新增 7 件折叠锁）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）
