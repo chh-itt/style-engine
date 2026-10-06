@@ -431,6 +431,11 @@ pub struct MediaEnv {
     pub any_hover: bool,
     /// 设备分辨率（A7：dppx = 设备像素/CSS 像素；resolution 媒体特性）。
     pub resolution: f32,
+    /// 根字号（rem 基准；引擎 map_env 统一按文档根计算字号填充，styles
+    /// 缺席/根自身 font-size 求值时回落初始值 16.0——CSS Values：rem 于
+    /// 根元素 font-size 按初始值解析）。媒体/容器查询**解析期**长度换算
+    /// 不经此字段（文档无关，恒按 16px 初始字号，见 parse_px_len）。
+    pub rem: f32,
 }
 
 impl Default for MediaEnv {
@@ -445,6 +450,7 @@ impl Default for MediaEnv {
             any_pointer: PointerKind::Fine,
             any_hover: true,
             resolution: 1.0,
+            rem: 16.0,
         }
     }
 }

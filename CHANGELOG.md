@@ -594,6 +594,31 @@
   `hyphens()`/`has_backdrop_filter()`；动画描述符槽整体后移 ×2。锁：
   `hyphens_parse_modes`/`backdrop_filter_parse_presence` + engine SC 触发
   表扩行。全量 **492** 测试绿（490→492）。
+- **rem 基准修复（P0 批，含文档同步）**：`MediaEnv` 新增 `rem: f32`
+  （默认 16.0，0.x 加性）——此前全部 `ResolveCtx` 构建位点 rem 硬编码
+  16.0，`:root{font-size:20px}` 下 `width:2rem` 解析为 32px（应 40px，
+  A 级偏差 FEATURES.md rem 条目移除）。接线全链路：`map_env()` 统一
+  填充 `env.rem = rem_base()`（新辅助：文档根 font-size，经 root_key→
+  key_to_node→styles 查询，缺根回落 16.0——对齐 ADR-0010：仅文档根
+  定义 rem 基准，首帧/重样式前无根样式时回落初始值）；restyle_node
+  环境线程化（env 自顶向下携带，文档根 font-size 计算后原位更新
+  env.rem 供子树级联/测量/绘制同源消费）；style_channels 加 env 参数、
+  computed（行高/字距/词距解析与 font-size 步骤）/layout（map_ctx 与
+  defer_calc 延迟结算快照）/paint（5 处）全改读 env.rem。语义
+  （CSS Values 4）：非根元素 rem=文档根计算字号；文档根自身
+  font-size 声明内 rem=初始 16px；根的其他属性 rem=新根字号；
+  @media/@container 条件内长度仍 16px（解析期无布局上下文，在案）。
+  修复映射期根判定：is_doc_root 经 root_key 精确判定（合成超根架构
+  下 parent_id.is_none() 只匹配超根、不匹配用户文档根）。新增锁定
+  测试 rem_follows_root_font_size（:root 20px+子 2rem=40px）、
+  rem_on_root_font_size_uses_initial_value（:root font-size:2rem →
+  计算字号 32px）。随批文档同步：FEATURES.md rem 条目（A 级移除）
+  与 T2 fixed/sticky 条目更新（A4 已落地、残余=宿主滚动吸附）、
+  DEPENDENCIES.md taffy calc 结论复评修正（resolve_calc_value 公开
+  trait 方法、接入路径存在，维持结算式直通系工程性选择记 B 级重估）
+  + vello 0.11.0 发布注（锁 wgpu 30，升级阶梯候选）、
+  SETTLEMENT-PIPELINE.md 行号基准更新（engine.rs 8547 行，符号名
+  锚定约定）。全量 **494** 测试绿（492→494）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

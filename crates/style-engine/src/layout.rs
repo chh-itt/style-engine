@@ -9,7 +9,7 @@ use crate::css::property::{Align, DeclValue, PropertyId};
 use crate::css::stylesheet::MediaEnv;
 use crate::css::value::{CalcNode, CalcUnit, LengthPercentage, ResolveCtx};
 
-/// em 以节点自身字号为基准，rem 以根 16px 为基准。
+/// em 以节点自身字号为基准，rem 以 MediaEnv.rem（文档根计算字号）为基准。
 fn resolve_px(lp: &LengthPercentage, cs: &ComputedStyle, env: &MediaEnv) -> Option<f32> {
     let ctx = map_ctx(cs, env);
     lp.resolve(&ctx, 0.0)
@@ -26,7 +26,7 @@ fn map_ctx(cs: &ComputedStyle, env: &MediaEnv) -> ResolveCtx {
         ch_per_em: m.ch_per_em,
         ex_per_em: m.ex_per_em,
         ic_per_em: m.ic_per_em,
-        ..ResolveCtx::base(cs.font_size_px(), 16.0, env.viewport_w, env.viewport_h)
+        ..ResolveCtx::base(cs.font_size_px(), env.rem, env.viewport_w, env.viewport_h)
     }
 }
 
@@ -169,7 +169,7 @@ fn defer_calc(expr: &CalcNode, cs: &ComputedStyle, env: &MediaEnv, axis: CalcAxi
             axis,
             expr: expr.clone(),
             em: cs.font_size_px(),
-            rem: 16.0,
+            rem: env.rem,
             vw: env.viewport_w,
             vh: env.viewport_h,
             ch_per_em: m.ch_per_em,

@@ -1015,7 +1015,7 @@ fn resolve_radial(
 ) -> RadialGeom {
     let ctx = ResolveCtx {
         em: style.font_size_px(),
-        rem: 16.0,
+        rem: env.rem,
         viewport_w: env.viewport_w,
         viewport_h: env.viewport_h,
         ..ResolveCtx::base(style.font_size_px(), 16.0, env.viewport_w, env.viewport_h)
@@ -1086,7 +1086,7 @@ fn resolve_conic(
 ) -> ConicGeom {
     let ctx = ResolveCtx {
         em: style.font_size_px(),
-        rem: 16.0,
+        rem: env.rem,
         viewport_w: env.viewport_w,
         viewport_h: env.viewport_h,
         ..ResolveCtx::base(style.font_size_px(), 16.0, env.viewport_w, env.viewport_h)
@@ -1451,7 +1451,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 let (posx, posy) = style.object_position();
                 let rc = ResolveCtx {
                     em: style.font_size_px(),
-                    rem: 16.0,
+                    rem: env.rem,
                     viewport_w: env.viewport_w,
                     viewport_h: env.viewport_h,
                     ..ResolveCtx::base(style.font_size_px(), 16.0, env.viewport_w, env.viewport_h)
@@ -1976,7 +1976,7 @@ pub(crate) fn resolve_transform_affine(
 ) -> [f32; 6] {
     let ctx = crate::css::value::ResolveCtx {
         em: style.font_size_px(),
-        rem: 16.0,
+        rem: env.rem,
         viewport_w: env.viewport_w,
         viewport_h: env.viewport_h,
         ..crate::css::value::ResolveCtx::base(
@@ -2439,7 +2439,7 @@ fn px(lp: &LengthPercentage, style: &ComputedStyle, env: &MediaEnv) -> f32 {
     lp.resolve(
         &ResolveCtx {
             em: style.font_size_px(),
-            rem: 16.0,
+            rem: env.rem,
             viewport_w: env.viewport_w,
             viewport_h: env.viewport_h,
             ..ResolveCtx::base(style.font_size_px(), 16.0, env.viewport_w, env.viewport_h)

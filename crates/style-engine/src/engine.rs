@@ -1152,6 +1152,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         )
     }
 
+    /// rem 基准：文档根计算字号（ADR-0010 多根语义下仅文档根定义 rem）。
+    /// styles 未含根（全量 restyle 清空后求值中 / 首帧前）回落 16.0——
+    /// 恰为 CSS Values 对「根元素 font-size 中 rem 按初始值解析」的规定。
+    fn rem_base(&self) -> f32 {
+        self.root_key
+            .and_then(|k| self.key_to_node.get(&k))
+            .and_then(|id| self.styles.get(id))
+            .map(|cs| cs.font_size_px())
+            .unwrap_or(16.0)
+    }
+
     /// 映射期环境（CSS 语义：vw/vh 与 calc 视口单位 = 初始包含块 = 帧视口；
     /// map_style 不评估媒体条件——@media 命中在级联期按宿主推送的 media
     /// 判定，故此处以帧视口覆盖 media 视口字段，A6 min/max/clamp 与
@@ -1160,6 +1171,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let mut env = self.media;
         env.viewport_w = self.viewport.0;
         env.viewport_h = self.viewport.1;
+        // P0 修复：rem 基准接线文档根计算字号（此前恒 16.0，
+        // :root font-size ≠ 16px 时全部 rem 长度错误）。
+        env.rem = self.rem_base();
         env
     }
     /// transform ≠ none 的元素成为 absolute/fixed 后代的包含块
@@ -1190,7 +1204,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let cbcs = self.styles.get(&p)?;
                 let rctx = crate::css::value::ResolveCtx {
                     em: cbcs.font_size_px(),
-                    rem: 16.0,
+                    rem: self.map_env().rem,
                     viewport_w: self.map_env().viewport_w,
                     viewport_h: self.map_env().viewport_h,
                     ..crate::css::value::ResolveCtx::base(
@@ -1374,6 +1388,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         id: NodeId,
         main: &ComputedStyle,
         cctx: &mut [crate::cascade::ContainerCtx],
+        env: &MediaEnv,
     ) {
         if self.tree.node(id).pseudo.is_some() {
             return; // 通道规则对实体化伪节点恒不命中（D2），不产通道样式
@@ -1397,7 +1412,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 id,
                 author.clone(),
                 self.user_sheet.as_ref(),
-                &self.map_env(),
+                env,
                 cctx,
                 crate::selector::PseudoElement::Selection,
             );
@@ -1411,7 +1426,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     id,
                     cascaded,
                     &self.registered_props,
-                    &self.map_env(),
+                    env,
                     Some(main),
                 );
                 let fm = self.metrics_for(&style);
@@ -1427,7 +1442,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 id,
                 author.clone(),
                 self.user_sheet.as_ref(),
-                &self.map_env(),
+                env,
                 cctx,
                 crate::selector::PseudoElement::Placeholder,
             );
@@ -1439,7 +1454,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     id,
                     cascaded,
                     &self.registered_props,
-                    &self.map_env(),
+                    env,
                     Some(main),
                 );
                 let fm = self.metrics_for(&style);
@@ -1696,7 +1711,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         Some(cs) => {
                             let rctx = crate::css::value::ResolveCtx {
                                 em: cs.font_size_px(),
-                                rem: 16.0,
+                                rem: self.map_env().rem,
                                 viewport_w: self.map_env().viewport_w,
                                 viewport_h: self.map_env().viewport_h,
                                 ..crate::css::value::ResolveCtx::base(
@@ -1742,7 +1757,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         // 根因）。percent 基准取夹紧宽（v1 近似）。
                         let rctx = crate::css::value::ResolveCtx {
                             em: cs.font_size_px(),
-                            rem: 16.0,
+                            rem: self.map_env().rem,
                             viewport_w: self.map_env().viewport_w,
                             viewport_h: self.map_env().viewport_h,
                             ..crate::css::value::ResolveCtx::base(
@@ -1875,7 +1890,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         .resolve(
                             &crate::css::value::ResolveCtx {
                                 em: cs.font_size_px(),
-                                rem: 16.0,
+                                rem: self.map_env().rem,
                                 viewport_w: self.map_env().viewport_w,
                                 viewport_h: self.map_env().viewport_h,
                                 ..crate::css::value::ResolveCtx::base(
@@ -2486,7 +2501,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let pcs = self.styles.get(&parent_id)?;
         let rctx = crate::css::value::ResolveCtx {
             em: pcs.font_size_px(),
-            rem: 16.0,
+            rem: self.map_env().rem,
             viewport_w: self.map_env().viewport_w,
             viewport_h: self.map_env().viewport_h,
             ..crate::css::value::ResolveCtx::base(
@@ -2922,7 +2937,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     let d = map_style(cs, &self.map_env()).size.width;
                     let rctx = crate::css::value::ResolveCtx {
                         em: cs.font_size_px(),
-                        rem: 16.0,
+                        rem: self.map_env().rem,
                         viewport_w: self.map_env().viewport_w,
                         viewport_h: self.map_env().viewport_h,
                         ..crate::css::value::ResolveCtx::base(
@@ -3129,7 +3144,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             };
             let rctx = crate::css::value::ResolveCtx {
                 em: cs.font_size_px(),
-                rem: 16.0,
+                rem: self.map_env().rem,
                 viewport_w: self.map_env().viewport_w,
                 viewport_h: self.map_env().viewport_h,
                 ..crate::css::value::ResolveCtx::base(
@@ -3486,7 +3501,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         Some(ccs) => {
                             let rctx = crate::css::value::ResolveCtx {
                                 em: ccs.font_size_px(),
-                                rem: 16.0,
+                                rem: self.map_env().rem,
                                 viewport_w: self.map_env().viewport_w,
                                 viewport_h: self.map_env().viewport_h,
                                 ..crate::css::value::ResolveCtx::base(
@@ -4325,7 +4340,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
         let rctx = crate::css::value::ResolveCtx {
             em: cs.font_size_px(),
-            rem: 16.0,
+            rem: self.map_env().rem,
             viewport_w: self.map_env().viewport_w,
             viewport_h: self.map_env().viewport_h,
             ..crate::css::value::ResolveCtx::base(
@@ -4563,7 +4578,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let env = self.map_env();
         let rc = crate::css::value::ResolveCtx {
             em: cs.font_size_px(),
-            rem: 16.0,
+            rem: self.map_env().rem,
             viewport_w: env.viewport_w,
             viewport_h: env.viewport_h,
             ..crate::css::value::ResolveCtx::base(
@@ -4954,19 +4969,34 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // 不再整份克隆 ComputedStyle（全集物化 BTreeMap ~110 项/节点）。
         let parent_style = parent_id.and_then(|p| self.styles.get(&p));
         let author = self.author_sheets();
+        // P0 rem 修复：本节点求值环境一次性构建（此前各通道各自
+        // self.map_env() 且 rem 恒 16）。文档根（root_key 对应节点——
+        // 与 rem_base 同源；用户根挂合成根之下，parent_id 判不出）的
+        // font-size 内 rem 按 CSS Values 以初始值解析；求值完成后
+        // env.rem 即新根字号，供本节点 span/map_style/度量与通道。
+        let is_doc_root = self.root_key.and_then(|k| self.key_to_node.get(&k)).copied() == Some(id);
+        let mut env = self.map_env();
+        if is_doc_root {
+            env.rem = 16.0;
+        }
         let mut cs = compute_node_in(
             &self.tree,
             id,
             author,
             self.user_sheet.as_ref(),
             &self.registered_props,
-            &self.map_env(),
+            &env,
             parent_style,
             cctx,
         );
         // A9：字体相对单位度量（ch/ex/ic）按注册族名补写（未注册=近似缺省）
         let fm = self.metrics_for(&cs);
         cs.set_font_metrics(fm);
+        if is_doc_root {
+            // 根字号 = rem 基准（本 pass 新值即时生效；后代经 map_env→
+            // rem_base 读表，根自身余下通道直接携带）。
+            env.rem = cs.font_size_px();
+        }
         // 阶段2③：自身是容器 → 入栈（后代 @container 求值用；自身样式已
         // 按祖先快照求值完毕——查询容器不含自身）。快照缺席 = 尺寸 unknown
         //（首帧/收敛中：特性不命中，B 级偏差——未强制 size containment）。
@@ -5015,7 +5045,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     author,
                     self.user_sheet.as_ref(),
                     &self.registered_props,
-                    &self.map_env(),
+                    &env,
                     Some(&cs),
                     cctx,
                 );
@@ -5041,17 +5071,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 owned.iter().map(|(a, b, s)| (*a, *b, s)).collect();
             let (w, h) = self
                 .text
-                .measure_rich(&text, &cs, &span_refs, None, &self.map_env());
+                .measure_rich(&text, &cs, &span_refs, None, &env);
             if w > 0.0 || h > 0.0 {
                 self.measures.insert(id, (w, h));
                 let min = self
                     .text
-                    .measure_min_content(&text, &cs, &span_refs, &self.map_env());
+                    .measure_min_content(&text, &cs, &span_refs, &env);
                 self.min_measures.insert(id, min);
                 self.auto_text.insert(id);
             }
         }
-        let mut ts = map_style(&cs, &self.map_env());
+        let mut ts = map_style(&cs, &env);
         // ①calc 直通：捕获本节点延迟 calc 并挂接 taffy 节点（结算基准 =
         // 父内容尺寸；无 taffy 节点则弃置——下次 restyle 重新捕获）。
         if let Some(&tid) = self.taffy_node.get(&id) {
@@ -5107,7 +5137,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
         // C4（ADR-0018）：::selection / ::placeholder 通道（须在 cs 移入
         // styles 前取 &cs 作继承基）。
-        self.style_channels(id, &cs, cctx);
+        self.style_channels(id, &cs, cctx, &env);
         self.styles.insert(id, cs);
         guard.mark(id);
         let children: Vec<NodeId> = self.tree.children(id).to_vec();
@@ -7207,6 +7237,80 @@ mod tests {
         assert_eq!(b3.width, 200.0);
         // taffy 锚定直父（mid）：x = mid.x，y = outer padding
         assert_eq!((b3.x, b3.y), (50.0, 20.0));
+    }
+
+    #[test]
+    fn rem_follows_root_font_size() {
+        // P0 rem 修复：rem = 文档根计算字号（修复前全链路恒 16px）。
+        // :root font-size: 20px → 子 width: 2rem = 40px（旧 bug：32px）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    ":root { font-size: 20px; } \
+                     div.outer { width: 400px; } \
+                     div.leaf { width: 2rem; height: 10px; }"
+                )
+                .is_clean()
+        );
+        let mk = |engine: &mut StyleEngine<Key>, key: Key, parent: Option<Key>, class: &str| {
+            engine.insert(
+                parent,
+                key,
+                StyleNode {
+                    name: Some("div".into()),
+                    classes: std::iter::once(class.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(mk(&mut engine, Key(1), None, "outer").is_ok());
+        assert!(mk(&mut engine, Key(2), Some(Key(1)), "leaf").is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b2 = frame.find(Key(2)).unwrap();
+        assert_eq!(
+            b2.width, 40.0,
+            "2rem 应 = 2 × 根字号 20px = 40px（修复前恒 16 → 32px）"
+        );
+    }
+
+    #[test]
+    fn rem_on_root_font_size_uses_initial_value() {
+        // CSS Values：根元素 font-size 内的 rem 按初始值 16 解析
+        // （2rem = 32px，不递归引用自身）；根元素其余属性（margin-left:
+        // 1rem）的 rem 用解析后的新根字号 32px（框 x = 32）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .set_stylesheet(
+                    ":root { font-size: 2rem; margin-left: 1rem; width: 100px; height: 20px; }"
+                )
+                .is_clean()
+        );
+        let mut engine = engine;
+        assert!(engine
+            .insert(
+                None,
+                Key(1),
+                StyleNode {
+                    name: Some("div".into()),
+                    ..Default::default()
+                }
+            )
+            .is_ok());
+        let _frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let cs = engine.computed_style(Key(1)).unwrap();
+        assert_eq!(
+            cs.font_size_px(),
+            32.0,
+            "根 font-size: 2rem 应按初始值 16 解析为 32px"
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let b1 = frame.find(Key(1)).unwrap();
+        assert_eq!(
+            b1.x, 32.0,
+            "根 margin-left: 1rem 应用新根字号 32px（非初始 16）"
+        );
     }
 
     #[test]

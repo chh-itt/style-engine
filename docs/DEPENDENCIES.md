@@ -11,14 +11,14 @@
 | precomputed-hash | 0.1.1 | L1 选择器 | selectors 0.40 要求的选择器词哈希；SelString 包装实现（FNV-1a） | Apache-2.0/MIT |
 | selectors | 0.40.0 | L1 | 选择器解析/匹配/specificity | 需实现 SelectorImpl，MPL-2.0 |
 | color | 0.3.3 | L1 | CSS Color 4 颜色模型（oklch/color-mix）| linebender 出品 |
-| taffy | 0.14.0 | L2 | 布局引擎 | 2026-08-24 发布；calc 集成面 = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())` / `traits.rs calc(val, basis)`，block.rs 处以 parent_size 为基调用）——接入需指针所有权约定，待 calc 正式特性票 |
+| taffy | 0.14.0 | L2 | 布局引擎 | 2026-08-24 发布；calc 集成面 = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())` / `traits.rs calc(val, basis)`，block.rs 处以 parent_size 为基调用）——接入路径存在（`resolve_calc_value` 公开 trait 方法，见下节复评修正），维持引擎侧结算式直通为工程性选择，记 B 级重估 |
 | slotmap | 1.1.1 | 核心 | StyleTree 与 secondary map 存储 | |
 | bitflags | 2.13.2 | 核心 | StateFlags | |
 | smallvec | 1.x | L1 | 声明/子选择器内联存储 | 由 cargo update 定 patch |
 | peniko | 0.6.1 | 核心(词汇表) | 画笔/颜色/图片类型 | 无 GPU 依赖，vello 同款，见 ADR-0001 |
 | kurbo | (peniko 传递) | 核心(词汇表) | 几何词汇表（仅经 peniko 传递） | 阶段4 审计：本方 DisplayList 几何全部为 `f32` 字段，kurbo 类型不出现在公有面 |
 | parley | 0.11.1 | L2 核心 | 文本 shaping/测量/行布局（测量内置，见 ADR-0006） | 传递引入 fontique |
-| vello | 0.10.0 | sink | GPU 绘制执行器 | 2026-08-14 发布 |
+| vello | 0.10.0 | sink | GPU 绘制执行器 | 2026-08-14 发布；0.11.0 已发布（2026-10-02）锁 wgpu 30——升级阶梯候选，见"版本配对"节 |
 | wgpu | **29.x** | sink | GPU 底座 | ⚠️ 见下"版本配对" |
 | winit | =0.31.0-beta.3 | demo/harness | 窗口（仅示例与冒烟测试） | beta，精确锁版本 |
 | image | 0.25.10 | 资源 | 图片解码（宿主喂字节，核心不做 IO） | |
@@ -30,7 +30,7 @@
 vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29 与 30 是 semver 不兼容的大版本：若我们直接声明 wgpu 30.0.1，应用会同时编译两份 wgpu（或无法与 vello 统一）。因此：
 
 - sink 与宿主统一使用 vello 传递的 wgpu 29.x，sink crate 显式声明同版本（其测试代码直接使用 wgpu API；**公有 API 不暴露任何 wgpu 类型，无需 re-export**——阶段4 审计修正，此前的 `pub use wgpu` 计划未落地也不再需要）。
-- 这符合"选**兼容的**最新版本"原则：29.x 就是当前兼容的最新。等 vello 升级支持 wgpu 30（linebender 节奏通常数周内跟上）后整体升级。
+- 这符合"选**兼容的**最新版本"原则：29.x 就是当前兼容的最新。~~等 vello 升级支持 wgpu 30（linebender 节奏通常数周内跟上）后整体升级。~~ **2026-10-06 更新：vello 0.11.0 已发布（锁 wgpu ^30），升级路径就绪**——按"一次升级整条 linebender 链"规则（vello+peniko+parley 同批 0.11 代 + workspace wgpu 统一 30.x），作为升级阶梯候选待排期；当前 29.x 组合仍为最新兼容稳定组合，无安全/缺陷驱动，不单独追高。
 - winit 0.31-beta 与 wgpu 的对接走 raw-window-handle，不受此影响。
 
 ## 版本策略
@@ -41,9 +41,9 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - MSRV 以依赖最高者为准：workspace `rust-version = 1.90`（2026-10 CI msrv 实测上调——edition 2024 起点 1.85 被依赖链抬升：ordered-float 5.5.0 需 1.90、smol_str 0.3.6 需 1.89、vello 0.10/parley 0.11/fontique 0.11 链需 1.88、wgpu-types/naga-bridge 29.0.4 需 1.87、winit 0.31.0-beta.3 系需 1.86；msrv job 以 `dtolnay/rust-toolchain@1.90.0` 钉定验证。依赖再抬高时以实际失败为准上调）。
 - 不承诺 no_std；L1（值与级联）保持 no_std+alloc 可达性，作为将来选项保留。
 
-## taffy calc 直通（二期①已落地：引擎侧结算式直通）
+## taffy calc 直通（二期①已落地：引擎侧结算式直通；2026-09 复评修正上游结论）
 
-调研结论（2026-09）：taffy 0.14 的 calc = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())`，布局期以 parent_size 为基调用）。**上游接入路径（自定义 LayoutPartialTree 包装覆盖 `resolve_calc_value`）经源码核查被阻断**：TaffyView 的 nodes/cache/unrounded_layout 等字段为 pub(crate)，外部包装无法实现 LayoutPartialTree/CacheTree 全 trait 面（TraversePartialTree/CacheTree 虽有 TaffyTree 公开实现，但 set_unrounded_layout/get_unrounded_layout/set_final_layout 需私有字段）。
+调研结论（2026-09，**2026-09-11 复评修正**）：taffy 0.14 的 calc = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())`，布局期以 parent_size 为基调用）。~~上游接入路径（自定义 LayoutPartialTree 包装覆盖 `resolve_calc_value`）经源码核查被阻断~~ **修正：该结论不成立**——taffy 0.14 `resolve_calc_value` 为公开 trait 方法（LayoutPartialTree 库侧缺省实现，可覆盖），官方示例 examples/custom_tree_owned_unsafe.rs 演示自定义树全流程；旧评估引用的「TaffyView」非 taffy 公共类型（评估引用有误）。接入路径实际存在，维持结算式直通的原因是工程性而非可行性：结算式已落地、perf 实测达标（conformance calc-width 转正 + 两级链收敛锁定），原生 calc 集成（指针所有权约定 + 自定义树搬运）收益不及重写风险，记 B 级重估清单。
 
 **落地设计（二期①）**：引擎侧「结算式直通」，零 unsafe、零上游票——
 

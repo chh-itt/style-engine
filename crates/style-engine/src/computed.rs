@@ -1045,13 +1045,8 @@ impl ComputedStyle {
     /// 已解析入库但无任何消费者（无效声明）。
     pub(crate) fn resolved_line_height_px(&self, env: &MediaEnv) -> Option<f32> {
         let fs = self.font_size_px();
-        let ctx = ResolveCtx {
-            em: fs,
-            rem: 16.0,
-            viewport_w: env.viewport_w,
-            viewport_h: env.viewport_h,
-            ..ResolveCtx::base(fs, 16.0, env.viewport_w, env.viewport_h)
-        };
+        // P0 rem 修复：rem 基准 = MediaEnv.rem（引擎接线文档根字号）。
+        let ctx = ResolveCtx::base(fs, env.rem, env.viewport_w, env.viewport_h);
         match self.line_height() {
             LineHeight::Normal => None,
             LineHeight::Number(n) => Some(n * fs),
@@ -1064,13 +1059,8 @@ impl ComputedStyle {
     /// 与解析类型不一致——盘点修复为同型 LenAuto(None)。
     pub(crate) fn resolved_letter_spacing_px(&self, env: &MediaEnv) -> f32 {
         let fs = self.font_size_px();
-        let ctx = ResolveCtx {
-            em: fs,
-            rem: 16.0,
-            viewport_w: env.viewport_w,
-            viewport_h: env.viewport_h,
-            ..ResolveCtx::base(fs, 16.0, env.viewport_w, env.viewport_h)
-        };
+        // P0 rem 修复：rem 基准 = MediaEnv.rem（引擎接线文档根字号）。
+        let ctx = ResolveCtx::base(fs, env.rem, env.viewport_w, env.viewport_h);
         match self.get(PropertyId::LetterSpacing) {
             Some(DeclValue::Len(lp)) => lp.resolve(&ctx, fs).unwrap_or(0.0),
             Some(DeclValue::LenAuto(Some(lp))) => lp.resolve(&ctx, fs).unwrap_or(0.0),
@@ -1082,13 +1072,8 @@ impl ComputedStyle {
     /// 与 letter-spacing 同范式）。None = normal = 无消费（parley 默认 0）。
     pub(crate) fn resolved_word_spacing_px(&self, env: &MediaEnv) -> Option<f32> {
         let fs = self.font_size_px();
-        let ctx = ResolveCtx {
-            em: fs,
-            rem: 16.0,
-            viewport_w: env.viewport_w,
-            viewport_h: env.viewport_h,
-            ..ResolveCtx::base(fs, 16.0, env.viewport_w, env.viewport_h)
-        };
+        // P0 rem 修复：rem 基准 = MediaEnv.rem（引擎接线文档根字号）。
+        let ctx = ResolveCtx::base(fs, env.rem, env.viewport_w, env.viewport_h);
         self.word_spacing()?.resolve(&ctx, fs)
     }
 
@@ -1444,16 +1429,11 @@ pub fn compute_node_from_cascade(
         style.values[slot] = Some(initial_value(*pid));
     }
 
-    // 4) 字号解析（em 基于父字号；rem 基于根 16px）
+    // 4) 字号解析（em 基于父字号；rem 按传入 env.rem——根元素 font-size
+    // 的 rem 由引擎在求值前置为初始值 16，CSS Values 语义）
     if let Some(DeclValue::Len(lp)) = style.values[PropertyId::FontSize.slot()].clone() {
         let parent_font = parent.map_or(16.0, |p| p.font_size_px());
-        let ctx = ResolveCtx {
-            em: parent_font,
-            rem: 16.0,
-            viewport_w: env.viewport_w,
-            viewport_h: env.viewport_h,
-            ..ResolveCtx::base(parent_font, 16.0, env.viewport_w, env.viewport_h)
-        };
+        let ctx = ResolveCtx::base(parent_font, env.rem, env.viewport_w, env.viewport_h);
         if let Some(px) = lp.resolve(&ctx, parent_font) {
             style.values[PropertyId::FontSize.slot()] =
                 Some(DeclValue::Len(LengthPercentage::Px(px)));
