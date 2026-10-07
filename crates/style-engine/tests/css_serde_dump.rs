@@ -49,8 +49,9 @@ fn display_list_dump_round_trip() {
 
 #[test]
 fn clip_path_dump_round_trip() {
-    // F3c（ADR-0025）：PushClipPath serde 往返锁——circle(64 段, nonzero) 与
-    // polygon(evenodd) 经 to_dump → JSON → 回建无损；tag/字段真格式在场
+    // F3c（ADR-0025）：PushClipPath serde 往返锁——circle（自适应段数,
+    // nonzero）与 polygon(evenodd) 经 to_dump → JSON → 回建无损；tag/字段
+    // 真格式在场。P4 D6：段数=clamp(ceil(2πr/3),16,256)，r=30 → 63。
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(
         "#t { width: 100px; height: 100px; clip-path: circle(30px at 50% 50%); } \
@@ -68,9 +69,9 @@ fn clip_path_dump_round_trip() {
     assert!(
         fr.paint.ops.iter().any(
             |op| matches!(op, style_engine::paint::PaintOp::PushClipPath { points, .. }
-            if points.len() == 64)
+            if points.len() == 63)
         ),
-        "圆 64 段 op 在场"
+        "圆 63 段 op 在场（r=30 自适应）"
     );
 
     let dump = fr.paint.to_dump();

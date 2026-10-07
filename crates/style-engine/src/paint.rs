@@ -45,9 +45,37 @@ pub struct TextShadowPaint {
     pub color: AlphaColor<Srgb>,
 }
 
-/// 命中几何单元（F3a，ADR-0023）：绘制序收集，后绘=更顶；border-box
-/// 视口坐标 + 收集时的活跃 clip 矩形链快照。变换节点=未旋盒（B 级在
-/// 案——op 坐标为视口系、PushTransform 由 sink 终结）。
+/// 命中裁剪单元（P4 D4，ADR-0037）：矩形（含逐角圆角）或折线多边形；
+/// `inv` = 登记时活跃仿射的逆（sink 端 Clip.inv 同语义）——点先经 inv
+/// 逆映射再测局部形状，变换节点的裁剪精确到变换后几何。
+#[derive(Debug, Clone, PartialEq)]
+pub enum HitClip {
+    /// 矩形裁剪（overflow PushClip / clip-path inset）：[x, y, w, h] +
+    /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius；全零 = 直角）。
+    Rect {
+        /// 裁剪盒 [x, y, w, h]（视口坐标 px）。
+        rect: [f32; 4],
+        /// 每角 (横, 纵) 圆角 px（序 tl_h, tl_v, tr_h, tr_v, br_h, br_v,
+        /// bl_h, bl_v）。
+        radius: [f32; 8],
+        /// 登记时活跃仿射的逆（[a, b, c, d, e, f]）。
+        inv: [f32; 6],
+    },
+    /// 折线多边形裁剪（clip-path circle/ellipse/polygon）。
+    Path {
+        /// 视口坐标顶点（周界序，隐式闭合）。
+        points: Vec<[f32; 2]>,
+        /// 填充规则：true = nonzero，false = evenodd。
+        nonzero: bool,
+        /// 登记时活跃仿射的逆。
+        inv: [f32; 6],
+    },
+}
+
+/// 命中几何单元（F3a，ADR-0023；P4 D4 精确化）：绘制序收集，后绘=更顶；
+/// border-box 视口坐标 + 收集时的活跃 clip 链快照（矩形/折线精确形状）。
+/// `mat` = 收集时活跃仿射（transform 节点=复合矩阵；命中点先逆变换到
+/// 节点局部系再测盒——未旋盒偏差收敛，ADR-0037 D4）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct HitRect {
     /// 所属节点。
@@ -60,17 +88,32 @@ pub struct HitRect {
     pub w: f32,
     /// border-box 高。
     pub h: f32,
-    /// 祖先 clip 矩形链（视口，外→内；[x, y, w, h]）。
-    pub clips: Vec<[f32; 4]>,
+    /// 祖先 clip 链（外→内；矩形/折线精确形状+各自逆矩阵）。
+    pub clips: Vec<HitClip>,
+    /// 收集时活跃仿射（节点及祖先 transform 复合；恒等 = 无变换）。
+    pub mat: [f32; 6],
 }
 
 /// 命中收集器（F3a，ADR-0023）：paint 期经 `PaintCtx.hit` 透传收集。
-#[derive(Default)]
+/// `mat` = 遍历中的活跃仿射栈顶（paint_node transform 段更新/恢复）。
 pub struct HitCollector {
     /// 收集序=绘制序（后=顶）。
     pub rects: Vec<HitRect>,
-    /// 活跃 clip 矩形链（子树 PushClip 登记 / PopClip 弹出）。
-    pub clips: Vec<[f32; 4]>,
+    /// 活跃 clip 链（子树 PushClip/PushClipPath 登记 / PopClip 弹出）。
+    pub clips: Vec<HitClip>,
+    /// 活跃仿射（paint_node 遇 transform 节点复合，子树走查后恢复）。
+    /// 初始恒等（数组 derive Default 是全零——不可用）。
+    pub mat: [f32; 6],
+}
+
+impl Default for HitCollector {
+    fn default() -> Self {
+        Self {
+            rects: Vec::new(),
+            clips: Vec::new(),
+            mat: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        }
+    }
 }
 
 /// 命中结果（F3a，ADR-0023）。
@@ -1266,10 +1309,24 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     // P2 修订：css-filters-1 §3 合成序 opacity(filter(子树))）。布局盒保持
     // 未变换坐标（taffy 不可见 transform）；绘制期终结见 ADR-0009 双时机契约。
     let transformed = style.has_transform();
+    let node_affine = if transformed {
+        Some(resolve_transform_affine(style, x, y, w, h, env))
+    } else {
+        None
+    };
     if transformed {
         out.ops.push(PaintOp::PushTransform {
-            affine: resolve_transform_affine(style, x, y, w, h, env),
+            affine: node_affine.unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
         });
+        // P4 D4（ADR-0037）：命中收集的活跃仿射复合（子树走查继承，
+        // 尾部 PopTransform 段恢复）。
+        if let Some(hc) = ctx.hit {
+            let mut h = hc.borrow_mut();
+            h.mat = mul_affine(
+                &h.mat,
+                &node_affine.unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            );
+        }
     }
 
     // F3c（ADR-0025）：clip-path 裁剪层——元素自身绘制（阴影/背景/替换图/
@@ -1295,28 +1352,26 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 radius: *radius,
             });
             if let Some(hc) = ctx.hit {
-                hc.borrow_mut().clips.push([rect.0, rect.1, rect.2, rect.3]);
+                let inv = invert_affine(&hc.borrow().mat).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+                hc.borrow_mut().clips.push(HitClip::Rect {
+                    rect: [rect.0, rect.1, rect.2, rect.3],
+                    radius: *radius,
+                    inv,
+                });
             }
         }
         ClipEmit::Path { points, nonzero } => {
-            let mut min_x = f32::INFINITY;
-            let mut min_y = f32::INFINITY;
-            let mut max_x = f32::NEG_INFINITY;
-            let mut max_y = f32::NEG_INFINITY;
-            for p in points {
-                min_x = min_x.min(p[0]);
-                min_y = min_y.min(p[1]);
-                max_x = max_x.max(p[0]);
-                max_y = max_y.max(p[1]);
-            }
             out.ops.push(PaintOp::PushClipPath {
                 points: points.clone(),
                 nonzero: *nonzero,
             });
             if let Some(hc) = ctx.hit {
-                hc.borrow_mut()
-                    .clips
-                    .push([min_x, min_y, max_x - min_x, max_y - min_y]);
+                let inv = invert_affine(&hc.borrow().mat).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+                hc.borrow_mut().clips.push(HitClip::Path {
+                    points: points.clone(),
+                    nonzero: *nonzero,
+                    inv,
+                });
             }
         }
     }
@@ -1334,6 +1389,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
         );
         if !pointer_none {
             let clips = hc.borrow().clips.clone();
+            let mat = hc.borrow().mat;
             hc.borrow_mut().rects.push(HitRect {
                 node_id: id,
                 x,
@@ -1341,6 +1397,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                 w,
                 h,
                 clips,
+                mat,
             });
         }
     }
@@ -1497,8 +1554,24 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             Some(g) => g,
             None => continue,
         };
-        let tiles_x = tile_positions(geom.dx, geom.dw, geom.tile_x, clip.0, clip.2);
-        let tiles_y = tile_positions(geom.dy, geom.dh, geom.tile_y, clip.1, clip.3);
+        let tiles_x = tile_axis_positions(
+            geom.axis_x,
+            geom.dx,
+            geom.dw,
+            clip.0,
+            clip.2,
+            area.0,
+            area.2,
+        );
+        let tiles_y = tile_axis_positions(
+            geom.axis_y,
+            geom.dy,
+            geom.dh,
+            clip.1,
+            clip.3,
+            area.1,
+            area.3,
+        );
         out.ops.push(PaintOp::PushClip {
             x: clip.0,
             y: clip.1,
@@ -1506,8 +1579,8 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             height: clip.3,
             radius: clip_radius,
         });
-        for ty in &tiles_y {
-            for tx in &tiles_x {
+        for &(ty, th) in &tiles_y {
+            for &(tx, tw) in &tiles_x {
                 if let Some(g) = gradient {
                     let resolved = Gradient {
                         kind: g.kind.clone(),
@@ -1523,13 +1596,13 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                     };
                     let radial = match &g.kind {
                         crate::css::property::GradientKind::Radial(spec) => {
-                            Some(resolve_radial(spec, *tx, *ty, geom.dw, geom.dh, style, env))
+                            Some(resolve_radial(spec, tx, ty, tw, th, style, env))
                         }
                         _ => None,
                     };
                     let conic = match &g.kind {
                         crate::css::property::GradientKind::Conic(spec) => {
-                            Some(resolve_conic(spec, *tx, *ty, geom.dw, geom.dh, style, env))
+                            Some(resolve_conic(spec, tx, ty, tw, th, style, env))
                         }
                         _ => None,
                     };
@@ -1537,15 +1610,15 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                     // 端点（radial/conic 同款 paint 层终结；sink 优先消费）。
                     let linear = match &g.kind {
                         crate::css::property::GradientKind::Linear(angle) => {
-                            Some(resolve_linear(angle.0, *tx, *ty, geom.dw, geom.dh))
+                            Some(resolve_linear(angle.0, tx, ty, tw, th))
                         }
                         _ => None,
                     };
                     out.ops.push(PaintOp::Gradient {
-                        x: *tx,
-                        y: *ty,
-                        width: geom.dw,
-                        height: geom.dh,
+                        x: tx,
+                        y: ty,
+                        width: tw,
+                        height: th,
                         radius: [0.0; 8],
                         gradient: resolved,
                         radial,
@@ -1554,10 +1627,10 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                     });
                 } else if let Some(img) = img {
                     out.ops.push(PaintOp::Image {
-                        x: *tx,
-                        y: *ty,
-                        width: geom.dw,
-                        height: geom.dh,
+                        x: tx,
+                        y: ty,
+                        width: tw,
+                        height: th,
                         radius: [0.0; 8],
                         source_w: img.width,
                         source_h: img.height,
@@ -1758,19 +1831,9 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     // border-image（F3d，ADR-0026）：source ≠ none 时按 css-backgrounds-3
     // 在 Border op 位取代边框（9-slice 九区域）；源不可用（URL 未注册）→
     // warn 回退边框（零副作用契约，背景图同款）。
-    if !paint_border_image(ctx, style, env, x, y, w, h, &sides, out)
-        && sides
-            .iter()
-            .any(|s| s.style != BorderStyle::None && s.width > 0.0)
-    {
-        out.ops.push(PaintOp::Border {
-            x,
-            y,
-            width: w,
-            height: h,
-            radius,
-            sides,
-        });
+    if !paint_border_image(ctx, style, env, x, y, w, h, &sides, out) {
+        // P4 D1（ADR-0037）：dashed/dotted 拆段/圆角退 Solid 判定收口。
+        emit_borders(x, y, w, h, radius, sides, out);
     }
 
     // 3a-2) outline（A2）：不占布局的装饰描边（ink overflow，css-ui-4）——
@@ -1787,9 +1850,11 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     let o_style = match style.get(PropertyId::OutlineStyle) {
         Some(DeclValue::OutlineStyle(s)) => match s {
             OutlineStyle::None => None,
-            // 花式线型（double/groove/ridge/inset/outset）与 auto（宿主
-            // focus ring 语义位）按 Solid 近似=B 级在案（BorderStyle 实际
-            // 仅 None/Hidden/Solid/Dashed/Dotted 五变体）
+            // 花式线型（double/groove/ridge/inset/outset）按 Solid 近似
+            // （B 级在案；BorderStyle 实际仅 None/Hidden/Solid/Dashed/
+            // Dotted 五变体）。auto = 宿主 focus ring 语义位（css-ui-4）：
+            // 引擎不注入 UA 默认 outline，绘制按 Solid——宿主以 outline-
+            // width/offset/color 显式声明时即获得精确渲染（P4 D5，ADR-0037）。
             OutlineStyle::Auto
             | OutlineStyle::Solid
             | OutlineStyle::Double
@@ -1814,22 +1879,31 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             _ => 0.0,
         };
         let d = offset + o_width;
-        let mut o_radius = radius;
-        for r in &mut o_radius {
-            *r = (*r + d).max(0.0);
-        }
-        out.ops.push(PaintOp::Border {
-            x: x - d,
-            y: y - d,
-            width: w + 2.0 * d,
-            height: h + 2.0 * d,
-            radius: o_radius,
-            sides: std::array::from_fn(|_| BorderSide {
+        // 直角盒外扩依旧直角（圆心不变的 +d 增长只对真圆角有意义）——
+        // 零 radius 传零数组，保 emit_borders 拆段路径可达。
+        let o_radius = if radius == [0.0; 8] {
+            [0.0; 8]
+        } else {
+            let mut grown = radius;
+            for r in &mut grown {
+                *r = (*r + d).max(0.0);
+            }
+            grown
+        };
+        // P4 D1：outline 虚线与边框同通道（外扩矩形无圆角时精确拆段）。
+        emit_borders(
+            x - d,
+            y - d,
+            w + 2.0 * d,
+            h + 2.0 * d,
+            o_radius,
+            std::array::from_fn(|_| BorderSide {
                 width: o_width,
                 style: o_style,
                 color: o_color,
             }),
-        });
+            out,
+        );
     }
 
     // 3b) 多列列规（三期⑤c）：settle_column_rules 结算的条带，坐标相对
@@ -2025,9 +2099,15 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             height: h,
             radius,
         });
-        // F3a（ADR-0023）：子树裁剪 → 命中 clip 链登记（PopClip 同步弹出）。
+        // F3a（ADR-0023）：子树裁剪 → 命中 clip 链登记（PopClip 同步弹出；
+        // P4 D4：矩形+圆角+活跃仿射逆精确承载）。
         if let Some(hc) = ctx.hit {
-            hc.borrow_mut().clips.push([x, y, w, h]);
+            let inv = invert_affine(&hc.borrow().mat).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            hc.borrow_mut().clips.push(HitClip::Rect {
+                rect: [x, y, w, h],
+                radius,
+                inv,
+            });
         }
     }
     let mut scrolled = false;
@@ -2140,6 +2220,14 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     }
     if transformed {
         out.ops.push(PaintOp::PopTransform);
+        // P4 D4：活跃仿射恢复（子树走查毕；复合的逆 = 逐因子逆乘回）。
+        if let Some(hc) = ctx.hit {
+            let inv = node_affine.and_then(|a| invert_affine(&a));
+            if let Some(inv) = inv {
+                let mut h = hc.borrow_mut();
+                h.mat = mul_affine(&h.mat, &inv);
+            }
+        }
     }
 }
 
@@ -2154,6 +2242,119 @@ pub(crate) fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
         m[0] * n[4] + m[2] * n[5] + m[4],
         m[1] * n[4] + m[3] * n[5] + m[5],
     ]
+}
+
+/// 仿射逆（P4 D4，ADR-0037）：det = a·d − b·c；奇异（不可逆）→ None。
+/// soft 端 `Mat::invert` 同语义（核心命中判定复刻）。
+pub(crate) fn invert_affine(m: &[f32; 6]) -> Option<[f32; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let ia = m[3] / det;
+    let ib = -m[1] / det;
+    let ic = -m[2] / det;
+    let id = m[0] / det;
+    let ie = -(ia * m[4] + ic * m[5]);
+    let if_ = -(ib * m[4] + id * m[5]);
+    Some([ia, ib, ic, id, ie, if_])
+}
+
+/// 仿射应用（[a, b, c, d, e, f]，x' = a·x + c·y + e）。
+pub(crate) fn apply_affine(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// 圆角矩形点包含（P4 D4；soft `src_inside` 同式）：半开边 +
+/// 椭圆角象限归一判定（radius 序 tl_h, tl_v, tr_h, tr_v, br_h, br_v,
+/// bl_h, bl_v）。
+fn rounded_rect_contains(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> bool {
+    if !(px >= x && px < x + w && py >= y && py < y + h) {
+        return false;
+    }
+    let corners = [
+        (
+            r[0],
+            r[1],
+            x + r[0],
+            y + r[1],
+            px < x + r[0] && py < y + r[1],
+        ), // tl
+        (
+            r[2],
+            r[3],
+            x + w - r[2],
+            y + r[3],
+            px >= x + w - r[2] && py < y + r[3],
+        ), // tr
+        (
+            r[4],
+            r[5],
+            x + w - r[4],
+            y + h - r[5],
+            px >= x + w - r[4] && py >= y + h - r[5],
+        ), // br
+        (
+            r[6],
+            r[7],
+            x + r[6],
+            y + h - r[7],
+            px < x + r[6] && py >= y + h - r[7],
+        ), // bl
+    ];
+    for (rx, ry, cx, cy, in_square) in corners {
+        if in_square && rx > 0.0 && ry > 0.0 {
+            let nx = (px - cx) / rx;
+            let ny = (py - cy) / ry;
+            return nx * nx + ny * ny <= 1.0;
+        }
+    }
+    true
+}
+
+/// 折线多边形点包含（P4 D4；soft `poly_inside` 同式）：nonzero = 环数
+/// ≠ 0，evenodd = 射线穿越奇偶；半开边规则 yi ≤ py < yj 仅计上穿。
+fn poly_contains(px: f32, py: f32, pts: &[[f32; 2]], nonzero: bool) -> bool {
+    let n = pts.len();
+    if n < 3 {
+        return false;
+    }
+    let mut winding = 0i32;
+    let mut crossed = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (pts[i][0], pts[i][1]);
+        let (xj, yj) = (pts[j][0], pts[j][1]);
+        let side = (xj - xi) * (py - yi) - (px - xi) * (yj - yi);
+        if yi <= py {
+            if yj > py && side > 0.0 {
+                winding += 1;
+                crossed = !crossed;
+            }
+        } else if yj <= py && side < 0.0 {
+            winding -= 1;
+            crossed = !crossed;
+        }
+        j = i;
+    }
+    if nonzero { winding != 0 } else { crossed }
+}
+
+/// 命中裁剪判定（P4 D4）：查询点（视口系）经裁剪登记时的活跃仿射逆
+/// 映射到局部系，再测矩形（含圆角）/折线（nonzero/evenodd）。
+pub(crate) fn hit_clip_contains(c: &HitClip, x: f32, y: f32) -> bool {
+    let (lx, ly) = match c {
+        HitClip::Rect { inv, .. } => apply_affine(inv, x, y),
+        HitClip::Path { inv, .. } => apply_affine(inv, x, y),
+    };
+    match c {
+        HitClip::Rect { rect, radius, .. } => {
+            rounded_rect_contains(lx, ly, rect[0], rect[1], rect[2], rect[3], radius)
+        }
+        HitClip::Path {
+            points, nonzero, ..
+        } => poly_contains(lx, ly, points, *nonzero),
+    }
 }
 
 /// 绘制期仿射终结（ADR-0009）：函数列表按书写顺序连乘（最右先应用），
@@ -2308,7 +2509,20 @@ fn lp_semantic(lp: &LengthPercentage, basis: f32, style: &ComputedStyle, env: &M
     }
 }
 
-/// 单层绘制几何（F3b ADR-0024）。
+/// 背景平铺轴语义（P4 D2，ADR-0037：round/space 精确化，退役 repeat 近似）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TileAxis {
+    /// 不平铺（单 tile）。
+    None,
+    /// 平铺（窗口对齐步进，尺寸原样）。
+    Repeat,
+    /// 均分空隙（定位区整数片 + 均匀 gap；片数 0/1 → 定位区单片）。
+    Space,
+    /// 整数片拉伸（定位区 n=round(len/size).max(1) 片均分；定位失效）。
+    Round,
+}
+
+/// 单层绘制几何（F3b ADR-0024；P4 D2 轴语义化）。
 struct LayerGeom {
     /// 首 tile 原点 x。
     dx: f32,
@@ -2318,14 +2532,14 @@ struct LayerGeom {
     dw: f32,
     /// 绘制高。
     dh: f32,
-    /// 水平平铺。
-    tile_x: bool,
-    /// 垂直平铺。
-    tile_y: bool,
+    /// 水平轴平铺语义。
+    axis_x: TileAxis,
+    /// 垂直轴平铺语义。
+    axis_y: TileAxis,
 }
 
 /// 单层几何解析（css-backgrounds-3 §3.9 尺寸 / §3.10 定位 / §3.4 平铺；
-/// space/round → repeat B 级近似在案）。
+/// P4 D2：round/space 轴语义直传，tile 位置由 tile_axis_positions 终结）。
 #[allow(clippy::too_many_arguments)]
 fn resolve_layer_geom(
     pos: &Position2D,
@@ -2396,25 +2610,202 @@ fn resolve_layer_geom(
         dy,
         dw,
         dh,
-        tile_x: !matches!(repeat.x, RepeatAxis::NoRepeat),
-        tile_y: !matches!(repeat.y, RepeatAxis::NoRepeat),
+        axis_x: tile_axis(repeat.x),
+        axis_y: tile_axis(repeat.y),
     })
 }
 
-/// 平铺起点枚举：与窗口 [win, win+len) 相交的全部 tile 原点
-/// （不平铺 = 单点；size<=0 单点防御）。
-fn tile_positions(origin: f32, size: f32, tile: bool, win: f32, len: f32) -> Vec<f32> {
-    if !tile || size <= 0.0 || len <= 0.0 {
-        return vec![origin];
+/// RepeatAxis → TileAxis 映射（P4 D2）。
+fn tile_axis(r: RepeatAxis) -> TileAxis {
+    match r {
+        RepeatAxis::NoRepeat => TileAxis::None,
+        RepeatAxis::Repeat => TileAxis::Repeat,
+        RepeatAxis::Space => TileAxis::Space,
+        RepeatAxis::Round => TileAxis::Round,
+    }
+}
+
+/// 平铺位置枚举（P4 D2，ADR-0037）：返回 (tile 原点, tile 尺寸) 序列。
+/// - None：单 tile（定位生效，origin/size 原样）；
+/// - Repeat：窗口 [win, win+len) 对齐步进（尺寸原样）；
+/// - Space：定位区 [area, area+area_len) 容纳 n=(area_len/size) 下取整
+///   片正空隙均分；n≤1 → 定位区单片（position 生效）；否则首片锚定
+///   定位区起点、步长 = size+gap（position 失效——css-backgrounds-3 §3.4）；
+/// - Round：n=round(area_len/size).max(1) 片均分定位区（ts=area_len/n），
+///   窗口对齐步进铺满（定位失效）；size≤0/area≤0 退单 tile 防御。
+fn tile_axis_positions(
+    axis: TileAxis,
+    origin: f32,
+    size: f32,
+    win: f32,
+    win_len: f32,
+    area_origin: f32,
+    area_len: f32,
+) -> Vec<(f32, f32)> {
+    if axis == TileAxis::None || size <= 0.0 {
+        return vec![(origin, size)];
+    }
+    if axis == TileAxis::Space {
+        if area_len <= 0.0 {
+            return vec![(origin, size)];
+        }
+        let n = (area_len / size) as usize;
+        if n <= 1 {
+            return vec![(area_origin, size)];
+        }
+        let gap = (area_len - size * n as f32) / (n as f32 - 1.0);
+        let step = size + gap;
+        let end = area_origin + area_len;
+        let mut out = Vec::with_capacity(n);
+        let mut p = area_origin;
+        while p < end && out.len() < n {
+            out.push((p, size));
+            p += step;
+        }
+        return out;
+    }
+    // Repeat / Round：窗口对齐步进；Round 先整数片拉伸（锚定定位区）。
+    let (ts, anchor) = if axis == TileAxis::Round {
+        if area_len <= 0.0 {
+            return vec![(origin, size)];
+        }
+        let n = (area_len / size).round().max(1.0);
+        (area_len / n, area_origin)
+    } else {
+        (size, origin)
+    };
+    if ts <= 0.0 || win_len <= 0.0 {
+        return vec![(anchor, ts)];
     }
     let mut out = Vec::new();
-    let mut p = origin - ((origin - win) / size).ceil() * size;
-    let end = win + len;
+    // Round 网格 = n 片恰好铺满定位区（不出界延伸）；Repeat 窗口对齐
+    // 步进（边缘半片合法）。
+    let (mut p, end) = if axis == TileAxis::Round {
+        (anchor, area_origin + area_len)
+    } else {
+        (anchor - ((anchor - win) / ts).ceil() * ts, win + win_len)
+    };
     while p < end {
-        out.push(p);
-        p += size;
+        out.push((p, ts));
+        p += ts;
     }
     out
+}
+
+/// 边框发射（P4 D1，ADR-0037）：dashed/dotted 且无圆角 → DisplayList
+/// 级拆段（css-backgrounds-3 §7.1：dash 段长 2×边宽、间隔 1×边宽、首段
+/// 对齐线起点、末段不足不画；dotted 圆点直径 = 边宽、中心间距 2×边宽、
+/// 首点圆覆盖线起点）；dashed/dotted 含圆角 → 整框退 Solid 单 op（弧形
+/// 虚线 B 级在案）；纯 Solid/None/Hidden → 原 Border op 路径。outline
+/// 通道共用（外扩矩形 + Dashed/Dotted 映射自动受益）。
+pub(crate) fn emit_borders(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: [f32; 8],
+    sides: [BorderSide; 4],
+    out: &mut DisplayList,
+) {
+    let fancy = |s: &BorderSide| {
+        s.width > 0.0 && matches!(s.style, BorderStyle::Dashed | BorderStyle::Dotted)
+    };
+    let visible = sides
+        .iter()
+        .any(|s| s.style != BorderStyle::None && s.width > 0.0);
+    if !visible {
+        return;
+    }
+    let any_fancy = sides.iter().any(fancy);
+    if !any_fancy {
+        out.ops.push(PaintOp::Border {
+            x,
+            y,
+            width: w,
+            height: h,
+            radius,
+            sides,
+        });
+        return;
+    }
+    let square = radius == [0.0; 8];
+    if !square {
+        // 弧上虚线段需要弧长参数化（B 级）：整框退 Solid 一次成带。
+        let mut solid = sides;
+        for s in &mut solid {
+            if matches!(s.style, BorderStyle::Dashed | BorderStyle::Dotted) {
+                s.style = BorderStyle::Solid;
+            }
+        }
+        out.ops.push(PaintOp::Border {
+            x,
+            y,
+            width: w,
+            height: h,
+            radius,
+            sides: solid,
+        });
+        return;
+    }
+    // 直角框：四边带布局与 Border op 一致（top 全宽、right 纵带、
+    // bottom 全宽、left 纵带），逐边拆段。
+    emit_side_band(x, y, w, &sides[0], true, out);
+    emit_side_band(x + w - sides[1].width, y, h, &sides[1], false, out);
+    emit_side_band(x, y + h - sides[2].width, w, &sides[2], true, out);
+    emit_side_band(x, y, h, &sides[3], false, out);
+}
+
+/// 单边带绘制（P4 D1）：`horizontal` = 沿 x 轴长 `len`、厚 = 边宽；
+/// Solid 整带 / Dashed 2t-t 段 / Dotted t 直径 2t 中心距圆点。
+fn emit_side_band(
+    x0: f32,
+    y0: f32,
+    len: f32,
+    side: &BorderSide,
+    horizontal: bool,
+    out: &mut DisplayList,
+) {
+    let t = side.width;
+    if t <= 0.0 {
+        return;
+    }
+    let rect = |off: f32, seg: f32, out: &mut DisplayList| {
+        let (rx, ry, rw, rh) = if horizontal {
+            (x0 + off, y0, seg, t)
+        } else {
+            (x0, y0 + off, t, seg)
+        };
+        out.ops.push(PaintOp::FillRect {
+            x: rx,
+            y: ry,
+            width: rw,
+            height: rh,
+            radius: [0.0; 8],
+            color: side.color,
+        });
+    };
+    match side.style {
+        BorderStyle::None => {}
+        BorderStyle::Solid => rect(0.0, len, out),
+        BorderStyle::Dashed => {
+            // 段 2t、间隔 t（步进 3t）、首段对齐起点、末段不足不画。
+            let (seg, step) = (2.0 * t, 3.0 * t);
+            let mut p = 0.0;
+            while p + seg <= len {
+                rect(p, seg, out);
+                p += step;
+            }
+        }
+        BorderStyle::Dotted => {
+            // 圆点直径 t、中心间距 2t（点间空隙 t）、首点圆覆盖起点。
+            let (r, step) = (t / 2.0, 2.0 * t);
+            let mut c = r;
+            while c + r <= len {
+                rect(c - r, t, out);
+                c += step;
+            }
+        }
+    }
 }
 
 /// clip-path 发射形（F3c，ADR-0025）。
@@ -2437,15 +2828,21 @@ enum ClipEmit {
     },
 }
 
-/// 圆/椭圆折线段数（64 段；面积误差 ≈0.15%，B 级在案——锯齿 vs
-/// 顶点量折衷，ADR-0025）。
-const CLIP_POLY_SEGMENTS: usize = 64;
+/// 圆/椭圆折线段数下限/上限与目标弦距（P4 D6，ADR-0037：半径自适应
+/// seg = clamp(ceil(2π·r/3), 16, 256)——弦距 ≤3px 视觉平滑，小圆免过密）。
+const CLIP_POLY_SEGMENTS_MIN: usize = 16;
+const CLIP_POLY_SEGMENTS_MAX: usize = 256;
+const CLIP_POLY_CHORD_TARGET: f32 = 3.0;
 
-/// 圆/椭圆内接折线顶点（起始角 0 逆时针；css-shapes-1 §3）。
+/// 圆/椭圆内接折线顶点（起始角 0 逆时针；css-shapes-1 §3）。段数随
+/// 长半轴自适应（D6）；r→0 退化小段数防御。
 fn ellipse_points(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<[f32; 2]> {
-    (0..CLIP_POLY_SEGMENTS)
+    let r = rx.max(ry).max(0.5);
+    let seg = ((std::f32::consts::TAU * r / CLIP_POLY_CHORD_TARGET).ceil() as usize)
+        .clamp(CLIP_POLY_SEGMENTS_MIN, CLIP_POLY_SEGMENTS_MAX);
+    (0..seg)
         .map(|i| {
-            let a = (i as f32) * std::f32::consts::TAU / CLIP_POLY_SEGMENTS as f32;
+            let a = (i as f32) * std::f32::consts::TAU / seg as f32;
             [cx + rx * a.cos(), cy + ry * a.sin()]
         })
         .collect()
@@ -3508,15 +3905,17 @@ mod tests {
     }
 
     #[test]
-    fn clip_path_circle_sixty_four_segments() {
-        // F3c：circle → PushClipPath 64 段折线（起点 0°、逆时针、首点 =
-        // 右极点）；AABB 命中链不在此测（soft 像素锁负责几何正确性）
+    fn clip_path_circle_segments_adaptive() {
+        // F3c + P4 D6（ADR-0037）：circle → PushClipPath 折线（起点 0°、
+        // 逆时针、首点 = 右极点）；段数随长半轴自适应
+        // clamp(ceil(2πr/3), 16, 256)——r=20→42、r=2→16（下限）、
+        // r=200→256（上限）。
         let (tree, id, style) = setup("clip-path: circle(20px at 50% 50%)", None);
         let out = run(&tree, id, style, &HashMap::new());
         assert_eq!(out.ops.len(), 2, "{:?}", out.ops);
         match &out.ops[0] {
             PaintOp::PushClipPath { points, nonzero } => {
-                assert_eq!(points.len(), 64);
+                assert_eq!(points.len(), 42, "r=20 → ceil(2π·20/3)=42");
                 assert!(*nonzero, "圆 = nonzero");
                 // 盒 (10,20,100,50) → 心 (60,45)；首点 = 右极点 (80,45)
                 assert!(
@@ -3532,6 +3931,24 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(&out.ops[1], PaintOp::PopClip));
+        // 段数下限：小圆 r=2 → ceil(2π·2/3)=5 → clamp 16。
+        let (tree, id, style) = setup("clip-path: circle(2px at 50% 50%)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        match &out.ops[0] {
+            PaintOp::PushClipPath { points, .. } => {
+                assert_eq!(points.len(), 16, "小圆触及段数下限");
+            }
+            other => panic!("{other:?}"),
+        }
+        // 段数上限：大圆 r=200 → ceil(2π·200/3)=419 → clamp 256。
+        let (tree, id, style) = setup("clip-path: circle(200px at 50% 50%)", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        match &out.ops[0] {
+            PaintOp::PushClipPath { points, .. } => {
+                assert_eq!(points.len(), 256, "大圆触及段数上限");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -3620,7 +4037,7 @@ mod tests {
         assert_eq!(out.ops.len(), 4, "{:?}", out.ops);
         assert!(matches!(
             &out.ops[0],
-            PaintOp::PushClipPath { points, .. } if points.len() == 64
+            PaintOp::PushClipPath { points, .. } if points.len() == 21
         ));
         match &out.ops[1] {
             PaintOp::PushClip {
@@ -3637,6 +4054,235 @@ mod tests {
         }
         assert!(matches!(&out.ops[2], PaintOp::PopClip));
         assert!(matches!(&out.ops[3], PaintOp::PopClip));
+    }
+
+    #[test]
+    fn hit_rect_carries_transform_mat() {
+        // P4 D4：变换节点的 HitRect.mat = 登记时活跃仿射（rotate90 ≠ 恒等）。
+        let (tree, id, style) = setup("transform: rotate(90deg)", None);
+        let mut styles = HashMap::new();
+        styles.insert(id, style);
+        let mut layout = HashMap::new();
+        layout.insert(id, (100.0, 0.0, 50.0, 100.0));
+        let cell = std::cell::RefCell::new(HitCollector::default());
+        let ctx = PaintCtx {
+            tree: &tree,
+            styles: &styles,
+            layout: &layout,
+            scroll: &HashMap::new(),
+            env: &MediaEnv::default(),
+            spans: &HashMap::new(),
+            wrap_widths: &HashMap::new(),
+            text_overrides: &HashMap::new(),
+            hit: Some(&cell),
+            images: &HashMap::new(),
+            column_rules: &HashMap::new(),
+        };
+        let mut out = DisplayList::default();
+        build_display_list(&ctx, id, 1, &mut out);
+        let rects = cell.into_inner().rects;
+        assert_eq!(rects.len(), 1);
+        // rotate(90deg) 绕盒心 (125,50)：[0,1,−1,0,175,−75]（cos90≈0、
+        // sin90≈1；T(o)·M·T(−o) 平移分量）。
+        let m = rects[0].mat;
+        assert!(
+            m[0].abs() < 1e-5 && (m[1] - 1.0).abs() < 1e-5,
+            "a/b 应 0/1：{m:?}"
+        );
+        assert!(
+            (m[2] + 1.0).abs() < 1e-5 && m[3].abs() < 1e-5,
+            "c/d 应 −1/0：{m:?}"
+        );
+        assert!(
+            (m[4] - 175.0).abs() < 1e-3 && (m[5] + 75.0).abs() < 1e-3,
+            "平移：{m:?}"
+        );
+    }
+
+    // ===== P4（ADR-0037）：D1 拆段 / D2 round/space / D6 自适应段数 =====
+
+    /// 收集 DisplayList 中的 FillRect 序列。
+    fn fill_rects(out: &DisplayList) -> Vec<(f32, f32, f32, f32)> {
+        out.ops
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dashed_border_segments_display_list() {
+        // P4 D1：border-top dashed 4px 直角框 → 8 段 FillRect（段 8px、
+        // 间隔 4px、首段对齐、末段不足不画），无 Border op。
+        let (tree, id, style) = setup("border-top: 4px dashed black", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        assert!(
+            !out.ops
+                .iter()
+                .any(|op| matches!(op, PaintOp::Border { .. })),
+            "dashed 不再发 Border op"
+        );
+        let segs: Vec<_> = fill_rects(&out)
+            .into_iter()
+            .filter(|&(_, y, _, h)| y == 20.0 && h == 4.0)
+            .collect();
+        assert_eq!(segs.len(), 8, "段起点 0,12,…,84（{segs:?}）");
+        for (k, &(x, y, w, h)) in segs.iter().enumerate() {
+            assert_eq!((x, y, w, h), (10.0 + 12.0 * k as f32, 20.0, 8.0, 4.0));
+        }
+    }
+
+    #[test]
+    fn dotted_border_circles_display_list() {
+        // P4 D1：dotted 4px → 圆点直径 4、中心距 8、首点覆盖起点：13 点。
+        let (tree, id, style) = setup("border-top: 4px dotted black", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        let segs: Vec<_> = fill_rects(&out)
+            .into_iter()
+            .filter(|&(_, y, w, h)| y == 20.0 && h == 4.0 && w == 4.0)
+            .collect();
+        assert_eq!(segs.len(), 13, "中心 12,20,…,108 → 覆盖 [10,110]");
+        assert_eq!(segs[0].0, 10.0, "首点圆左缘 = 线起点");
+        let last = segs.last().unwrap();
+        assert!((last.0 + 4.0 - 110.0).abs() < 1e-4, "末点圆右缘 ≤ 线终点");
+    }
+
+    #[test]
+    fn dashed_border_radius_falls_back_to_solid() {
+        // P4 D1：dashed + 圆角 → 弧上虚线 B 级，整框退 Solid 单 Border op。
+        let (tree, id, style) = setup("border: 4px dashed black; border-radius: 10px", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        let borders: Vec<_> = out
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::Border { sides, .. } => Some(sides.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(borders.len(), 1);
+        assert!(
+            borders[0].iter().all(|s| s.style == BorderStyle::Solid),
+            "dashed 全部退 Solid"
+        );
+        assert!(fill_rects(&out).is_empty(), "无拆段 FillRect");
+    }
+
+    #[test]
+    fn outline_dashed_segments_benefit() {
+        // P4 D1：outline 通道共用拆段——外扩 3px 的 dashed 3px outline
+        // → 顶带 12 段（len=106、段 6、步进 9）。
+        let (tree, id, style) = setup("outline: 3px dashed black", None);
+        let out = run(&tree, id, style, &HashMap::new());
+        let top_segs: Vec<_> = fill_rects(&out)
+            .into_iter()
+            .filter(|&(_, y, _, h)| y == 17.0 && h == 3.0)
+            .collect();
+        assert_eq!(top_segs.len(), 12, "p=0,9,…,99（{top_segs:?}）");
+        assert_eq!(top_segs[0], (7.0, 17.0, 6.0, 3.0));
+    }
+
+    #[test]
+    fn tile_axis_space_round_positions() {
+        // P4 D2：tile_axis_positions 直测。
+        use TileAxis::{None as TA, Repeat, Round, Space};
+        // Space：定位区 100、tile 30 → 3 片 gap 5。
+        assert_eq!(
+            tile_axis_positions(Space, 5.0, 30.0, 10.0, 100.0, 0.0, 100.0),
+            vec![(0.0, 30.0), (35.0, 30.0), (70.0, 30.0)]
+        );
+        // Space 单片：n=1 → 定位区单片（position 生效）。
+        assert_eq!(
+            tile_axis_positions(Space, 5.0, 60.0, 10.0, 100.0, 0.0, 100.0),
+            vec![(0.0, 60.0)]
+        );
+        // Round：n=round(100/30)=3 → ts=100/3，锚定定位区、铺满窗口。
+        let rp = tile_axis_positions(Round, 5.0, 30.0, 10.0, 100.0, 0.0, 100.0);
+        assert_eq!(rp.len(), 3);
+        assert_eq!(rp[0].0, 0.0);
+        assert!((rp[0].1 - 100.0 / 3.0).abs() < 1e-4);
+        assert!(
+            (rp[2].0 + rp[2].1 - 100.0).abs() < 1e-4,
+            "末片右缘 = 定位区终点"
+        );
+        // Repeat：窗口对齐步进（origin=5 → 首片 −25）。
+        assert_eq!(
+            tile_axis_positions(Repeat, 5.0, 30.0, 0.0, 100.0, 0.0, 100.0)
+                .iter()
+                .map(|&(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![-25.0, 5.0, 35.0, 65.0, 95.0]
+        );
+        // None：单 tile 原样。
+        assert_eq!(
+            tile_axis_positions(TA, 5.0, 30.0, 0.0, 100.0, 0.0, 100.0),
+            vec![(5.0, 30.0)]
+        );
+    }
+
+    #[test]
+    fn background_round_stretches_tiles() {
+        // P4 D2 端到端：background-size 30px + repeat round → 3 片各宽
+        // 100/3（定位失效锚定定位区）。
+        let (tree, id, style) = setup(
+            "background-image: linear-gradient(red, blue);
+             background-repeat: round;
+             background-size: 30px 30px;",
+            None,
+        );
+        let out = run(&tree, id, style, &HashMap::new());
+        // 双轴 round：x 3 片各宽 100/3；y 2 片各高 25（round(50/30)=2）。
+        let grads: Vec<(f32, f32, f32, f32)> = out
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::Gradient {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(grads.len(), 6, "{grads:?}");
+        for &(x, _, w, _) in &grads {
+            assert!((w - 100.0 / 3.0).abs() < 1e-3);
+            let k = ((x - 10.0) / (100.0 / 3.0)).round();
+            assert!((x - (10.0 + k * 100.0 / 3.0)).abs() < 1e-3, "{grads:?}");
+        }
+        let ys: Vec<f32> = grads.iter().map(|&(_, y, _, _)| y).collect();
+        assert!(ys.contains(&20.0) && ys.contains(&45.0), "{grads:?}");
+    }
+
+    #[test]
+    fn background_space_even_gaps() {
+        // P4 D2 端到端：repeat space → 3 片各宽 30、gap 5。
+        let (tree, id, style) = setup(
+            "background-image: linear-gradient(red, blue);
+             background-repeat: space;
+             background-size: 30px 30px;",
+            None,
+        );
+        let out = run(&tree, id, style, &HashMap::new());
+        let grads: Vec<f32> = out
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::Gradient { x, width, .. } if *width == 30.0 => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(grads, vec![10.0, 45.0, 80.0], "{grads:?}");
     }
 
     // ===== F3d（ADR-0026）：border-image 九片 + 渐变绝对几何 =====

@@ -2152,14 +2152,26 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// 命中测试（F3a，ADR-0023）：点 → 最顶可命中节点（绘制序逆序；
     /// 祖先 clip 链全含判定；visibility/display:none 与 pointer-events:
     /// none 天然排除）。无帧数据或未命中 → None。
+    /// P4 D4（ADR-0037）精确化：查询点先经命中单元登记时活跃仿射的逆
+    /// 变换到节点局部系再测盒（transform 节点命中随变换走）；clip 链
+    /// 改精确形状（矩形含逐角圆角 / clip-path 折线，各自逆矩阵映射）。
     pub fn hit_test(&self, x: f32, y: f32) -> Option<crate::paint::HitTestHit> {
         for r in self.hit_rects.iter().rev() {
-            if x < r.x || y < r.y || x > r.x + r.w || y > r.y + r.h {
+            // 变换节点：视口点 → 局部点（登记时 mat 的逆；奇异→恒等回退）。
+            let (lx, ly) = if r.mat == [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] {
+                (x, y)
+            } else {
+                match crate::paint::invert_affine(&r.mat) {
+                    Some(inv) => crate::paint::apply_affine(&inv, x, y),
+                    None => (x, y),
+                }
+            };
+            if lx < r.x || ly < r.y || lx > r.x + r.w || ly > r.y + r.h {
                 continue;
             }
             if r.clips
                 .iter()
-                .any(|c| x < c[0] || y < c[1] || x > c[0] + c[2] || y > c[1] + c[3])
+                .any(|c| !crate::paint::hit_clip_contains(c, x, y))
             {
                 continue;
             }

@@ -74,7 +74,9 @@ fn outline_longhands_and_negative_offset() {
 }
 
 /// 根 100×100，outline: solid 2px red，offset 4px → 恰一个 Border op：
-/// x=-6/y=-6/112×112（d=offset+width=6），四边 width 2 Solid，radius 全 6。
+/// x=-6/y=-6/112×112（d=offset+width=6），四边 width 2 Solid；方角盒
+/// 外扩保持方角（P4 D1：radius 沿源盒 +d 只对真圆角，方角 outline 不
+/// 会被外扩改成圆角——浏览器 outline 沿 border-radius 外扩语义）。
 #[test]
 fn outline_op_geometry_expanded_rect() {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
@@ -110,8 +112,8 @@ fn outline_op_geometry_expanded_rect() {
     };
     assert_eq!((*x, *y, *width, *height), (-6.0, -6.0, 112.0, 112.0));
     assert!(
-        radius.iter().all(|r| (*r - 6.0).abs() < 1e-4),
-        "radius 全 6（+d），实际 {radius:?}"
+        radius.iter().all(|r| r.abs() < 1e-4),
+        "方角盒 outline 保持方角（radius 全 0），实际 {radius:?}"
     );
     let want = BorderSide {
         width: 2.0,
@@ -121,6 +123,33 @@ fn outline_op_geometry_expanded_rect() {
     for side in sides {
         assert_eq!(*side, want);
     }
+}
+
+/// 圆角盒（radius 10px）outline: solid 2px offset 4px → radius 沿源盒
+/// +d=6 增长（10→16）——外扩轮廓与圆角轮廓同心（P4 D1 保留语义）。
+#[test]
+fn outline_rounded_grows_radius() {
+    let mut engine: StyleEngine<u64> = StyleEngine::new();
+    engine.set_stylesheet(
+        "#root { width: 100px; height: 100px; border-radius: 10px; \
+         outline: solid 2px red; outline-offset: 4px; }",
+    );
+    let mut root = StyleNode::default();
+    root.id = Some("root".to_string());
+    engine.insert(None, 1, root).unwrap();
+    let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
+    let Some(PaintOp::Border { radius, .. }) = frame
+        .paint
+        .ops
+        .iter()
+        .find(|op| matches!(op, PaintOp::Border { .. }))
+    else {
+        panic!("圆角 outline 应有 Border op");
+    };
+    assert!(
+        radius.iter().all(|r| (*r - 16.0).abs() < 1e-4),
+        "radius 全 16（10+d），实际 {radius:?}"
+    );
 }
 
 fn peniko_color_red() -> style_engine::AlphaColor<style_engine::Srgb> {

@@ -1768,3 +1768,67 @@ opacity(filter(子树))、D5 纯 opacity 链直映超集）。
 **测试（+8，全量 559 绿）**：decl.rs::vertical_align_parse_family（全值族 12 例含 % 存小数/负值/em + 拒绝 4 例）；text.rs::measure_with_baseline_first_run_ascent（空 (0,0,0)/0<b<h/32px≈2×16px 线性）；engine.rs 行为锁六件——vertical_align_no_decl_bitwise_v1（无声明 vs 显式 baseline 三节点几何逐位一致）、length_offset（va:10px 40px 无文本盒 dy=−10 精确）、super_sub_shifts（±5.44px + 行盒扩展 24.44 进容器高）、middle_between_super_and_baseline（方向序）、box_baseline_from_text（盒基线=子文本基线 pb≈15 而非盒高 60——若误用盒高则 L=60、a.y=45 区分）、top_bottom_alignment（top 装箱即位/bottom 二遍 60−40=20）。教训：测试样式表 div { display: inline; } 通配把容器 p 也 inline 化 → 行运行收集失效、块流堆叠假象——inline 声明须逐类限定。
 
 **收口**：clippy lib 清零（map(|s| s.clone()) → .cloned() 两处）；rustfmt 仅本批 7 文件（css/property.rs、css/value.rs、css/decl.rs、css/fontprobe.rs、computed.rs、text.rs、engine.rs）；ADR-0034 落地记录+六条实施偏差写回；CHANGELOG P3 条；FEATURES F1 条追注+新条 vertical-align 基线对齐+布局映射偏差核对条头补注。
+
+## P4 批：绘制 B 级收敛（ADR-0037，commit 待填）
+
+范围：D1 dashed/dotted 边框拆段、D2 bg-repeat round/space 轴精确化、
+D3 wavy 真波形装饰、D4 clip-path 命中精确化、D5 outline auto 注释、
+D6 clip 圆段数自适应；附带头发现的 border-top/right/bottom/left 四向
+简写补齐。测试 559→572（core lib 229→237、css_hit_test 3→5、outline
+6→7、soft 40→42）；clippy lib 三 crate 零警告；rustfmt 本批 8 文件。
+
+### 落码
+
+- paint.rs：mit_borders+mit_side_band（visible 早退/fancy 判定/
+  圆角退 Solid/直角四边带拆段——Dashed 2t-3t、Dotted 圆点近似）；
+  TileAxis 枚举+	ile_axis_positions（None/Repeat 窗口对齐/Space
+  gap 均布/Round ts=area/n 恰铺满不出界）；HitClip 枚举+HitRect.mat+
+  HitCollector.mat 复合恢复（PushTransform/PopTransform 发射点）+
+  invert_affine/apply_affine/rounded_rect_contains/poly_contains/
+  hit_clip_contains；ellipse_points 自适应三常量；outline 发射点改道
+  emit_borders+直角盒 o_radius 保持全零。
+- decl.rs/property.rs：order_shorthand_parts（三部件任意序贪心）+
+  shorthand_exists/shorthand_longhands/expand_shorthand 四向注册。
+- soft lib.rs：text_device_polys 装饰段 TextDecoStyleKind 全家族折线
+  分派（Solid/Double/Dashed/Dotted 16 段圆环/Wavy 波带闭环）。
+- vello lib.rs：fill_deco_rect/fill_deco_wavy 模块级 fn（闭包双借
+  &mut scene 教训）。
+- engine.rs：hit_test 逆变换+hit_clip_contains 精确判定。
+- 测试：paint.rs 七件（fill_rects 辅助）+hit_rect_carries_transform_mat、
+  css_hit_test.rs 两件（clip 圆外穿透/transform 旋转盒）、outline.rs
+  重基线+圆角增长锁、soft 两件（wavy 纵跨/double 列扫段数）、serde
+  clip_path 段数 64→63。
+
+### 修复链与教训
+
+1. emit_borders 首版漏 visible 早退 → 全无边框节点也发 Border op →
+   21 个 op 序测试错位（补 visible 判定）。
+2. **HitCollector derive Default 的 mat 全零陷阱**——mul_affine(全零,affine)
+   =全零，hit_test 逆变换后恒 (0,0)（rotate 测试命中错位）；手写 impl
+   Default 恒等阵。derive(Default) 对「零值≠恒等值」字段不可用。
+3. RefCell 同语句 borrow()+borrow_mut() panic（PopTransform 恢复段）——
+   先 borrow_mut 出局部再操作。
+4. 四向简写缺口由 D1 测试暴露（border-top 被容错丢弃→拆段无输出）——
+   简写家族逐一清点（border/margin/padding/overflow/columns/flex/
+   grid-gap/outline/background/text-decoration/text-shadow/inset），
+   恰缺四向。
+5. outline 直角盒外扩 radius +d 会把方角 outline 变圆角（原实现）——
+   改为方角保持方角/圆角 radius=源+d；outline.rs 重基线两件。
+6. 装饰线像素测试不可用 ink_bbox（字形墨迹主导）——decoration_double_
+   is_two_bands 用基线附近窗口按列扫描墨迹段数（t=6、亮度阈值 216 容纳
+   半覆盖行、baseline=12+round(asc)=15、underline cy=baseline+desc/2
+   =29（round(desc·16)=4 非 5——手算先验证再断言）。
+7. DisplayList 测试构造用 default()+ops.push（struct 字面量缺
+   generation 字段）。
+8. Some(*sides) E0508（BorderSide 非 Copy）→ sides.clone()；
+   Option<[f32;6]> 值载荷传 &参数 E0631 → .and_then(|a| invert(&a))。
+
+### 偏差登记
+
+-【B】Dotted 边框圆点方形近似（装饰线通道已有真圆环，边框通道
+  FillRect）。
+-【B】圆角框花式线型退 Solid（弧上虚线分段未做）。
+-【B】Wavy 为折线直线段（每周期 8 段）非贝塞尔——soft/vello 同构
+  保像素一致。
+-【A】四向简写补齐为附带收口（非 ADR-0037 决策原文），语义=
+  css-backgrounds-3 §4.1。

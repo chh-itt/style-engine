@@ -1870,9 +1870,9 @@ pub enum BorderStyle {
     None,
     /// solid — 实线。
     Solid,
-    /// dashed — 虚线（v1 近似实线，B 级偏差）。
+    /// dashed — 虚线（P4 D1：直角框拆段精确，圆角框退 Solid B 级）。
     Dashed,
-    /// dotted — 点线（v1 近似实线，B 级偏差）。
+    /// dotted — 点线（P4 D1：直角框拆段精确，圆角框退 Solid B 级）。
     Dotted,
 }
 

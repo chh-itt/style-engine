@@ -34,7 +34,7 @@ pub mod filter;
 mod ttf;
 
 use style_engine::css::property::{
-    BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind,
+    BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind, TextDecoStyleKind,
 };
 use style_engine::css::value::{ColorValue, LengthPercentage};
 use style_engine::paint::{ConicGeom, FilterEffect, RadialGeom};
@@ -1910,10 +1910,13 @@ fn text_device_polys(
             pen += ws;
         }
     }
-    // F2（ADR-0022 D4）：装饰线（软栅格=矩形多边形填充；单行语义——
-    // 软 sink 不折行（记录边界），行几何=asc/desc 基线系；线位与 vello
-    // 同式：underline=baseline+desc*0.5、overline=baseline−asc*0.9、
-    // line-through=baseline−asc*0.5，B 级近似在案）。
+    // F2（ADR-0022 D4）：装饰线（单行语义——软 sink 不折行（记录边界），
+    // 行几何=asc/desc 基线系；线位与 vello 同式：underline=baseline+
+    // desc*0.5、overline=baseline−asc*0.9、line-through=baseline−asc*0.5，
+    // B 级近似在案）。P4 D3（ADR-0037）：style 分派——Solid 整带 /
+    // Double 双半厚带 / Dashed 2t-t 段（末段不足不画）/ Dotted t 直径圆点
+    // 折线（中心距 2t）/ Wavy 真波形带（周期 6t、振幅 2t、每周期 8 段、
+    // 带厚沿波平移），全部折线承载、mat 设备化。
     if !decorations.is_empty() {
         let end_x = pen; // 字形循环后 pen=总 advance 终点
         for d in decorations {
@@ -1927,13 +1930,82 @@ fn text_device_polys(
                 if !on {
                     continue;
                 }
-                let rect = vec![
-                    mat.apply(x, cy - t * 0.5),
-                    mat.apply(end_x, cy - t * 0.5),
-                    mat.apply(end_x, cy + t * 0.5),
-                    mat.apply(x, cy + t * 0.5),
-                ];
-                deco_groups.push((d.color.components, rect));
+                let band = |off: f32, seg: f32, groups: &mut Vec<_>| {
+                    groups.push((
+                        d.color.components,
+                        vec![
+                            mat.apply(x, cy + off),
+                            mat.apply(end_x, cy + off),
+                            mat.apply(end_x, cy + off + seg),
+                            mat.apply(x, cy + off + seg),
+                        ],
+                    ));
+                };
+                match d.style {
+                    TextDecoStyleKind::Solid => band(-t * 0.5, t, &mut deco_groups),
+                    TextDecoStyleKind::Double => {
+                        // 双线：各半厚带于 cy±0.75t（总高 1.5t）。
+                        band(-t * 0.75, t * 0.5, &mut deco_groups);
+                        band(t * 0.25, t * 0.5, &mut deco_groups);
+                    }
+                    TextDecoStyleKind::Dashed => {
+                        // 段 2t、间隔 t、首段对齐起点、末段不足不画。
+                        let (seg, step) = (2.0 * t, 3.0 * t);
+                        let mut p = 0.0;
+                        while p + seg <= end_x - x {
+                            deco_groups.push((
+                                d.color.components,
+                                vec![
+                                    mat.apply(x + p, cy - t * 0.5),
+                                    mat.apply(x + p + seg, cy - t * 0.5),
+                                    mat.apply(x + p + seg, cy + t * 0.5),
+                                    mat.apply(x + p, cy + t * 0.5),
+                                ],
+                            ));
+                            p += step;
+                        }
+                    }
+                    TextDecoStyleKind::Dotted => {
+                        // 圆点直径 t（16 段圆折线）、中心间距 2t、首点圆
+                        // 覆盖起点。
+                        let r = t / 2.0;
+                        let mut c = r;
+                        while c + r <= end_x - x {
+                            let mut ring = Vec::with_capacity(17);
+                            for i in 0..16 {
+                                let a = std::f32::consts::TAU * (i as f32) / 16.0;
+                                ring.push(mat.apply(x + c + r * a.cos(), cy + r * a.sin()));
+                            }
+                            deco_groups.push((d.color.components, ring));
+                            c += 2.0 * t;
+                        }
+                    }
+                    TextDecoStyleKind::Wavy => {
+                        // 波带闭环：上缘沿 sin 去程 + 下缘平移 t 回程；
+                        // 周期 6t、振幅 2t（峰谷差 4t）、每周期 8 段。
+                        let period = 6.0 * t;
+                        let amp = 2.0 * t;
+                        let seg_len = period / 8.0;
+                        let mut top = Vec::new();
+                        let mut u = 0.0;
+                        while u < end_x - x {
+                            top.push(u);
+                            u += seg_len;
+                        }
+                        top.push(end_x - x);
+                        let mut ring = Vec::with_capacity(top.len() * 2);
+                        for &u in &top {
+                            let oy = amp * (std::f32::consts::TAU * u / period).sin();
+                            ring.push(mat.apply(x + u, cy + oy - t * 0.5));
+                        }
+                        for &u in top.iter().rev() {
+                            let oy = amp * (std::f32::consts::TAU * u / period).sin();
+                            ring.push(mat.apply(x + u, cy + oy + t * 0.5));
+                        }
+                        deco_groups.push((d.color.components, ring));
+                    }
+                    _ => band(-t * 0.5, t, &mut deco_groups),
+                }
             }
         }
     }
@@ -2137,6 +2209,103 @@ mod tests {
     }
 
     // ===== P1c：真 blur =====
+
+    /// 文本 op 带单条装饰线（P4 D3 测试用；t=厚度）。
+    fn op_text_deco_t(
+        style_kind: style_engine::css::property::TextDecoStyleKind,
+        t: f32,
+    ) -> PaintOp {
+        let mut op = op_text(10.0, 12.0, "abcdef");
+        if let PaintOp::Text { decorations, .. } = &mut op {
+            decorations.push(style_engine::paint::TextDecorationPaint {
+                line: 1,
+                style: style_kind,
+                color: rgba([0.0, 0.0, 0.0, 1.0]),
+                thickness_px: t,
+            });
+        }
+        op
+    }
+
+    /// 文本 op 带单条装饰线（默认厚度 2px）。
+    fn op_text_deco(style_kind: style_engine::css::property::TextDecoStyleKind) -> PaintOp {
+        op_text_deco_t(style_kind, 2.0)
+    }
+
+    #[test]
+    fn decoration_wavy_spans_taller_than_solid() {
+        // P4 D3（ADR-0037）：wavy 真波形折线——波带墨迹纵跨显著大于
+        // 同厚 Solid 带（amp=2t、带厚 t → 波动范围 ≈ 2·amp+t = 5t vs t）。
+        use style_engine::css::property::TextDecoStyleKind;
+        let bank = font_bank();
+        let mut solid_list = DisplayList::default();
+        solid_list.ops.push(op_text_deco(TextDecoStyleKind::Solid));
+        let solid = render_with_fonts(&solid_list, 80, 40, [255, 255, 255, 255], &bank);
+        let mut wavy_list = DisplayList::default();
+        wavy_list.ops.push(op_text_deco(TextDecoStyleKind::Wavy));
+        let wavy = render_with_fonts(&wavy_list, 80, 40, [255, 255, 255, 255], &bank);
+        let Some((_, sy0, _, sy1)) = ink_bbox(&solid) else {
+            panic!("solid 装饰应有墨迹");
+        };
+        let Some((_, wy0, _, wy1)) = ink_bbox(&wavy) else {
+            panic!("wavy 装饰应有墨迹");
+        };
+        let solid_h = sy1.saturating_sub(sy0);
+        let wavy_h = wy1.saturating_sub(wy0);
+        // "abcdef" 无降部 → solid 带底=墨迹底；wavy 波谷（cy+amp+t/2）
+        // 伸到 solid 带底之下 → 纵跨增大。
+        assert!(
+            wy1 > sy1 + 1,
+            "wavy 波谷应低于 solid 带底（{wavy_h} vs {solid_h}）"
+        );
+        assert!(
+            wavy_h > solid_h,
+            "wavy 纵跨 {wavy_h} 应大于 solid {solid_h}"
+        );
+    }
+
+    #[test]
+    fn decoration_double_is_two_bands() {
+        // P4 D3：double = 两半厚带（cy±0.75t，各 0.5t、中间 gap 1t）——
+        // 基线附近窗口内沿列扫描，double 的墨迹分裂为两段、solid 连续
+        // 一段。t=6 保证带/gap 远大于子行粒度；字形墨迹在 y≤27（基线），
+        // 与带 1（24.5..27.5）融合计入段 1，不影响段数判定。
+        // 实测几何：baseline=27、underline cy=baseline+desc/2=29（DejaVu
+        // round(desc·16)=4）。
+        use style_engine::css::property::TextDecoStyleKind;
+        let bank = font_bank();
+        let ink_segments = |c: &SoftCanvas, x: u32| -> usize {
+            // 窗口 = 基线−2 .. 基线+7；亮度 <216（alpha>0.15）记墨。
+            let rows: Vec<bool> = (25..34)
+                .map(|y| {
+                    let p = pixel(c, x, y);
+                    (p[0] as u32 + p[1] as u32 + p[2] as u32) < 3 * 216
+                })
+                .collect();
+            let mut segs = 0;
+            for i in 0..rows.len() {
+                if rows[i] && (i == 0 || !rows[i - 1]) {
+                    segs += 1;
+                }
+            }
+            segs
+        };
+        let mut solid_list = DisplayList::default();
+        solid_list
+            .ops
+            .push(op_text_deco_t(TextDecoStyleKind::Solid, 6.0));
+        let solid = render_with_fonts(&solid_list, 80, 40, [255, 255, 255, 255], &bank);
+        let mut double_list = DisplayList::default();
+        double_list
+            .ops
+            .push(op_text_deco_t(TextDecoStyleKind::Double, 6.0));
+        let double = render_with_fonts(&double_list, 80, 40, [255, 255, 255, 255], &bank);
+        // 列 x=30（字形中部）。
+        let s = ink_segments(&solid, 30);
+        let d = ink_segments(&double, 30);
+        assert_eq!(s, 1, "solid 单带应为一段（实测 {s}）");
+        assert_eq!(d, 2, "double 双带应为两段（实测 {d}）");
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn op_shadow(
@@ -2912,7 +3081,6 @@ mod tests {
     #[test]
     fn blend_modes_pixel_exact() {
         // P1-2：可分离/加法族手算精确值（css-compositing-1 §4；8bit 直排）。
-        let red = [1.0, 0.0, 0.0, 1.0];
         let blue = [0.0, 0.0, 1.0, 1.0];
         let white = [255, 255, 255, 255];
         // multiply：cb·cs 逐通道 → 红底蓝源 = 乘黑 (0,0,0)

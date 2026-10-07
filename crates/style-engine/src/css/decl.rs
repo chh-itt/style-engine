@@ -465,6 +465,11 @@ fn shorthand_exists(name: &str) -> bool {
             | "border-style"
             | "border-color"
             | "border"
+            // P4（ADR-0037）：四向边框简写（<width> || <style> || <color>）
+            | "border-top"
+            | "border-right"
+            | "border-bottom"
+            | "border-left"
             | "flex"
             | "flex-flow"
             | "container"
@@ -559,6 +564,19 @@ pub(crate) fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
             P::BorderLeftStyle,
             P::BorderLeftColor,
         ],
+        // P4（ADR-0037）：四向边框简写 → 该向三长手
+        "border-top" => vec![P::BorderTopWidth, P::BorderTopStyle, P::BorderTopColor],
+        "border-right" => vec![
+            P::BorderRightWidth,
+            P::BorderRightStyle,
+            P::BorderRightColor,
+        ],
+        "border-bottom" => vec![
+            P::BorderBottomWidth,
+            P::BorderBottomStyle,
+            P::BorderBottomColor,
+        ],
+        "border-left" => vec![P::BorderLeftWidth, P::BorderLeftStyle, P::BorderLeftColor],
         "flex" => vec![P::FlexGrow, P::FlexShrink, P::FlexBasis],
         "flex-flow" => vec![P::FlexDirection, P::FlexWrap],
         "container" => vec![P::ContainerName, P::ContainerType],
@@ -705,6 +723,41 @@ fn expect_slash(p: &mut Parser<'_>) -> ValResult<()> {
         Ok(Token::Delim(d)) if *d == '/' => Ok(()),
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+/// 边框简写部件（`border` 与四向 `border-top` 等，P4 ADR-0037）：
+/// `<'border-width'> || <'border-style'> || <'border-color'>` 任意顺序
+/// 贪心，缺省部件回初始——width medium、style none、color currentcolor
+/// （css-backgrounds-3 §4.1）。
+fn border_shorthand_parts(p: &mut Parser<'_>) -> ValResult<(DeclValue, DeclValue, DeclValue)> {
+    let mut width: Option<DeclValue> = None;
+    let mut style: Option<DeclValue> = None;
+    let mut color: Option<DeclValue> = None;
+    loop {
+        if width.is_none()
+            && let Ok(v) = p.try_parse(parse_border_width)
+        {
+            width = Some(v);
+            continue;
+        }
+        if style.is_none()
+            && let Ok(v) = p.try_parse(parse_border_style)
+        {
+            style = Some(v);
+            continue;
+        }
+        if color.is_none()
+            && let Ok(v) = p.try_parse(parse_color)
+        {
+            color = Some(v);
+            continue;
+        }
+        break;
+    }
+    let width = width.unwrap_or_else(|| DeclValue::BorderWidth(Some(LengthPercentage::Px(3.0))));
+    let style = style.unwrap_or(DeclValue::BorderStyle(BorderStyle::None));
+    let color = color.unwrap_or(DeclValue::Color(ColorValue::CurrentColor));
+    Ok((width, style, color))
 }
 
 /// 简写展开。名字非简写 → Ok(None)；文法错误 → Err（上层容错丢弃）。
@@ -1741,34 +1794,7 @@ pub(crate) fn expand_shorthand(
         }
         "border" => {
             // <width> || <style> || <color>（任意顺序、可缺省）
-            let mut width: Option<DeclValue> = None;
-            let mut style: Option<DeclValue> = None;
-            let mut color: Option<DeclValue> = None;
-            loop {
-                if width.is_none()
-                    && let Ok(v) = p.try_parse(parse_border_width)
-                {
-                    width = Some(v);
-                    continue;
-                }
-                if style.is_none()
-                    && let Ok(v) = p.try_parse(parse_border_style)
-                {
-                    style = Some(v);
-                    continue;
-                }
-                if color.is_none()
-                    && let Ok(v) = p.try_parse(parse_color)
-                {
-                    color = Some(v);
-                    continue;
-                }
-                break;
-            }
-            let width =
-                width.unwrap_or_else(|| DeclValue::BorderWidth(Some(LengthPercentage::Px(3.0))));
-            let style = style.unwrap_or(DeclValue::BorderStyle(BorderStyle::None));
-            let color = color.unwrap_or(DeclValue::Color(ColorValue::CurrentColor));
+            let (width, style, color) = border_shorthand_parts(p)?;
             let mut out = Vec::with_capacity(12);
             for (w, s, c) in [
                 (P::BorderTopWidth, P::BorderTopStyle, P::BorderTopColor),
@@ -1789,6 +1815,28 @@ pub(crate) fn expand_shorthand(
                 out.push((c, color.clone()));
             }
             out
+        }
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            // P4（ADR-0037）：四向边框简写 <'border-top-width'> ||
+            // <'border-top-style'> || <'border-top-color'>（任意顺序、
+            // 可缺省；缺省 width medium、style none、color currentcolor，
+            // css-backgrounds-3 §4.1）。测试批暴露的属性面缺口。
+            let (width, style, color) = border_shorthand_parts(p)?;
+            let (w, s, c) = match name {
+                "border-top" => (P::BorderTopWidth, P::BorderTopStyle, P::BorderTopColor),
+                "border-right" => (
+                    P::BorderRightWidth,
+                    P::BorderRightStyle,
+                    P::BorderRightColor,
+                ),
+                "border-bottom" => (
+                    P::BorderBottomWidth,
+                    P::BorderBottomStyle,
+                    P::BorderBottomColor,
+                ),
+                _ => (P::BorderLeftWidth, P::BorderLeftStyle, P::BorderLeftColor),
+            };
+            vec![(w, width), (s, style), (c, color)]
         }
         "flex" => {
             // none | initial | auto | <grow> [ <shrink>? || <basis>? ]

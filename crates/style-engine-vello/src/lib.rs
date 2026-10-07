@@ -9,6 +9,7 @@
 //! - Shadow 无模糊（vello 0.10 无内置高斯模糊），以半透明矩形近似；
 //! - Text 基元跳过（字形 run 随 T5 落地后接入 vello 的 parley 绘制）。
 
+use style_engine::css::property::TextDecoStyleKind;
 use style_engine::css::value::ColorValue;
 use style_engine::paint::FilterEffect;
 use style_engine::{DisplayList, PaintOp};
@@ -622,29 +623,128 @@ impl VelloTextSystem {
                 if seen {
                     for d in decorations.iter() {
                         let t = d.thickness_px.max(0.5);
-                        let mut draw_line = |y: f32| {
-                            let r = vello::kurbo::Rect::new(
-                                f64::from(min_x),
-                                f64::from(y - t * 0.5),
-                                f64::from(max_x),
-                                f64::from(y + t * 0.5),
-                            );
-                            scene.fill(Fill::NonZero, run_transform, d.color, None, &r);
-                        };
+                        // P4 D3（ADR-0037）：Wavy 真波形带折线（周期 6t、
+                        // 振幅 2t、每周期 8 段）、Double 双半厚带；Solid/
+                        // Dotted/Dashed 维持矩形带（虚线 dash pattern 上游
+                        // stroke 语义 B 级在案）。
+                        let mut line_ys = Vec::new();
                         if d.line & 1 != 0 {
-                            draw_line(baseline + descent * 0.5);
+                            line_ys.push(baseline + descent * 0.5);
                         }
                         if d.line & 2 != 0 {
-                            draw_line(baseline - ascent * 0.9);
+                            line_ys.push(baseline - ascent * 0.9);
                         }
                         if d.line & 4 != 0 {
-                            draw_line(baseline - ascent * 0.5);
+                            line_ys.push(baseline - ascent * 0.5);
+                        }
+                        for cy in line_ys {
+                            match d.style {
+                                TextDecoStyleKind::Wavy => fill_deco_wavy(
+                                    scene,
+                                    d.color,
+                                    run_transform,
+                                    min_x,
+                                    max_x,
+                                    cy,
+                                    t,
+                                ),
+                                TextDecoStyleKind::Double => {
+                                    // 双线：各半厚带于 cy±0.75t（总高 1.5t）。
+                                    fill_deco_rect(
+                                        scene,
+                                        d.color,
+                                        run_transform,
+                                        min_x,
+                                        max_x,
+                                        cy - t * 0.75,
+                                        t * 0.25,
+                                    );
+                                    fill_deco_rect(
+                                        scene,
+                                        d.color,
+                                        run_transform,
+                                        min_x,
+                                        max_x,
+                                        cy + t * 0.25,
+                                        t * 0.25,
+                                    );
+                                }
+                                _ => fill_deco_rect(
+                                    scene,
+                                    d.color,
+                                    run_transform,
+                                    min_x,
+                                    max_x,
+                                    cy,
+                                    t * 0.5,
+                                ),
+                            }
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// 装饰线矩形带填充（P4 D3）：[x0,x1]×[y−half, y+half] 于变换 `tr` 下。
+fn fill_deco_rect(
+    scene: &mut Scene,
+    color: AlphaColor<Srgb>,
+    tr: Affine,
+    x0: f32,
+    x1: f32,
+    y: f32,
+    half: f32,
+) {
+    let r = vello::kurbo::Rect::new(
+        f64::from(x0),
+        f64::from(y - half),
+        f64::from(x1),
+        f64::from(y + half),
+    );
+    scene.fill(Fill::NonZero, tr, color, None, &r);
+}
+
+/// 装饰线波带填充（P4 D3）：周期 6t、振幅 2t、每周期 8 段、带厚沿波
+/// 平移；上缘 sin 去程 + 下缘平移 t 回程闭环。
+fn fill_deco_wavy(
+    scene: &mut Scene,
+    color: AlphaColor<Srgb>,
+    tr: Affine,
+    x0: f32,
+    x1: f32,
+    cy: f32,
+    t: f32,
+) {
+    let period = 6.0 * t;
+    let amp = 2.0 * t;
+    let seg = period / 8.0;
+    let len = x1 - x0;
+    let wavy_y = |u: f32| cy + amp * (std::f32::consts::TAU * u / period).sin();
+    let mut top: Vec<f32> = Vec::new();
+    let mut u = 0.0f32;
+    while u < len {
+        top.push(u);
+        u += seg;
+    }
+    top.push(len);
+    let mut path = BezPath::new();
+    path.move_to(Point::new(f64::from(x0), f64::from(wavy_y(0.0) - t * 0.5)));
+    for &u in &top {
+        path.line_to(Point::new(
+            f64::from(x0 + u),
+            f64::from(wavy_y(u) - t * 0.5),
+        ));
+    }
+    for &u in top.iter().rev() {
+        path.line_to(Point::new(
+            f64::from(x0 + u),
+            f64::from(wavy_y(u) + t * 0.5),
+        ));
+    }
+    path.close_path();
+    scene.fill(Fill::NonZero, tr, color, None, &path);
 }
 
 /// 构建独立场景。

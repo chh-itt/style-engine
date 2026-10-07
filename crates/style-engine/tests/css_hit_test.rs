@@ -68,6 +68,69 @@ fn hit_test_respects_overflow_clip() {
 }
 
 #[test]
+fn hit_test_clip_path_circle_precise() {
+    // P4 D4（ADR-0037）：clip-path 折线精确判定——盒内圆外不命中。
+    let mut e = engine_hit(
+        "#root { width: 200px; height: 200px; background: white; }
+         #c { position: absolute; left: 0; top: 0; width: 100px; height: 100px;
+              background: red; clip-path: circle(50px at 50% 50%); }",
+    );
+    e.insert(Some(1), 2, {
+        let mut n = StyleNode::default();
+        n.id = Some("c".to_string());
+        n
+    })
+    .unwrap();
+    let _ = e.frame((400.0, 400.0), 1.0, 0.0);
+    // 圆心：命中 #c。
+    assert_eq!(
+        e.hit_test(50.0, 50.0).unwrap().node_id,
+        e.node_id(&2).unwrap(),
+        "圆心命中"
+    );
+    // (5,5)：盒 [0..100]² 内、距心 √(45²+45²)≈63.6 > 50 → 圆外不命中 #c，
+    // 落到无 clip 的 root。
+    assert_eq!(
+        e.hit_test(5.0, 5.0).unwrap().node_id,
+        e.node_id(&1).unwrap(),
+        "clip-path 圆外穿透到下层"
+    );
+}
+
+#[test]
+fn hit_test_transformed_node() {
+    // P4 D4：命中随 transform 走——rotate(90deg) 后几何互换，原盒外点
+    // 命中、原盒内点不命中。
+    let mut e = engine_hit(
+        "#root { width: 200px; height: 200px; background: white; }
+         #t { position: absolute; left: 100px; top: 0; width: 50px; height: 100px;
+              background: red; transform: rotate(90deg); }",
+    );
+    e.insert(Some(1), 2, {
+        let mut n = StyleNode::default();
+        n.id = Some("t".to_string());
+        n
+    })
+    .unwrap();
+    let _ = e.frame((400.0, 400.0), 1.0, 0.0);
+    let nt = e.node_id(&2).unwrap();
+    let nroot = e.node_id(&1).unwrap();
+    // 盒 (100,0,50,100) 绕中心 (125,50) 转 90° → 覆盖 [75..175]×[25..75]。
+    // (160,50)：原盒外、变换后盒内 → 命中 #t。
+    assert_eq!(
+        e.hit_test(160.0, 50.0).unwrap().node_id,
+        nt,
+        "旋转后区域命中"
+    );
+    // (105,10)：原盒内、变换后盒外（y=10 < 25）→ 不命中 #t，落到 root。
+    assert_eq!(
+        e.hit_test(105.0, 10.0).unwrap().node_id,
+        nroot,
+        "旋转后原盒外区域不命中"
+    );
+}
+
+#[test]
 fn hit_test_skips_pointer_events_none() {
     let mut e = engine_hit(
         "#root { width: 200px; height: 200px; background: white; }

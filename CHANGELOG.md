@@ -776,6 +776,30 @@
   行为锁 6 项（无声明 vs baseline 逐位一致、length 精确 −10px、
   super/sub ±5.44px + 行盒扩展、middle 方向序、盒基线=子文本基线、
   top/bottom 对齐）。全量 **559** 测试绿（551→559）。
+- **绘制 B 级收敛批（P4 批，ADR-0037）**：六项绘制近似收敛——①
+  **dashed/dotted 边框拆段**（ADR-0037 D1）：`emit_borders` 直角框按边
+  拆 FillRect 序列（Dashed 段 2t 步进 3t 首对齐末段不足不画；Dotted
+  圆点直径 t 中心距 2t，方形近似 B 级），圆角框含花式线型整框退
+  Solid（弧上虚线 B 级），outline 通道复用自动受益；②**bg-repeat
+  round/space 轴精确化**（D2）：`TileAxis{None,Repeat,Space,Round}` 替代
+  bool——Space 均布 gap 首片锚定定位区起点（position 失效）、Round
+  整数片拉伸 ts=area/n 网格恰铺满、n≤1 退化单片（position 生效），
+  per-tile 渐变几何随 tile 尺寸；③**wavy 文本装饰真波形**（D3）：
+  soft/vello 同参折线闭环（周期 6t、振幅 2t、每周期 8 段、带厚沿波
+  平移），Double 双半厚带/Dashed 2t-3t 段/Dotted 圆环折线全家族落地；
+  ④**clip-path 命中精确化**（D4）：`HitClip`（Rect 圆角/Path 折线
+  nonzero-eo）+ HitRect 携带活跃仿射 mat 与 clip 逆阵——命中点先经
+  mat 逆变换测盒、clip 逐个经自身 inv 判定（圆外/凹角/变换后点
+  均精确）；⑤outline auto 语义注释升级（D5）；⑥**clip-path 圆/
+  椭圆段数自适应**（D6）：clamp(ceil(2πr/3),16,256) 替代固定 64
+  （小圆减 48 段、大圆升平滑，serde 锁随动 64→63）。**附带补齐
+  border-top/right/bottom/left 四向简写**（<'border-width'>||
+  <'border-style'>||<'border-color'> 任意序，缺省 medium/None/
+  currentcolor）——测试暴露的简写家族缺口收口。锁定测试 +13：
+  边框拆段×4（dashed 8 段/dotted 13 点/圆角退化/outline dashed 受益）、
+  repeat 几何×3（space gap/round 拉伸/直测五轴）、命中×2（clip 圆外
+  穿透/transform 旋转盒）、装饰像素×2（wavy 纵跨/double 双带列扫）、
+  自适应段数×1、四向简写×1。全量 **572** 测试绿（559→572）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）
