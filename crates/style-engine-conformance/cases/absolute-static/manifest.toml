@@ -1,0 +1,8 @@
+# 绝对定位静态位置（审计项 §10.3.7）：实测引擎侧已绿（taffy 静态位近似
+# 覆盖探针），转正为回归防线。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["position-absolute", "position-relative", "width", "height", "margin-single-side", "inset-single-side"]
+xfail = false
+tolerance = 0.5

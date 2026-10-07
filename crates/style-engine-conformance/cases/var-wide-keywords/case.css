@@ -1,0 +1,12 @@
+body { margin: 0; }
+/* var() 回退与宽关键字（CSS Variables §3 / CSS Cascade）：
+ * .vf 未定义变量 → px 回退 120px。
+ * .vg 变量 initial → guaranteed-invalid → 回退 250px（initial 对自定义
+ *     属性 = 失效，不是 unset 继承链）。
+ * .vi 变量 undefined → 回退宽关键字 inherit → ml 继承 host 的 30px
+ *     （宽关键字经 var() 回退通道；margin 探针可与 auto=0 区分，
+ *     block 宽度探针 auto 填满与 inherit 同值无法区分，已弃）。 */
+.host { --w: initial; width: 300px; margin-left: 30px; }
+.vf { width: var(--w, 120px); height: 20px; }
+.vg { width: var(--w, 250px); height: 20px; }
+.vi { margin-left: var(--undef, inherit); width: 50px; height: 20px; }

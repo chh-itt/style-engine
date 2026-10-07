@@ -1,0 +1,12 @@
+body { margin: 0; }
+/* 父子 margin 折叠（CSS 2.1 §8.3.1）三象限：
+ * .p0 无 padding/border：child mt 40 穿透父顶（p0 被推下、c.y=p0.y），
+ *   child mb 60 穿透父底（p0.h=40，p0 对外底 margin=60）。
+ * .p1 pt10/pb20：两侧均含住——c.y=p1.y+10，p1.h=10+40+60+20=130。
+ * .p2 仅 pb20：顶穿透、底含住——p2.h=40+60+20=120。
+ * 悬浮审计点：taffy 0.14 父子折叠不完整，需结算后处理修正。 */
+.outer { width: 400px; }
+.p0 { }
+.p1 { padding-top: 10px; padding-bottom: 20px; }
+.p2 { padding-bottom: 20px; }
+.c { height: 40px; margin-top: 40px; margin-bottom: 60px; }

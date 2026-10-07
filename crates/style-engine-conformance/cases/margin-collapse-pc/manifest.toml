@@ -1,0 +1,8 @@
+# 父子 margin 折叠三象限（穿透/双含/单含）：实测 taffy 0.14 全覆盖，
+# 转正为回归防线（审计点关闭）。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["width", "height", "margin-single-side", "padding-single-side"]
+xfail = false
+tolerance = 0.5

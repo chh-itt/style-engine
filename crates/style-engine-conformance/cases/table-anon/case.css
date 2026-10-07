@@ -1,0 +1,9 @@
+body { margin: 0; }
+/* CSS 2.1 §17.2.1 匿名表格对象：table 直下非行子件（div 块级、裸 td）
+ * 均被匿名行包裹（td 再包匿名单元格；div 包匿名单元格后其盒子承担
+ * 单元格内容盒几何）。三路同列参与列宽分配（400 等分）。
+ * 引擎现状：settle_tables 行发现对 table 直下非行子件静默丢弃（_ => {}）。 */
+.t { width: 400px; }
+.c { height: 30px; }
+.d { height: 20px; }
+.e { height: 25px; }

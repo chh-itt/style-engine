@@ -1,0 +1,10 @@
+# var() 回退与宽关键字：实测 inherit 经回退通道已绿；缺口 = 自定义属性
+# 值 initial/unset 的 guaranteed-invalid 语义（--w: initial 后 var(--w,fb)
+# 应回退 fb，引擎当前当普通值替换）。css/var 层与解析簇改动冲突，
+# 先 xfail 钉预算，解析簇落地后转正。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["css-variables", "var-fallback", "wide-keywords", "width", "height", "margin-single-side"]
+xfail = true
+tolerance = 0.5

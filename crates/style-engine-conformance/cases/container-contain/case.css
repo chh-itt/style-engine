@@ -1,0 +1,16 @@
+body { margin: 0; }
+/* container-type 强制 size containment（CSS Contain §3.1 / CSS Contain 3）：
+ * .cq  flex item + inline-size：行内轴按空内容测（含子 50 也得 w=0），
+ *      块轴正常（leaf h20 → cq.h=20）。
+ * .cq2 显式 w200：leaf2 用 50cqw=100（cqw 消费已支持，回归防松动）。
+ * .sz  块级 + size：两轴强制包含——width 填满 400、height 按空内容=0
+ *      （leaf3 h30 溢出但 sz.h=0；leaf3 自身矩形不受影响）。
+ * 悬浮审计点：引擎不做强制包含（engine.rs is_container 仍按内容测）。 */
+.flexhost { display: flex; width: 500px; }
+.cq { container-type: inline-size; }
+.cq2 { container-type: inline-size; width: 200px; }
+.blockhost { width: 400px; }
+.sz { container-type: size; }
+.leaf { width: 50px; height: 20px; }
+.leaf2 { width: 50cqw; height: 15px; }
+.leaf3 { width: 60px; height: 30px; }

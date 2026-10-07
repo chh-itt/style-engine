@@ -1,0 +1,11 @@
+body { margin: 0; }
+/* CSS 2.1 §10.3.7 绝对定位静态位置（两侧 inset 均 auto）：
+ * .abs  在 .sib（h40）之后 → y=40、x=0（假设流位置）。
+ * .abs2 另带 mt10/ml8 → y=40+10=50、x=0+8=8（margin 计入静态位）。
+ * .abs3 仅 left:100px、top auto → x=100、y=40（auto 轴取静态位）。
+ * 脱流元素不计入后续兄弟的静态位。 */
+.host { position: relative; width: 300px; height: 200px; }
+.sib { height: 40px; }
+.abs { position: absolute; width: 50px; height: 50px; }
+.abs2 { position: absolute; margin-top: 10px; margin-left: 8px; width: 30px; height: 20px; }
+.abs3 { position: absolute; left: 100px; width: 40px; height: 10px; }

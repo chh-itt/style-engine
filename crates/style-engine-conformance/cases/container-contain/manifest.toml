@@ -1,0 +1,8 @@
+# 容器强制 size containment（审计 B 偏差记账项）：先 xfail 钉预算；
+# 映射层禁用内容测量落地后转正。cq2/cqw 消费子区预期已绿，用于回归。
+viewport = [800.0, 600.0]
+scale = 1.0
+fonts = []
+features = ["container-queries", "flex", "width", "height"]
+xfail = true
+tolerance = 0.5
