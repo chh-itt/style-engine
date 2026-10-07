@@ -97,3 +97,24 @@ jobs:
         with:
           key: perf
       - run: cargo run --release --locked -p style-engine --example perf_gate
+
+  golden-drift:
+    # 黄金标准漂移门禁（块 A）：CI 里以钉死版本的 Playwright Chromium 重放
+    # 重生成全部 golden，git diff 判漂移——防「本地重生成、仓库滞旧」静默
+    # 偏差。playwright 版本与本地重生成环境一致（1.63.0，chromium 内嵌版
+    # 随 playwright 钉死 → golden browser_version 确定性一致）。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install playwright==1.63.0
+      - run: playwright install --with-deps chromium
+      - run: python crates/style-engine-conformance/tools/dump_rects.py
+      - name: Fail on golden drift
+        run: |
+          git diff --exit-code -- crates/style-engine-conformance/cases || {
+            echo "::error::golden 漂移：dump_rects.py 重生成结果与仓库不一致——本地重跑 tools/dump_rects.py 并提交"
+            exit 1
+          }
