@@ -94,13 +94,14 @@
   在场、注册无效×2、嵌套/条件组/语句形丢弃×3、`<length>+`/`<color>#`
   多值、custom-ident 门）。
 - 伪元素 ::before/::after + content（C1，css-content-3 / css-pseudo-4
-  MVP）：ADR-0015 树实体化——伪节点 = 引擎 materialize_pseudos 实体化的
+  MVP；**P5 升级 <content-list> 见下条**）：ADR-0015 树实体化——伪节点 =
+  引擎 materialize_pseudos 实体化的
   真实树子节点（::before 首子 / ::after 末子，裸 StyleNode 无身份）；
   selectors 0.40 原生匹配（parse_pseudo_element hook + originating_element
   回 origin 左复合，单冒号 CSS2 形 :before/:after 同路由）；
   has_pseudo_rules 解析期深扫判据——全表无伪规则零成本清除全部、有则
   全树 ensure+归位（宿主子序过滤伪节点）；content = none/normal/字符串
-  单串 MVP（attr()/url()/counter()/quotes = T2 解析期拒绝告警）；content
+  单串 MVP；content
   仅伪元素语义——none/normal → Display::None 无盒（宿主恒 Normal）；
   文本经 sync_pseudo_text 同帧测量布局（继承 origin 字体/字号）；结构
   伪类与 :empty 不受伪节点影响；set_children 镜像自动合并伪键、remove
@@ -110,6 +111,34 @@
   crates/style-engine/tests/pseudo_elements.rs 十四件（before/after 造盒、
   none/normal 无盒、下推宿主子、单冒号形、first-child/:empty 排除伪节点、
   hover 门控、字号继承、content 级联覆盖、换表清除、多表、class origin）。
+- content 序列生成内容：counter()/counters()/attr()/quotes（P5，css-lists-3
+  / css-content-3 / ADR-0036）：content 升级 `<content-list>`——
+  `ContentValue::Seq(Vec<ContentPiece>)`（九变体 non_exhaustive：Str/
+  Counter{name,style}/Counters{name,separator,style}/Attr/OpenQuote/
+  CloseQuote/NoOpenQuote/NoCloseQuote；单串也承载 Seq；url() 维持拒绝）；
+  新属性 counter-reset/counter-increment（`[ <custom-ident> <integer>? ]+`
+  空格分隔、缺省 0/1、重复 ident 后者胜）与 quotes（none|auto|
+  `[ <string> <string> ]+`，auto=拉丁四引号内置对，继承）；求值 =
+  sync_pseudo_text 树序 DFS（reset 压帧遮蔽、increment 全栈累加、
+  merge 弹出=兄弟继承、counter() 最内帧、counters() 全帧自外向内 join、
+  attr() 读 originating element、open/close-quote 深度配对——close
+  深度 0 静默）。偏差【B】：counter style 参数恒按 decimal（罗马字等
+  不做）、隐含 list-item 不做、url() 图片内容不做。锁定：decl.rs
+  counter_props_parse_family（15 正例+12 拒绝）+ pseudo_elements
+  五件（树序 1/2/3、reset 1/1/1、join "1.1"、attr 存在/缺失、quotes
+  配对/越配静默）。
+- UA 起源样式表（P5，css-cascade-5 / ADR-0033）：`ua_sheet` 挂点 +
+  `set_ua_stylesheet`/`clear_ua_stylesheet`（镜像 user 表五步链）；级联
+  收集序 Default→UA→User→Author（::selection/::placeholder 通道同挂）；
+  @property/@font-face 合并序 UA 先于 user；important 反转链锁：
+  UA-important(6) > Author-important(4)、Default-important 最强(7)；
+  `style_engine::builtins::DEFAULT_UA_SHEET`（HTML 语义最小表：块级
+  清单/h1–h6 字号+bold+margin/p 等 margin/i 族 italic/u·s 装饰线/
+  center/pre monospace+white-space:pre）；默认不装载（中立契约——表是
+  数据不是行为，宿主显式装载）。偏差【B】：b/strong=bold（非 bolder）、
+  small/big=绝对关键字、无 list marker/hr 3D/表 UA 细节。锁定：
+  engine.rs ua_origin_ladder_and_important_inversion +
+  ua_builtin_sheet_applies_and_clears。
 - 文本变换与断行控制（C2，css-text-3 / ADR-0016）：text-transform
   none/uppercase/lowercase/capitalize/full-width（full-size-kana 接受
   no-op=T2）——自实现分段变换：span 边界切段、逐字符 old→new 字节映射

@@ -231,3 +231,141 @@ fn assert_rgb(got: (f32, f32, f32), want: (f32, f32, f32), what: &str) {
         "{what}：期望 {want:?} 实得 {got:?}"
     );
 }
+
+/// 三子节点骨架：#root(1) → #t(2) → li(10/11/12)。
+fn engine_list(sheet: &str) -> StyleEngine<u64> {
+    let mut engine: StyleEngine<u64> = StyleEngine::new();
+    engine.add_font(FONT.to_vec());
+    engine.set_stylesheet(sheet);
+    let mut root = StyleNode::default();
+    root.id = Some("root".to_string());
+    engine.insert(None, 1, root).unwrap();
+    let mut t = StyleNode::default();
+    t.id = Some("t".to_string());
+    engine.insert(Some(1), 2, t).unwrap();
+    for k in [10u64, 11, 12] {
+        let mut li = StyleNode::default();
+        li.name = Some("li".into());
+        engine.insert(Some(2), k, li).unwrap();
+    }
+    engine
+}
+
+/// 本帧全部 Text op 的文本（树序）。
+fn text_ops(e: &mut StyleEngine<u64>) -> Vec<String> {
+    let f = e.frame((800.0, 600.0), 1.0, 0.0);
+    f.paint
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            style_engine::paint::PaintOp::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn content_counter_increments_down_tree() {
+    // P5（ADR-0036 D2）：树序计数——三 li 的 ::before 计数值 1/2/3。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         li { counter-increment: x; } \
+         li::before { content: counter(x); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts == vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "计数值应树序递增 1/2/3，实得 {texts:?}"
+    );
+}
+
+#[test]
+fn content_counter_reset_scopes_per_node() {
+    // reset 帧遮蔽：两个并列子树各自 reset+increment → 计数值都从 1 起算
+    //（对照：无 reset 的递增序列）。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         li { counter-reset: x; counter-increment: x; } \
+         li::before { content: counter(x); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts == vec!["1".to_string(), "1".to_string(), "1".to_string()],
+        "reset 后每节点计数都从 1 起算，实得 {texts:?}"
+    );
+}
+
+#[test]
+fn content_counters_joins_scope_frames() {
+    // counters(x, '.')：外层 #t reset+increment=1，li 各自 reset+increment
+    // → 内层帧遮蔽 → 全帧自外向内 join = "1.1"（每 li 同值）。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         #t { counter-reset: x; counter-increment: x; } \
+         li { counter-reset: x; counter-increment: x; } \
+         li::before { content: counters(x, '.'); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts
+            == vec![
+                "1.1".to_string(),
+                "1.1".to_string(),
+                "1.1".to_string()
+            ],
+        "counters() join 应为 1.1/1.1/1.1，实得 {texts:?}"
+    );
+}
+
+#[test]
+fn content_attr_reads_host_attribute() {
+    // attr(title)：伪节点读 originating element 属性；缺失 → 空串无盒。
+    // attrs 由宿主构造 StyleNode 填入（引擎无运行时 attrs 变更 API）。
+    let mk = |title: Option<&str>| {
+        let mut e = engine_pseudo(
+            "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: attr(title); }",
+        );
+        e.remove(2).unwrap();
+        let mut leaf = StyleNode::default();
+        leaf.id = Some("t".to_string());
+        if let Some(v) = title {
+            leaf.attrs.insert("title".to_string(), v.to_string());
+        }
+        e.insert(Some(1), 2, leaf).unwrap();
+        e
+    };
+    let mut e0 = mk(None);
+    let h0 = box_of(&mut e0, 2).3;
+    assert_eq!(h0, 0.0, "缺失属性 → 空串无盒");
+    let mut e1 = mk(Some("VT"));
+    let texts = text_ops(&mut e1);
+    assert!(
+        texts.contains(&"VT".to_string()),
+        "attr(title) 应产出宿主属性值，实得 {texts:?}"
+    );
+    let h1 = box_of(&mut e1, 2).3;
+    assert!(h1 > 0.0, "attr 应产出文本盒（h={h1}）");
+}
+
+#[test]
+fn content_quote_pairs_depth_match() {
+    // open-quote/close-quote 深度配对 + quotes 自定义对；越配 close 钳 0 静默。
+    let mut e = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; quotes: '«' '»'; } \
+         #t::before { content: open-quote \"x\" close-quote; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts.contains(&"«x»".to_string()),
+        "open/close 应包住内容串，实得 {texts:?}"
+    );
+    let mut e2 = engine_pseudo(
+        "#t { font-size: 16px; font-family: \"DejaVu Sans\"; quotes: '«' '»'; } \
+         #t::before { content: close-quote \"x\"; }",
+    );
+    let texts2 = text_ops(&mut e2);
+    assert!(
+        texts2.contains(&"x".to_string()),
+        "越配 close-quote 钳 0 静默，实得 {texts2:?}"
+    );
+}

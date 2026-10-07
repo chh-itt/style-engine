@@ -347,6 +347,9 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     sheet: Stylesheet,
     /// B1：用户起源样式表（css-cascade-5 User 层；set_user_stylesheet 注入）。
     user_sheet: Option<Stylesheet>,
+    /// P5（ADR-0033）：UA 起源样式表（UserAgent 层挂点；默认 None——
+    /// 缺省呈现是宿主策略，引擎只提供机制；内置表见 `builtins` 模块）。
+    ua_sheet: Option<Stylesheet>,
     /// B3：当前焦点链锚点（set_focus 管理 FOCUS/FOCUS_VISIBLE/FOCUS_WITHIN
     /// 三态迁移；None = 无焦点）。
     focused_node: Option<NodeId>,
@@ -491,6 +494,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             tree: StyleTree::new(),
             sheet: Stylesheet::default(),
             user_sheet: None,
+            ua_sheet: None,
             focused_node: None,
             registered_props: std::collections::BTreeMap::new(),
             font_faces: Vec::new(),
@@ -677,10 +681,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 
     /// B4：重建文档级 @property 注册表（sheet 变更点统一调用）。合并序 =
-    /// user_sheet → 主表 → 附加表登记序（author 覆 user，与起源优先级
-    /// 同构）；同名后规则覆盖（spec：@property 全部层叠前按文档序处理）。
+    /// ua_sheet → user_sheet → 主表 → 附加表登记序（author 覆 user 覆 UA，
+    /// 与起源优先级同构；P5 ADR-0033）；同名后规则覆盖（spec：@property
+    /// 全部层叠前按文档序处理）。
     fn rebuild_registered_props(&mut self) {
         self.registered_props.clear();
+        if let Some(ua) = &self.ua_sheet {
+            for r in &ua.property_rules {
+                self.registered_props.insert(r.name.clone(), r.clone());
+            }
+        }
         if let Some(u) = &self.user_sheet {
             for r in &u.property_rules {
                 self.registered_props.insert(r.name.clone(), r.clone());
@@ -697,11 +707,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 
     /// F3d（ADR-0026 D4）：重建文档级 @font-face 登记表（与 @property 同
-    /// 变更点）。合并序 = user_sheet → 主表 → 附加表登记序；同族后规则
-    /// 胜（css-fonts-4：同族多条 @font-face 按文档序后者覆盖）。字体字节
-    /// 仍由宿主 add_font 推送——登记表仅描述映射与筛选元数据。
+    /// 变更点）。合并序 = ua_sheet → user_sheet → 主表 → 附加表登记序
+    /// （P5 ADR-0033 起源序）；同族后规则胜（css-fonts-4：同族多条
+    /// @font-face 按文档序后者覆盖）。字体字节仍由宿主 add_font 推送——
+    /// 登记表仅描述映射与筛选元数据。
     fn rebuild_font_faces(&mut self) {
         self.font_faces.clear();
+        if let Some(ua) = &self.ua_sheet {
+            self.font_faces.extend(ua.font_faces.iter().cloned());
+        }
         if let Some(u) = &self.user_sheet {
             self.font_faces.extend(u.font_faces.iter().cloned());
         }
@@ -720,6 +734,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     fn materialize_pseudos(&mut self) {
         let any_pseudo = self.sheet.has_pseudo_rules
             || self.user_sheet.as_ref().is_some_and(|s| s.has_pseudo_rules)
+            || self.ua_sheet.as_ref().is_some_and(|s| s.has_pseudo_rules)
             || self.extra_sheets.iter().any(|(_, _, s)| s.has_pseudo_rules);
         if !any_pseudo {
             if self.pseudo_ids.is_empty() {
@@ -802,42 +817,200 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// 按 content 计算值写 tree.node.text 并登记测量（remeasure pass 同式；
     /// 折行由 T5c-2 收敛）。content none/normal → text 清空 + 撤测量
     ///（盒经 map_style display:none 移除）。
+    /// P5（ADR-0036 D2）：升级为树序 DFS 求值——counter 作用域帧栈
+    ///（reset 压帧 / increment 帧顶或隐式 0 累加 / counter() 最内帧、
+    /// counters() 全帧 join）+ 引号深度（quotes 对表）+ attr()（伪元素
+    /// 取 originating element 属性）。树序保证 = materialize_pseudos 归位。
     #[cfg(feature = "text")]
     fn sync_pseudo_text(&mut self) {
         if self.pseudo_ids.is_empty() {
             return;
         }
-        let entries: Vec<NodeId> = self.pseudo_ids.values().copied().collect();
-        for pid in entries {
-            let Some(cs) = self.styles.get(&pid).cloned() else {
-                continue;
-            };
-            let text = match cs.content() {
-                crate::css::property::ContentValue::Str(s) => Some(s),
-                _ => None,
-            };
-            if self.tree.node(pid).text == text {
-                continue;
+        let host_of: std::collections::HashMap<NodeId, NodeId> =
+            self.pseudo_ids.iter().map(|((h, _), p)| (*p, *h)).collect();
+        let mut scopes: Vec<std::collections::HashMap<String, i64>> = Vec::new();
+        let mut quote_depth: i64 = 0;
+        self.eval_content_walk(self.tree.root(), &mut scopes, &mut quote_depth, &host_of);
+    }
+
+    /// P5（ADR-0036 D2）：content 求值 DFS（树序）。普通节点应用
+    /// counter-reset/increment（压帧/累加，离开弹出）；伪节点按 content
+    /// 序列求值写文本；子树递归含伪节点（归位序 = before → 宿主子 → after）。
+    #[cfg(feature = "text")]
+    fn eval_content_walk(
+        &mut self,
+        nid: NodeId,
+        scopes: &mut Vec<std::collections::HashMap<String, i64>>,
+        quote_depth: &mut i64,
+        host_of: &std::collections::HashMap<NodeId, NodeId>,
+    ) {
+        let is_pseudo = self.tree.is_pseudo(nid);
+        if !is_pseudo {
+            // 计数器声明应用（css-lists-3 语义）：
+            // reset → 新帧（遮蔽外层同名；重复 ident 后者胜 = map insert）。
+            let mut frame: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+            if let Some(cs) = self.styles.get(&nid) {
+                for (name, val) in cs.counter_reset() {
+                    frame.insert(name.clone(), *val);
+                }
             }
-            self.tree.node_mut(pid).text = text.clone();
-            match text {
-                Some(t) => {
-                    let (w, h) = self.text.measure(&t, &cs, &self.map_env());
-                    self.measures.insert(pid, (w, h));
-                    self.auto_text.insert(pid);
-                    if let Some(&tid) = self.taffy_node.get(&pid) {
-                        let mut ts = map_style(&cs, &self.map_env());
-                        ts.size = taffy::prelude::Size {
-                            width: taffy::prelude::Dimension::auto(),
-                            height: taffy::prelude::Dimension::length(h),
-                        };
-                        let _ = self.taffy.set_style(tid, ts);
+            scopes.push(frame);
+            // increment → 写当前帧；值沿全栈倒查（祖先/前兄弟经 merge 上浮
+            // 的值 = css-lists-3 counter 继承链），无实例 → 隐式 0 起始。
+            if let Some(cs) = self.styles.get(&nid) {
+                for (name, step) in cs.counter_increment() {
+                    let n = scopes.len();
+                    let hit = scopes.iter().rev().find_map(|f| f.get(name).copied());
+                    match hit {
+                        Some(v) => {
+                            scopes[n - 1].insert(name.clone(), v + *step);
+                        }
+                        None => {
+                            scopes[n - 1].insert(name.clone(), *step);
+                        }
                     }
                 }
-                None => {
-                    self.measures.remove(&pid);
-                    self.auto_text.remove(&pid);
+            }
+        } else {
+            // 伪节点：content 求值（计数器栈/引号深度/attrs 消费）。
+            let (text, new_depth) = self.eval_pseudo_content(nid, *quote_depth, scopes, host_of);
+            *quote_depth = new_depth;
+            self.apply_pseudo_text(nid, text);
+        }
+        let kids: Vec<NodeId> = self.tree.children(nid).to_vec();
+        for kid in kids {
+            self.eval_content_walk(kid, scopes, quote_depth, host_of);
+        }
+        if !is_pseudo {
+            // merge 弹出（css-lists-3 兄弟继承）：离开节点时把本帧计数
+            // 写回父帧——后续兄弟据此继承增量；reset 帧遮蔽仅在位期间
+            // 生效（兄弟以自己的 reset 值重开）。
+            if let Some(f) = scopes.pop()
+                && let Some(parent) = scopes.last_mut()
+            {
+                for (k, v) in f {
+                    parent.insert(k, v);
                 }
+            }
+        }
+    }
+
+    /// P5（ADR-0036 D1/D2/D3）：伪节点 content 序列求值为文本。
+    /// 返回 (文本, 新引号深度)；None = 不生成（none/normal/无样式）。
+    #[cfg(feature = "text")]
+    fn eval_pseudo_content(
+        &self,
+        pid: NodeId,
+        depth: i64,
+        scopes: &[std::collections::HashMap<String, i64>],
+        host_of: &std::collections::HashMap<NodeId, NodeId>,
+    ) -> (Option<String>, i64) {
+        let Some(cs) = self.styles.get(&pid) else {
+            return (None, depth);
+        };
+        let mut d = depth;
+        let mut out = String::new();
+        let Some(pieces) = cs.content_pieces() else {
+            // 单串/none/normal：沿用旧路径。
+            return (
+                match cs.content() {
+                    crate::css::property::ContentValue::Str(s) => Some(s),
+                    _ => None,
+                },
+                d,
+            );
+        };
+        // attr() 属性源：伪节点 → originating element。
+        let attr_node = host_of.get(&pid).copied().unwrap_or(pid);
+        // counter() 取值：最内作用域帧优先（css-lists-3）；无实例 → 0。
+        let counter_lookup = |name: &str| -> i64 {
+            scopes
+                .iter()
+                .rev()
+                .find_map(|f| f.get(name).copied())
+                .unwrap_or(0)
+        };
+        for piece in pieces {
+            match piece {
+                crate::css::property::ContentPiece::Str(s) => out.push_str(s),
+                crate::css::property::ContentPiece::Counter { name, .. } => {
+                    out.push_str(&counter_lookup(name).to_string());
+                }
+                crate::css::property::ContentPiece::Counters {
+                    name, separator, ..
+                } => {
+                    // counters()：全作用域帧自外向内 join；无实例 → 空串。
+                    let vals: Vec<String> = scopes
+                        .iter()
+                        .filter_map(|f| f.get(name).map(|v| v.to_string()))
+                        .collect();
+                    out.push_str(&vals.join(separator));
+                }
+                crate::css::property::ContentPiece::Attr(name) => {
+                    if let Some(v) = self.tree.node(attr_node).attrs.get(name) {
+                        out.push_str(v);
+                    }
+                }
+                crate::css::property::ContentPiece::OpenQuote => {
+                    let pairs = cs.quotes_pairs();
+                    if !pairs.is_empty() {
+                        let idx = (d.max(0) as usize).min(pairs.len() - 1);
+                        out.push_str(&pairs[idx].0);
+                    }
+                    d += 1;
+                }
+                crate::css::property::ContentPiece::CloseQuote => {
+                    // css-content-3：深度 0 处 close-quote 不产出（钳 0 静默）。
+                    if d > 0 {
+                        d -= 1;
+                        let pairs = cs.quotes_pairs();
+                        if !pairs.is_empty() {
+                            let idx = (d.max(0) as usize).min(pairs.len() - 1);
+                            out.push_str(&pairs[idx].1);
+                        }
+                    }
+                }
+                crate::css::property::ContentPiece::NoOpenQuote => d += 1,
+                crate::css::property::ContentPiece::NoCloseQuote => {
+                    d -= 1;
+                    if d < 0 {
+                        d = 0;
+                    }
+                }
+            }
+        }
+        (Some(out), d)
+    }
+
+    /// C1 旧路径搬运：把求值文本写回伪节点（text/measure/taffy 高度）。
+    #[cfg(feature = "text")]
+    fn apply_pseudo_text(&mut self, pid: NodeId, text: Option<String>) {
+        if self.tree.node(pid).text == text {
+            return;
+        }
+        self.tree.node_mut(pid).text = text.clone();
+        match text {
+            Some(t) => {
+                let cs = match self.styles.get(&pid) {
+                    Some(c) => c.clone(),
+                    None => return,
+                };
+                let (w, h) = self.text.measure(&t, &cs, &self.map_env());
+                self.measures.insert(pid, (w, h));
+                self.auto_text.insert(pid);
+                if let Some(&tid) = self.taffy_node.get(&pid) {
+                    let mut ts = map_style(&cs, &self.map_env());
+                    ts.size = taffy::prelude::Size {
+                        width: taffy::prelude::Dimension::auto(),
+                        height: taffy::prelude::Dimension::length(h),
+                    };
+                    let _ = self.taffy.set_style(tid, ts);
+                }
+            }
+            None => {
+                self.measures.remove(&pid);
+                self.auto_text.remove(&pid);
             }
         }
     }
@@ -1515,6 +1688,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 env,
                 cctx,
                 crate::selector::PseudoElement::Selection,
+                self.ua_sheet.as_ref(),
             );
             // 通道契约：无任何规则命中（winners 双空）→ None（宿主回退
             // 系统缺省；@media 门控外 / 选择器不命中皆此形）。
@@ -1545,6 +1719,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 env,
                 cctx,
                 crate::selector::PseudoElement::Placeholder,
+                self.ua_sheet.as_ref(),
             );
             if cascaded.winners.is_empty() && cascaded.custom_winners.is_empty() {
                 None
@@ -5176,6 +5351,28 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_struct = true;
     }
 
+    /// P5（ADR-0033 D1）：设置 UA 起源样式表（css-cascade-5 UserAgent 层：
+    /// Default < UA < User < Author；important 反转自动生效）。合并序：
+    /// @property/@font-face UA 表注册先于 user 表（起源序）。默认不装载
+    /// ——缺省呈现是宿主策略（中立契约）；HTML 缺省表见
+    /// `style_engine::builtins::DEFAULT_UA_SHEET`。样式变化触发全树重样式。
+    pub fn set_ua_stylesheet(&mut self, css: &str) {
+        self.ua_sheet = Some(crate::css::stylesheet::parse_stylesheet(css));
+        self.rebuild_registered_props();
+        self.rebuild_font_faces();
+        self.dirty_style = true;
+        self.dirty_struct = true;
+    }
+
+    /// P5（ADR-0033 D1）：清除 UA 起源样式表。
+    pub fn clear_ua_stylesheet(&mut self) {
+        self.ua_sheet = None;
+        self.rebuild_registered_props();
+        self.rebuild_font_faces();
+        self.dirty_style = true;
+        self.dirty_struct = true;
+    }
+
     /// 宿主推入字体数据（feature = "text"）；字体变化影响文本测量，
     /// 触发全树样式/布局失效。
     #[cfg(feature = "text")]
@@ -5640,6 +5837,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             &env,
             parent_style,
             cctx,
+            self.ua_sheet.as_ref(),
         );
         // A9：字体相对单位度量（ch/ex/ic）按注册族名补写（未注册=近似缺省）
         let fm = self.metrics_for(&cs);
@@ -5700,6 +5898,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     &env,
                     Some(&cs),
                     cctx,
+                    self.ua_sheet.as_ref(),
                 );
                 let sfm = self.metrics_for(&scs);
                 scs.set_font_metrics(sfm);
@@ -9559,5 +9758,108 @@ mod tests {
         let b4 = frame.find(4).unwrap();
         assert_eq!((b4.x, b4.y, b4.width), (0.0, 60.0, 140.0));
         assert_eq!(b4.height, 38.0);
+    }
+
+    #[test]
+    fn ua_origin_ladder_and_important_inversion() {
+        // P5（ADR-0033 D2/D3）：UA 层插在 Default 与 User 之间；important
+        // 轴反转 = UA-important 最强（无障碍语义）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("div".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        engine.set_ua_stylesheet("div { color: red; }");
+        assert!(engine.set_stylesheet("div { color: blue; }").is_clean());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        use crate::css::property::DeclValue;
+        use crate::css::value::ColorValue;
+        let cs = engine.computed_style(Key(1)).unwrap();
+        let author_wins = matches!(
+            cs.value(crate::css::property::PropertyId::Color),
+            Some(DeclValue::Color(ColorValue::Absolute(c)))
+            if c.components[2] > 0.5 && c.components[0] < 0.5
+        );
+        assert!(author_wins, "Author 应胜 UA（普通层序 UA < User < Author）");
+        // UA-important 反转：胜过 Author 普通声明。
+        engine.set_ua_stylesheet("div { color: red !important; }");
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        let cs = engine.computed_style(Key(1)).unwrap();
+        let ua_important_wins = matches!(
+            cs.value(crate::css::property::PropertyId::Color),
+            Some(DeclValue::Color(ColorValue::Absolute(c)))
+            if c.components[0] > 0.5 && c.components[2] < 0.5
+        );
+        assert!(ua_important_wins, "UA-important 应最强（important 轴反转）");
+        // important 轴反转链锁：Author-important(4) 不改写 UA-important(6)
+        //（css-cascade-5 origin+importance 反转——UA 无障碍语义压过作者）。
+        assert!(
+            engine
+                .set_stylesheet("div { color: blue !important; }")
+                .is_clean()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        let cs = engine.computed_style(Key(1)).unwrap();
+        let ua_still_wins = matches!(
+            cs.value(crate::css::property::PropertyId::Color),
+            Some(DeclValue::Color(ColorValue::Absolute(c)))
+            if c.components[0] > 0.5 && c.components[2] < 0.5
+        );
+        assert!(ua_still_wins, "UA-important 应压过 Author-important");
+    }
+
+    #[test]
+    fn ua_builtin_sheet_applies_and_clears() {
+        // P5（ADR-0033 D3）：DEFAULT_UA_SHEET 解析零错误；装载后 h1 字号
+        // 2em×16=32px；clear 后回初始 16px；未装载引擎不受影响。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(engine.insert(None, Key(1), StyleNode::default()).is_ok());
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        assert_eq!(
+            engine.computed_style(Key(1)).unwrap().font_size_px(),
+            16.0,
+            "未装载 UA 表：初始字号"
+        );
+        engine.set_ua_stylesheet(crate::builtins::DEFAULT_UA_SHEET);
+        // div 不在 UA 表内 → 不受影响；h1 生效。
+        assert!(
+            engine
+                .insert(
+                    None,
+                    Key(2),
+                    StyleNode {
+                        name: Some("h1".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        assert_eq!(
+            engine.computed_style(Key(2)).unwrap().font_size_px(),
+            32.0,
+            "h1 UA 表字号 2em = 32px"
+        );
+        engine.clear_ua_stylesheet();
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        assert_eq!(
+            engine.computed_style(Key(2)).unwrap().font_size_px(),
+            16.0,
+            "clear 后回初始"
+        );
     }
 }

@@ -1832,3 +1832,64 @@ D6 clip 圆段数自适应；附带头发现的 border-top/right/bottom/left 四
   保像素一致。
 -【A】四向简写补齐为附带收口（非 ADR-0037 决策原文），语义=
   css-backgrounds-3 §4.1。
+
+## P5 批：UA 起源样式表 + counters/quotes 生成内容（ADR-0033/0036）
+
+范围（goal-c293e543 round 17）：UA 层挂点与内置缺省表；content 升级
+<content-list>（counter/counters/attr/quotes）；计数器树序求值 pass。
+
+- **UA 挂点链**：engine.rs ua_sheet 字段（user_sheet 旁）+ set_ua_stylesheet/
+  clear_ua_stylesheet（clear_user_stylesheet 后，镜像链 parse→
+  rebuild_registered_props→rebuild_font_faces→dirty_style+dirty_struct，
+  返回 ()）；cascade.rs cascade_declarations/cascade_channel 尾参
+  ua_sheet: Option<&Stylesheet>（UA 段插 User 前）；computed.rs
+  compute_node_in 尾参转传 + compute_node 便捷补 None；restyle_node 两处、
+  ::selection/::placeholder 两处补传；rebuild_registered_props/
+  rebuild_font_faces 合并序 UA 前插；materialize_pseudos any_pseudo 含
+  ua_sheet。
+- **builtins.rs 新建**（lib.rs 挂 pub mod builtins）：DEFAULT_UA_SHEET——
+  块级清单 display:block、h1–h6 字号 2/1.5/1.17/1/0.83/0.67em+bold+margin、
+  p/blockquote/figure/ul/ol/dl/menu margin:1em 0、b/strong=bold（bolder
+  未实现 B 级）、i/em/cite/var/dfn=italic、u/ins=underline、s/strike/del=
+  line-through、small/small big/large 绝对关键字、center、pre,code,kbd,
+  samp,tt=monospace+pre=white-space:pre；li 不发 list-item（Display 无该
+  变体）。默认不装载。
+- **属性面**（property.rs）：CounterReset/CounterIncrement/Quotes 三槽位
+  （170/171/172，SLOT_COUNT 180，动画描述符后移 173..179）；DeclValue::
+  CounterList(Vec<(String,i64)>)（reset 缺省 0/increment 缺省 1 解析期
+  物化）+ Quotes(QuotesValue{Auto,None,Pairs})；ContentPiece 九变体 +
+  ContentValue::Seq；parse_content 升级 <content-list>（首段+循环续段，
+  try_parse 回滚拒绝尾 junk）；parse_counter_list 空格分隔（初版逗号分隔
+  系误读 css-lists-3——`[ <counter-name> <integer>? ]+` 无逗号，测试锁
+  counter-reset: chapter 5 section 2 暴露后重写）；parse_quotes 同改空格
+  分隔；parse_content_opt_style 改前置逗号必需（counter(x, upper-roman)
+  原被拒）；content 三循环 Err 分支改 try_parse（`counter(a), counter(b)`
+  逗号被吃后 expect_exhausted 放行——回滚修复）。
+- **求值 pass**（engine.rs）：sync_pseudo_text 重写树序 DFS——
+  eval_content_walk（reset 压帧/increment 全栈累加/merge 弹出）+
+  eval_pseudo_content（counter_lookup 最内帧/Counters 全帧 join/Attr 读
+  originating element/OpenQuote 取对后 d+=1/**CloseQuote 深度 0 静默**
+  ——首版先钳 0 再取 pairs[0].1 产出错引号，测试锁暴露后修正/
+  NoOpen·NoClose 只动深度）+ apply_pseudo_text（C1 写回逻辑搬运）。
+  **作用域模型演进：初版每节点独立 push/pop 帧 → 兄弟 increment 丢失
+  （1/1/1）；改为 merge 弹出（离开节点把本帧计数写回父帧）= css-lists-3
+  兄弟继承链 → 1/2/3 ✓**。eval_pseudo_content 从 &self 改经参数传递
+  scopes（初版占位 counter_value/counter_value_joined 残渣已清）。
+- **map_style 生成判定升级**（layout.rs，P5 附带回归修复）：伪节点
+  Display::None 判定 `!matches!(content, Str(_))` → content_pieces()
+  Seq 非空或旧 Str——单串承载 Seq 后旧判定使 pseudo_elements 14/19
+  全崩（content:"Hi" 伪节点全无盒），一行修复。
+- **测试 +8**（全量 572→580）：decl.rs counter_props_parse_family；
+  engine.rs ua_origin_ladder_and_important_inversion（**UA-important 压过
+  Author-important——首版期望反了，读 cascade.rs:55 rank 表确认**/
+  ua_builtin_sheet_applies_and_clears（h1 32px/clear 复位）；tests/
+  pseudo_elements.rs 五件（树序 1/2/3、reset 1/1/1、join "1.1"、attr
+  存在/缺失、quotes 配对/越配静默）——断言经 Frame.paint Text op 文本
+  直读（首版宽度度量尺不可分：li 盒宽恒 800）。
+- **clippy/fmt**：engine.rs unreachable `_`（同 crate 穷尽）删除、
+  to_vec、let-chains×2、cascade_channel #[allow(too_many_arguments)]；
+  rustfmt --edition 2024 九文件。clippy --lib 零警告。
+- 教训：set_ua_stylesheet 返回 () 非 ParseReport（镜像 user 表——测试
+  不可 .is_clean()）；PowerShell 跨行 -replace 批量修 assert 外壳会残留
+  assert!(()) 且破坏行格式（回读逐处 edit 修复）；test 循环 for 模式不
+  支持 `pattern: Type` 标注。

@@ -403,6 +403,12 @@ pub enum PropertyId {
     TransitionBehavior,
     /// vertical-align — 行内参与者纵向对齐（P3，ADR-0034 D3）。
     VerticalAlign,
+    /// counter-reset — 计数器创建/置值（P5，ADR-0036 D2）。不继承。
+    CounterReset,
+    /// counter-increment — 计数器累加（P5，ADR-0036 D2）。不继承。
+    CounterIncrement,
+    /// quotes — 引号对表（P5，ADR-0036 D3）。继承。
+    Quotes,
 }
 
 impl PropertyId {
@@ -586,20 +592,25 @@ impl PropertyId {
         // P3（ADR-0034）：vertical-align（ALL 尾追加；动画描述符槽整体
         // 后移 ×1 至 170..177，slot_alignment 不变量=ALL 序连续）
         Self::VerticalAlign,
+        // P5（ADR-0036）：counter-reset/counter-increment/quotes（ALL 尾
+        // 追加；动画描述符槽整体后移 ×3 至 173..180）
+        Self::CounterReset,
+        Self::CounterIncrement,
+        Self::Quotes,
     ];
 
-    /// 槽位存储总槽位数：ALL 全部 170 位（0..139 原序、F2 文本 7 位、
+    /// 槽位存储总槽位数：ALL 全部 173 位（0..139 原序、F2 文本 7 位、
     /// F3b 背景 6 位、F3d 边框图 5 位、F3d 字体 5 位、F4 两属性、G1
-    /// transition 五长手、P3 vertical-align，slot() 显式编号）加 7 个
-    /// 动画描述符位（非 ALL）。
-    pub const SLOT_COUNT: usize = 177;
+    /// transition 五长手、P3 vertical-align、P5 计数器三属性，slot()
+    /// 显式编号）加 7 个动画描述符位（非 ALL）。
+    pub const SLOT_COUNT: usize = 180;
 
     /// 槽位存储下标（ComputedStyle 的 `Vec<Option<DeclValue>>` 用）。
     /// 0..139 = ALL 原序；139..146 = F2 文本追加（ALL 尾部成员）；
     /// 146..152 = F3b 背景追加；152..164 = F3d 边框图+字体追加+F4 两
     /// 属性；164..169 = G1 transition 五长手（ALL 尾部成员）；
-    /// 169 = P3 vertical-align（ALL 尾部成员）；170..177 = 动画描述符
-    /// （不在 ALL）。
+    /// 169 = P3 vertical-align（ALL 尾部成员）；170..173 = P5 计数器三
+    /// 属性（ALL 尾部成员）；173..180 = 动画描述符（不在 ALL）。
     /// clip-path 沿用原 ALL 位 71（第四批④ 占位，F3c 原位升级，ADR-0025）。
     /// `slot_alignment` 测试锁定本表
     /// 与 ALL 的一致性——新增变体时必须同步扩展本 match 与 SLOT_COUNT。
@@ -789,15 +800,20 @@ impl PropertyId {
             Self::TransitionBehavior => 168,
             // P3（ADR-0034）：vertical-align（ALL 尾位；描述符让位 ×1）
             Self::VerticalAlign => 169,
+            // P5（ADR-0036）：counter-reset/counter-increment/quotes
+            // （ALL 尾位；描述符让位 ×3）
+            Self::CounterReset => 170,
+            Self::CounterIncrement => 171,
+            Self::Quotes => 172,
             // 动画描述符（非 ALL 成员；声明/采样时落槽；P3 追加后整体
-            // 后移 ×1）
-            Self::AnimationName => 170,
-            Self::AnimationDuration => 171,
-            Self::AnimationDelay => 172,
-            Self::AnimationIterationCount => 173,
-            Self::AnimationTimingFunction => 174,
-            Self::AnimationDirection => 175,
-            Self::AnimationFillMode => 176,
+            // 后移 ×1，P5 再 ×3）
+            Self::AnimationName => 173,
+            Self::AnimationDuration => 174,
+            Self::AnimationDelay => 175,
+            Self::AnimationIterationCount => 176,
+            Self::AnimationTimingFunction => 177,
+            Self::AnimationDirection => 178,
+            Self::AnimationFillMode => 179,
             Self::Hyphens => 162,
             Self::BackdropFilter => 163,
         }
@@ -833,6 +849,9 @@ impl PropertyId {
             Self::TransitionDuration => "transition-duration",
             Self::TransitionTimingFunction => "transition-timing-function",
             Self::VerticalAlign => "vertical-align",
+            Self::CounterReset => "counter-reset",
+            Self::CounterIncrement => "counter-increment",
+            Self::Quotes => "quotes",
             Self::TransitionDelay => "transition-delay",
             Self::TransitionBehavior => "transition-behavior",
             Self::Width => "width",
@@ -1039,8 +1058,45 @@ pub enum UnicodeBidiKind {
     Plaintext,
 }
 
-/// content 值族（C1，css-content-3；ADR-0015 MVP）：伪元素生成内容。
-/// attr()/url()/counter()/quotes 为 T2（解析期告警拒绝）。
+/// content 序列段（P5，ADR-0036 D1）：生成内容的拼接单元。
+/// 求值语义见引擎 sync_pseudo_text（counter 栈/quote 深度/attrs）。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ContentPiece {
+    /// 字符串字面量。
+    Str(String),
+    /// counter(<custom-ident>, <counter-style>?)——最内作用域值；
+    /// style 仅 decimal 生效（其余解析接受、渲染按 decimal，偏差【B】）。
+    Counter {
+        /// 计数器名。
+        name: String,
+        /// 计数样式文法名（v1 仅 decimal 渲染，偏差【B】）。
+        style: String,
+    },
+    /// counters(<custom-ident>, <string>, <counter-style>?)——全作用域
+    /// 自外向内 join；style 同上。
+    Counters {
+        /// 计数器名。
+        name: String,
+        /// 层间分隔串。
+        separator: String,
+        /// 计数样式文法名（v1 仅 decimal 渲染，偏差【B】）。
+        style: String,
+    },
+    /// attr(<attr-name>)——宿主元素属性；伪元素上取 originating element。
+    Attr(String),
+    /// open-quote——quotes 计算值按引用深度取对，深度 +1。
+    OpenQuote,
+    /// close-quote——深度 −1（<0 钳 0）后取对。
+    CloseQuote,
+    /// no-open-quote——深度 +1 但不输出。
+    NoOpenQuote,
+    /// no-close-quote——深度 −1 但不输出。
+    NoCloseQuote,
+}
+
+/// content 值族（C1，css-content-3；ADR-0015 MVP + P5 ADR-0036 D1 序列）。
+/// url()/element()/leader()/counter-style @规则不做（ADR-0036 D4）。
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ContentValue {
@@ -1048,8 +1104,11 @@ pub enum ContentValue {
     None,
     /// normal — 初始；元素上无效、伪元素不生成。
     Normal,
-    /// 字符串字面量（MVP 单串；多串拼接段 T2）。
+    /// 字符串字面量（单串；多串/混合用 Seq）。
     Str(String),
+    /// P5（ADR-0036 D1）：<content-list> 序列（字符串/counter()/counters()/
+    /// attr()/引号关键字空格分隔；空序列拒绝）。
+    Seq(Vec<ContentPiece>),
 }
 
 /// text-transform 值族（C2，css-text-3；ADR-0016）：文本大小写/全角变换。
@@ -1470,6 +1529,12 @@ pub enum DeclValue {
     TransitionBehavior(TransitionBehavior),
     /// vertical-align（P3，ADR-0034 D3）：行内参与者纵向对齐值族。
     VerticalAlign(VerticalAlignKind),
+    /// counter-reset / counter-increment（P5，ADR-0036 D2）：计数器
+    /// `[(<custom-ident>, <integer>)]` 列表（none → 空 Vec）。reset 的
+    /// integer 缺省 0、increment 缺省 1（解析期物化，值形统一）。
+    CounterList(Vec<(String, i64)>),
+    /// quotes（P5，ADR-0036 D3）：引号对表。
+    Quotes(QuotesValue),
     /// filter / backdrop-filter（P2 批，ADR-0031 D1）：有序 filter 函数
     /// 链（`Filters(vec![])` = none，有效声明显式无滤镜）。旧 Effect(bool)
     /// 存在性语义退役（will-change/isolation 仍用 Effect）。
@@ -2586,7 +2651,10 @@ fn len_auto_with(p: &mut Parser<'_>, autos: &[&str]) -> ValResult<Option<LengthP
 
 /// content 解析（C1，css-content-3 MVP）：none/normal/字符串字面量。
 /// attr()/url()/counter()/quotes 为 T2——解析期拒绝（调用方按 Dropped
-/// 告警丢弃声明）。
+/// 告警丢弃声明）。P5（ADR-0036 D1）：升级为 <content-list> 序列——
+/// `none | normal | [ <string> | counter() | counters() | attr() |
+/// open-quote | close-quote | no-open-quote | no-close-quote ]+`；
+/// url() 仍拒绝（cssparser Token::Url 非函数/串）。
 pub fn parse_content(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     p.skip_whitespace();
     let t = p.next()?.clone();
@@ -2598,10 +2666,150 @@ pub fn parse_content(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             Ok(DeclValue::Content(ContentValue::Normal))
         }
         cssparser::Token::QuotedString(ref s) => {
-            p.skip_whitespace();
+            let mut pieces = vec![ContentPiece::Str(s.to_string())];
+            // 序列续段（空格分隔）。
+            loop {
+                p.skip_whitespace();
+                if p.is_exhausted() {
+                    break;
+                }
+                // try_parse 失败回滚 token——否则 Err 段的 token 已被
+                // 消费，expect_exhausted 放行造成静默丢段。
+                match p.try_parse(parse_content_piece) {
+                    Ok(piece) => pieces.push(piece),
+                    Err(_) => break, // 语法错误交 expect_exhausted 统一拒绝
+                }
+            }
             p.expect_exhausted()?;
-            Ok(DeclValue::Content(ContentValue::Str(s.to_string())))
+            Ok(DeclValue::Content(ContentValue::Seq(pieces)))
         }
+        cssparser::Token::Function(ref name) => {
+            let fname = name.clone();
+            let piece = p.parse_nested_block(|p| parse_content_fn_body(p, &fname))?;
+            // 单函数也可能是序列首段（counter() counter() ...）。
+            let mut pieces = vec![piece];
+            loop {
+                p.skip_whitespace();
+                if p.is_exhausted() {
+                    break;
+                }
+                match p.try_parse(parse_content_piece) {
+                    Ok(piece) => pieces.push(piece),
+                    Err(_) => break,
+                }
+            }
+            p.expect_exhausted()?;
+            Ok(DeclValue::Content(ContentValue::Seq(pieces)))
+        }
+        cssparser::Token::Ident(ref id) => {
+            let piece = parse_content_quote_keyword(p, id)?;
+            let mut pieces = vec![piece];
+            loop {
+                p.skip_whitespace();
+                if p.is_exhausted() {
+                    break;
+                }
+                match p.try_parse(parse_content_piece) {
+                    Ok(piece) => pieces.push(piece),
+                    Err(_) => break,
+                }
+            }
+            p.expect_exhausted()?;
+            Ok(DeclValue::Content(ContentValue::Seq(pieces)))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// 引号关键字段（open-quote 族；ident 已取，此处分派）。
+fn parse_content_quote_keyword(p: &mut Parser<'_>, id: &str) -> ValResult<ContentPiece> {
+    match id.to_ascii_lowercase().as_str() {
+        "open-quote" => Ok(ContentPiece::OpenQuote),
+        "close-quote" => Ok(ContentPiece::CloseQuote),
+        "no-open-quote" => Ok(ContentPiece::NoOpenQuote),
+        "no-close-quote" => Ok(ContentPiece::NoCloseQuote),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// 序列续段：字符串/函数/引号关键字（counter() 族嵌套块内分派见
+/// parse_content_fn_body）。
+fn parse_content_piece(p: &mut Parser<'_>) -> ValResult<ContentPiece> {
+    let t = p.next()?.clone();
+    match t {
+        cssparser::Token::QuotedString(ref s) => Ok(ContentPiece::Str(s.to_string())),
+        cssparser::Token::Function(ref name) => {
+            let fname = name.clone();
+            p.parse_nested_block(|p| parse_content_fn_body(p, &fname))
+        }
+        cssparser::Token::Ident(ref id) => parse_content_quote_keyword(p, id),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// counter()/counters()/attr() 函数体分派（嵌套块内；其余函数名拒绝）。
+fn parse_content_fn_body(p: &mut Parser<'_>, name: &str) -> ValResult<ContentPiece> {
+    match name.to_ascii_lowercase().as_str() {
+        "counter" => {
+            let idt = parse_content_ident(p)?;
+            let style = parse_content_opt_style(p)?;
+            Ok(ContentPiece::Counter {
+                name: idt,
+                style: style.unwrap_or_else(|| "decimal".into()),
+            })
+        }
+        "counters" => {
+            let idt = parse_content_ident(p)?;
+            p.skip_whitespace();
+            p.expect_comma()?;
+            let sep = parse_content_string(p)?;
+            let style = parse_content_opt_style(p)?;
+            Ok(ContentPiece::Counters {
+                name: idt,
+                separator: sep,
+                style: style.unwrap_or_else(|| "decimal".into()),
+            })
+        }
+        "attr" => {
+            let idt = parse_content_ident(p)?;
+            Ok(ContentPiece::Attr(idt))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// <custom-ident>（counter 名/attr 名；cssparser Token::Ident 直取）。
+fn parse_content_ident(p: &mut Parser<'_>) -> ValResult<String> {
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    match t {
+        cssparser::Token::Ident(ref id) => Ok(id.to_string()),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// <string>（counters 分隔符）。
+fn parse_content_string(p: &mut Parser<'_>) -> ValResult<String> {
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    match t {
+        cssparser::Token::QuotedString(ref s) => Ok(s.to_string()),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// 可选尾参 <counter-style>（ident；decimal/upper-roman 等文法名接受，
+/// 渲染仅 decimal 生效——偏差【B】）。前置逗号必需：`counter(x, style)`。
+fn parse_content_opt_style(p: &mut Parser<'_>) -> ValResult<Option<String>> {
+    p.skip_whitespace();
+    // 无逗号 → 无第二参（剩余 token 由上层 parse_entirely 判尾垃圾）。
+    if p.try_parse(|p| p.expect_comma()).is_err() {
+        return Ok(None);
+    }
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    match t {
+        cssparser::Token::Ident(ref id) => Ok(Some(id.to_string())),
         _ => Err(p.new_error_for_next_token()),
     }
 }
@@ -5593,6 +5801,9 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::TransitionTimingFunction => parse_transition_timing(p),
         P::TransitionBehavior => parse_transition_behavior(p),
         P::VerticalAlign => parse_vertical_align(p),
+        P::CounterReset => parse_counter_list(p, 0),
+        P::CounterIncrement => parse_counter_list(p, 1),
+        P::Quotes => parse_quotes(p),
         P::Hyphens => parse_hyphens(p),
         P::BackdropFilter => parse_filter_value_list(p),
         P::TextOverflow => parse_text_overflow(p),
@@ -5915,6 +6126,128 @@ pub fn parse_vertical_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     // <length-percentage>（% 基准=行高，settle_lines 结算期换算）
     let lp = crate::css::value::parse_length_percentage(p)?;
     Ok(DeclValue::VerticalAlign(VerticalAlignKind::Length(lp)))
+}
+
+/// quotes 值族（P5，ADR-0036 D3）：auto | none | [<string> <string>]#。
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum QuotesValue {
+    /// auto — UA 缺省对表（“” ‘’；计算期物化为 Pairs，见
+    /// ComputedStyle::quotes_pairs）。
+    Auto,
+    /// none — open-quote/no-close-quote 不输出。
+    None,
+    /// 显式对表（按引用深度取对，超出取最后一对）。
+    Pairs(Vec<(String, String)>),
+}
+
+/// counter-reset / counter-increment 解析（P5，ADR-0036 D2）：
+/// `none | [ <custom-ident> <integer>? ]#`。integer 缺省物化（reset=0 /
+/// increment=1）；重复 ident 后者胜（求值期语义，解析保序）。
+pub fn parse_counter_list(p: &mut Parser<'_>, default_step: i64) -> ValResult<DeclValue> {
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    if let Token::Ident(ref id) = t
+        && id.eq_ignore_ascii_case("none")
+    {
+        return Ok(DeclValue::CounterList(Vec::new()));
+    }
+    // 首项 ident（回退重放：try_parse 借用内的 next 已消费——直接用 t）。
+    let mut items: Vec<(String, i64)> = Vec::new();
+    match t {
+        Token::Ident(ref id)
+            if !id.starts_with("--")
+                && !matches!(
+                    id.to_ascii_lowercase().as_str(),
+                    "initial" | "inherit" | "unset" | "revert" | "none"
+                ) =>
+        {
+            items.push((id.to_string(), default_step));
+        }
+        _ => return Err(p.new_error_for_next_token()),
+    }
+    // css-lists-3 语法：[ <counter-name> <integer>? ]+ ——空格分隔，无逗号。
+    loop {
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        // 可选 <integer>（整数；小数拒绝）——绑定最后一个 ident 的步长。
+        if let Ok(step) = p.try_parse(|p| -> ValResult<i64> {
+            let t = p.next()?.clone();
+            match t {
+                Token::Number {
+                    int_value: Some(v), ..
+                } => Ok(v as i64),
+                _ => Err(p.new_error_for_next_token()),
+            }
+        }) {
+            if let Some(last) = items.last_mut() {
+                last.1 = step;
+            }
+            continue;
+        }
+        // 下一项 ident。
+        let t = p.next()?.clone();
+        match t {
+            Token::Ident(ref id)
+                if !id.starts_with("--")
+                    && !matches!(
+                        id.to_ascii_lowercase().as_str(),
+                        "initial" | "inherit" | "unset" | "revert" | "none"
+                    ) =>
+            {
+                items.push((id.to_string(), default_step));
+            }
+            _ => return Err(p.new_error_for_next_token()),
+        }
+    }
+    Ok(DeclValue::CounterList(items))
+}
+
+/// quotes 解析（P5，ADR-0036 D3）。
+pub fn parse_quotes(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    match t {
+        Token::Ident(ref id) if id.eq_ignore_ascii_case("auto") => {
+            Ok(DeclValue::Quotes(QuotesValue::Auto))
+        }
+        Token::Ident(ref id) if id.eq_ignore_ascii_case("none") => {
+            Ok(DeclValue::Quotes(QuotesValue::None))
+        }
+        Token::QuotedString(_) => {
+            // css-content-3：[ <string> <string> ]+ ——空格分隔对，无逗号。
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            let mut open: Option<String> = match t {
+                Token::QuotedString(s) => Some(s.to_string()),
+                _ => unreachable!(),
+            };
+            loop {
+                p.skip_whitespace();
+                // 对内第二串（必需）。
+                let close = match p.try_parse(parse_content_string) {
+                    Ok(c) => c,
+                    Err(_) => return Err(p.new_error_for_next_token()),
+                };
+                if let Some(o) = open.take() {
+                    pairs.push((o, close));
+                }
+                p.skip_whitespace();
+                if p.is_exhausted() {
+                    break;
+                }
+                // 下一对首串（必需）。
+                let t = p.next()?.clone();
+                open = match t {
+                    Token::QuotedString(ref s) => Some(s.to_string()),
+                    _ => return Err(p.new_error_for_next_token()),
+                };
+            }
+            Ok(DeclValue::Quotes(QuotesValue::Pairs(pairs)))
+        }
+        _ => Err(p.new_error_for_next_token()),
+    }
 }
 
 fn parse_animation_name(p: &mut Parser<'_>) -> ValResult<DeclValue> {

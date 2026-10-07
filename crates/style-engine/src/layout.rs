@@ -365,10 +365,14 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
 
     let mut ts = Style {
         display: if cs.pseudo().is_some()
-            && !matches!(cs.content(), crate::css::property::ContentValue::Str(_))
-        {
+            && !cs.content_pieces().map_or_else(
+                || matches!(cs.content(), crate::css::property::ContentValue::Str(_)),
+                |pieces| !pieces.is_empty(),
+            ) {
             // C1（ADR-0015）：伪节点 content none/normal → 无盒（spec：
-            // content 仅作用于伪元素；宿主节点恒 Normal 不受影响）
+            // content 仅作用于伪元素；宿主节点恒 Normal 不受影响）。
+            // P5（ADR-0036）：content 升级 <content-list>——单串也承载为
+            // Seq，生成判定按 Seq 非空（旧 Str 形态兼容保留）。
             taffy::prelude::Display::None
         } else {
             match cs.display() {

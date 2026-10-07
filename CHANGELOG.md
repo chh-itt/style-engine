@@ -800,6 +800,28 @@
   repeat 几何×3（space gap/round 拉伸/直测五轴）、命中×2（clip 圆外
   穿透/transform 旋转盒）、装饰像素×2（wavy 纵跨/double 双带列扫）、
   自适应段数×1、四向简写×1。全量 **572** 测试绿（559→572）。
+- **UA 起源样式表 + counters/quotes 生成内容（P5 批，ADR-0033/0036）**：
+  ①**UA 表挂点**（ADR-0033）：`ua_sheet` 字段 + `set_ua_stylesheet`/
+  `clear_ua_stylesheet`（镜像 user 表五步链）；级联收集序
+  Default→**UA**→User→Author（cascade_declarations/cascade_channel 尾参
+  ua_sheet，::selection/::placeholder 同挂）；@property/@font-face 合并序
+  UA 先于 user；`pub mod builtins::DEFAULT_UA_SHEET`（HTML 语义最小表：
+  块级清单/h1–h6 字号边距/bold/italic/装饰线/monospace/pre——b/strong
+  bold 物化、small/big 绝对关键字 B 级在案）；默认不装载（中立契约）；
+  important 反转链锁实测：UA-important(6) > Author-important(4)（UA
+  无障碍语义，css-cascade-5 反转）。②**生成内容扩展**（ADR-0036）：
+  content 升级 `<content-list>`（`ContentPiece` 九变体 Seq 承载：
+  counter()/counters()/attr()/open-quote 族；url() 维持拒绝）；新槽位
+  counter-reset/counter-increment/quotes（SLOT_COUNT 180；`[ <ident>
+  <integer>? ]+` 空格分隔、重复 ident 后者胜；quotes auto=拉丁四引号
+  内置对）；`sync_pseudo_text` 重写树序 DFS 求值 pass——计数器帧栈
+  （reset 压帧遮蔽、increment 全栈累加、**merge 弹出=兄弟继承**）、
+  counter() 最内帧/counters() 全帧 join、attr() 读 originating element、
+  open/close-quote 深度配对（close 深度 0 静默）；map_style 伪节点
+  Display 判定随 Seq 形态升级（回归保护）。锁定测试 +8：UA 级联序与
+  important 反转、内置表装载/清除、counter 解析 15 例、树序计数
+  1/2/3、reset 作用域 1/1/1、嵌套 join "1.1"、attr 存在/缺失、quotes
+  配对/越配静默。全量 **580** 测试绿（572→580）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

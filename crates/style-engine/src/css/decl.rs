@@ -3311,4 +3311,133 @@ mod tests {
         }
         let _ = PropertyId::VerticalAlign;
     }
+
+    #[test]
+    fn counter_props_parse_family() {
+        use crate::css::property::DeclValue as Dv;
+        use crate::css::property::{ContentPiece as Cp, ContentValue};
+        use crate::css::property::{PropertyId, QuotesValue};
+        // P5（ADR-0036 D2）：counter-reset / counter-increment。
+        for (src, want) in [
+            (
+                "counter-reset: chapter",
+                vec![("chapter".to_string(), 0i64)],
+            ),
+            (
+                "counter-reset: chapter 5 section 2",
+                vec![("chapter".into(), 5), ("section".into(), 2)],
+            ),
+            ("counter-reset: a -1", vec![("a".into(), -1)]),
+            ("counter-reset: none", vec![]),
+            ("counter-increment: chapter", vec![("chapter".into(), 1)]),
+            ("counter-increment: chapter 3", vec![("chapter".into(), 3)]),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            match parsed(&b.decls[0]) {
+                Dv::CounterList(items) => assert_eq!(items, &want, "{src}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // 拒绝：裸数字首项 / 小数步长 / 前导逗号 / 逗号分隔（css-lists-3 为空格分隔语法）。
+        for src in [
+            "counter-reset: 5",
+            "counter-increment: a 1.5",
+            "counter-increment: , a",
+            "counter-reset: a , b",
+        ] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+        let _ = PropertyId::CounterReset;
+        let _ = PropertyId::CounterIncrement;
+
+        // P5（ADR-0036 D3）：quotes。
+        for (src, want) in [
+            ("quotes: none", QuotesValue::None),
+            (
+                "quotes: '«' '»'",
+                QuotesValue::Pairs(vec![("«".into(), "»".into())]),
+            ),
+            (
+                "quotes: '«' '»' '„' '“'",
+                QuotesValue::Pairs(vec![("«".into(), "»".into()), ("„".into(), "“".into())]),
+            ),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            match parsed(&b.decls[0]) {
+                Dv::Quotes(q) => assert_eq!(q, &want, "{src}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // 拒绝：单只串（open 无 close）/ 尾垃圾。
+        for src in ["quotes: '«'", "quotes: auto none", "quotes: '«' 5"] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+
+        // P5（ADR-0036 D1）：content <content-list> 序列。
+        for (src, want) in [
+            (
+                "content: counter(x)",
+                ContentValue::Seq(vec![Cp::Counter {
+                    name: "x".into(),
+                    style: "decimal".into(),
+                }]),
+            ),
+            (
+                "content: counter(x, upper-roman)",
+                ContentValue::Seq(vec![Cp::Counter {
+                    name: "x".into(),
+                    style: "upper-roman".into(),
+                }]),
+            ),
+            (
+                "content: counters(x, '.')",
+                ContentValue::Seq(vec![Cp::Counters {
+                    name: "x".into(),
+                    separator: ".".into(),
+                    style: "decimal".into(),
+                }]),
+            ),
+            (
+                "content: attr(title)",
+                ContentValue::Seq(vec![Cp::Attr("title".into())]),
+            ),
+            (
+                "content: open-quote",
+                ContentValue::Seq(vec![Cp::OpenQuote]),
+            ),
+            (
+                "content: '[' counter(x) ']'",
+                ContentValue::Seq(vec![
+                    Cp::Str("[".into()),
+                    Cp::Counter {
+                        name: "x".into(),
+                        style: "decimal".into(),
+                    },
+                    Cp::Str("]".into()),
+                ]),
+            ),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            match parsed(&b.decls[0]) {
+                Dv::Content(c) => assert_eq!(c, &want, "{src}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // 拒绝：url() 仍拒绝 / counter 缺名 / counters 缺分隔串 / 逗号分隔。
+        for src in [
+            "content: url(#x)",
+            "content: counter()",
+            "content: counters(x)",
+            "content: counter(a), counter(b)",
+            "content: wat(1)",
+        ] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+    }
 }

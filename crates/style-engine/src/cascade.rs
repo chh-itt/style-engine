@@ -525,13 +525,28 @@ pub fn cascade_declarations<'a>(
     user_sheet: Option<&'a Stylesheet>,
     env: &MediaEnv,
     container_ctx: &[ContainerCtx],
+    ua_sheet: Option<&'a Stylesheet>,
 ) -> CascadeOutput<'a> {
     let node = tree.node(id);
     let mut out = CascadeOutput::default();
 
-    // User → Author 依次收集（压入序 = 源序；同键后者胜仅在同层内成立，
+    // UA → User → Author 依次收集（压入序 = 源序；同键后者胜仅在同层内成立，
     // 跨 origin/层由 beats 序键定夺）。B2：sheets 按值收取——输出只借表
     // 内容（'a），不借 Vec 本身，调用方行内临时构造即可。
+    // P5（ADR-0033）：UA 表挂点——Origin::UserAgent 层序 (1,6) 既有，
+    // important 反转自动生效。
+    if let Some(ua) = ua_sheet {
+        collect_sheet(
+            &mut out,
+            tree,
+            id,
+            ua,
+            Origin::UserAgent,
+            env,
+            container_ctx,
+            None,
+        );
+    }
     if let Some(user) = user_sheet {
         collect_sheet(
             &mut out,
@@ -596,11 +611,12 @@ pub fn cascade_declarations<'a>(
     out
 }
 
-/// C4（ADR-0018）：通道级联（::selection/::placeholder）——user → author
-/// 序逐表收集对应通道规则（origin 直配由 match_pseudo_element 承担：
+/// C4（ADR-0018）：通道级联（::selection/::placeholder）——UA → user →
+/// author 序逐表收集对应通道规则（origin 直配由 match_pseudo_element 承担：
 /// pseudo == None 即命中）；无内联段（style 属性无法指向伪元素，spec
 /// 一致）；尾部与 cascade_declarations 同形（resolve_revert → retain →
 /// 排序）。
+#[allow(clippy::too_many_arguments)]
 pub fn cascade_channel<'a>(
     tree: &'a StyleTree,
     id: NodeId,
@@ -609,8 +625,21 @@ pub fn cascade_channel<'a>(
     env: &MediaEnv,
     container_ctx: &[ContainerCtx],
     channel: PseudoElement,
+    ua_sheet: Option<&'a Stylesheet>,
 ) -> CascadeOutput<'a> {
     let mut out = CascadeOutput::default();
+    if let Some(ua) = ua_sheet {
+        collect_sheet(
+            &mut out,
+            tree,
+            id,
+            ua,
+            Origin::UserAgent,
+            env,
+            container_ctx,
+            Some(channel),
+        );
+    }
     if let Some(user) = user_sheet {
         collect_sheet(
             &mut out,
@@ -689,7 +718,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &[]);
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
         assert_eq!(color_of(&out).unwrap()[0], 1.0); // red 胜
     }
 
@@ -698,7 +735,15 @@ mod tests {
         // important 样式表胜过高特异性 normal
         let sheet = parse_stylesheet("div { color: blue !important } .a { color: red }");
         let (tree, n) = tree_one("color: green");
-        let out = cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &[]);
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
         assert_eq!(color_of(&out).unwrap()[2], 1.0); // blue 胜
     }
 
@@ -706,7 +751,15 @@ mod tests {
     fn inline_normal_beats_stylesheet_normal() {
         let sheet = parse_stylesheet("div { color: red }");
         let (tree, n) = tree_one("color: blue");
-        let out = cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &[]);
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
         assert_eq!(color_of(&out).unwrap()[2], 1.0); // blue 胜
     }
 
@@ -723,7 +776,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &[]);
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
         assert_eq!(color_of(&out).unwrap()[2], 1.0); // 后者 blue 胜
     }
 
@@ -749,13 +810,13 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            cascade_declarations(&tree, n, vec![&sheet], None, &wide, &[])
+            cascade_declarations(&tree, n, vec![&sheet], None, &wide, &[], None)
                 .winners
                 .iter()
                 .any(|(p, _)| *p == PropertyId::Color)
         );
         assert!(
-            cascade_declarations(&tree, n, vec![&sheet], None, &narrow, &[])
+            cascade_declarations(&tree, n, vec![&sheet], None, &narrow, &[], None)
                 .winners
                 .is_empty()
         );
@@ -765,7 +826,15 @@ mod tests {
     fn custom_inline_beats_stylesheet() {
         let sheet = parse_stylesheet("div { --x: 10px }");
         let (tree, n) = tree_one("--x: 20px");
-        let out = cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &[]);
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
         assert_eq!(out.custom_winners.len(), 1);
         assert_eq!(
             crate::css::decl::token_buf_to_string(
@@ -808,14 +877,29 @@ mod tests {
             ctx(&["panel"], ContainerType::InlineSize, 320.0),
             ctx(&[], ContainerType::InlineSize, 400.0),
         ];
-        let out = cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &stack);
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &stack,
+            None,
+        );
         // 有名段查到 panel=320 ≥ 300 命中；无名段取最近 400 ≥ 350 命中——
         // 同特异性后者胜 → blue。
         assert_eq!(color_of(&out).unwrap()[2], 1.0);
         // 有名段：panel 只匹配名为 panel 的容器——400 的无名容器不参与。
         let stack2 = [ctx(&[], ContainerType::InlineSize, 400.0)];
-        let out2 =
-            cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &stack2);
+        let out2 = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &stack2,
+            None,
+        );
         assert!(out2.winners.iter().any(|(p, _)| *p == PropertyId::Color));
         let only_named =
             parse_stylesheet("@container panel (min-width: 300px) { .a { color: red } }");
@@ -826,7 +910,8 @@ mod tests {
                 vec![&only_named],
                 None,
                 &MediaEnv::default(),
-                &stack2
+                &stack2,
+                None,
             )
             .winners
             .is_empty()
@@ -834,9 +919,17 @@ mod tests {
         // 尺寸不达标 → 不命中。
         let small = [ctx(&["panel"], ContainerType::InlineSize, 200.0)];
         assert!(
-            cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &small)
-                .winners
-                .is_empty()
+            cascade_declarations(
+                &tree,
+                n,
+                vec![&sheet],
+                None,
+                &MediaEnv::default(),
+                &small,
+                None
+            )
+            .winners
+            .is_empty()
         );
     }
 
@@ -860,14 +953,29 @@ mod tests {
             },
         );
         let stack = [ctx(&[], ContainerType::InlineSize, 400.0)];
-        let out = cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &stack);
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &stack,
+            None,
+        );
         // 高度特性与 orientation 均被门控，仅 min-width 命中 → blue。
         assert_eq!(color_of(&out).unwrap()[2], 1.0);
         // size 容器：块轴与 orientation 正常参与（400×100 → 横向）。
         let sheet2 = parse_stylesheet("@container (min-height: 50px) { .a { color: red } }");
         let stack2 = [ctx(&[], ContainerType::Size, 400.0)];
-        let out2 =
-            cascade_declarations(&tree, n, vec![&sheet2], None, &MediaEnv::default(), &stack2);
+        let out2 = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet2],
+            None,
+            &MediaEnv::default(),
+            &stack2,
+            None,
+        );
         assert_eq!(color_of(&out2).unwrap()[0], 1.0);
     }
 
@@ -887,9 +995,17 @@ mod tests {
             },
         );
         assert!(
-            cascade_declarations(&tree, n, vec![&sheet], None, &MediaEnv::default(), &[])
-                .winners
-                .is_empty()
+            cascade_declarations(
+                &tree,
+                n,
+                vec![&sheet],
+                None,
+                &MediaEnv::default(),
+                &[],
+                None
+            )
+            .winners
+            .is_empty()
         );
     }
 }

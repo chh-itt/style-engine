@@ -84,6 +84,8 @@ pub mod engine;
 #[cfg(feature = "layout")]
 pub mod layout;
 
+/// 内置 UA 起源样式表常量（P5，ADR-0033 D3）：默认不装载，宿主显式选择。
+pub mod builtins;
 pub mod cascade;
 pub mod computed;
 pub mod css;

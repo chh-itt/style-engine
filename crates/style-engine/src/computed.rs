@@ -357,6 +357,9 @@ pub fn inherits(id: PropertyId) -> bool {
             // F4（ADR-0028）：hyphens 继承（css-text-3 §5.4）；
             // backdrop-filter 不继承（同 filter，无需列出）。
             | P::Hyphens
+            // P5（ADR-0036 D3）：quotes 继承（css-content-3）；
+            // counter-reset/counter-increment 不继承（css-lists-3）。
+            | P::Quotes
     )
 }
 
@@ -403,6 +406,9 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         P::VerticalAlign => {
             DeclValue::VerticalAlign(crate::css::property::VerticalAlignKind::Baseline)
         }
+        // P5（ADR-0036 D2/D3）：计数器空表（不继承）/ quotes auto（继承）。
+        P::CounterReset | P::CounterIncrement => DeclValue::CounterList(Vec::new()),
+        P::Quotes => DeclValue::Quotes(crate::css::property::QuotesValue::Auto),
         P::MinWidth | P::MinHeight => DeclValue::Len(LengthPercentage::Px(0.0)),
         P::AspectRatio => DeclValue::AspectRatio(None),
         // margin 初始值为 0（CSS）；显式 auto 仍解析为 LenAuto(None) → 居中语义保留
@@ -827,6 +833,46 @@ impl ComputedStyle {
         }
     }
 
+    /// content 序列段视图（P5，ADR-0036 D1）：`Seq` 时返回段表；
+    /// `Str`/`None`/`Normal` → None（Str 走 `content()` 单串快路径）。
+    pub fn content_pieces(&self) -> Option<&[crate::css::property::ContentPiece]> {
+        match self.get(PropertyId::Content) {
+            Some(DeclValue::Content(crate::css::property::ContentValue::Seq(p))) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// counter-reset 计算值（P5，ADR-0036 D2）：`[(name, 初始值)]` 表
+    ///（none → 空表）。
+    pub fn counter_reset(&self) -> &[(String, i64)] {
+        match self.get(PropertyId::CounterReset) {
+            Some(DeclValue::CounterList(items)) => items,
+            _ => &[],
+        }
+    }
+
+    /// counter-increment 计算值（P5，ADR-0036 D2）：`[(name, 步长)]` 表
+    ///（none → 空表）。
+    pub fn counter_increment(&self) -> &[(String, i64)] {
+        match self.get(PropertyId::CounterIncrement) {
+            Some(DeclValue::CounterList(items)) => items,
+            _ => &[],
+        }
+    }
+
+    /// quotes 引号对表（P5，ADR-0036 D3）：auto 物化缺省对表
+    /// `“” ‘’`（css-content-3 §3）；none → 空表。
+    pub fn quotes_pairs(&self) -> Vec<(String, String)> {
+        match self.get(PropertyId::Quotes) {
+            Some(DeclValue::Quotes(crate::css::property::QuotesValue::Pairs(p))) => p.clone(),
+            Some(DeclValue::Quotes(crate::css::property::QuotesValue::None)) => Vec::new(),
+            _ => vec![
+                ("\u{201C}".to_string(), "\u{201D}".to_string()),
+                ("\u{2018}".to_string(), "\u{2019}".to_string()),
+            ],
+        }
+    }
+
     /// hyphens 连字符断字模式（F4，ADR-0028 D2；initial=manual；断词
     /// 效果受上游分段器边界，三值 v1 行为一致）。
     pub fn hyphens(&self) -> crate::css::property::HyphensKind {
@@ -1241,6 +1287,7 @@ pub fn compute_node<'a>(
         env,
         parent,
         &[],
+        None,
     )
 }
 
@@ -1249,7 +1296,8 @@ pub fn compute_node<'a>(
 /// 为用户起源样式表（None = 无）。B2：`sheets` 为 author 表组按值（主表
 /// 在前、附加表按登记序 = 文档序）。B4：`registered` 为文档级 @property
 /// 注册表（引擎附着期合并；独立 compute_node 无注册表 = 空）。
-#[allow(clippy::too_many_arguments)] // 公开 API 形状保持（B2 user_sheet/B4 registered 扩展位）
+/// P5（ADR-0033）：`ua_sheet` 为 UA 起源样式表（None = 无；收集序最前）。
+#[allow(clippy::too_many_arguments)] // 公开 API 形状保持（B2 user_sheet/B4 registered/P5 ua_sheet 扩展位）
 pub fn compute_node_in<'a>(
     tree: &'a StyleTree,
     id: NodeId,
@@ -1259,8 +1307,9 @@ pub fn compute_node_in<'a>(
     env: &MediaEnv,
     parent: Option<&ComputedStyle>,
     container_ctx: &[ContainerCtx],
+    ua_sheet: Option<&'a Stylesheet>,
 ) -> ComputedStyle {
-    let cascaded = cascade_declarations(tree, id, sheets, user_sheet, env, container_ctx);
+    let cascaded = cascade_declarations(tree, id, sheets, user_sheet, env, container_ctx, ua_sheet);
     compute_node_from_cascade(tree, id, cascaded, registered, env, parent)
 }
 
