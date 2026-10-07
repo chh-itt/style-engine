@@ -837,6 +837,33 @@
   缺口）。锁定测试 +5：键提取五类矩阵/判定四 case/user 表 @container
   检出/无关子树否决走增量+remove 失配捕获/前缀组合器哨兵命中。全量
   **584** 测试绿（580→584）。
+- **span 富文本 soft 落地 + 表格 max-content 列 + 多动画组（P7 批）**：
+  ①**soft 端 TextSpanPaint 全消费**（vello 端 T5c 已有，soft 端此前丢弃
+  spans——两端收口）：`text_device_polys`/`draw_text` 加基色+spans 参数，
+  逐字符按字节偏移归属 span（后 span 胜同 vello rev-find）、span 感知
+  颜色/字号/族（族切换重解析 SoftFont、字号≠基重算 scale），字形着色
+  逐组 fill_polygons；影字路径传真实 spans（形状感知）、blur>0 影子
+  取基样式形状（B 级在案）；装饰线仍基样式单行近似（B 级）。锁定测试
+  +2（双色分段/字号混合高度）。②**表格 auto 列 max-content 比例分配**
+  （v1「等分剩余」偏差退役）：`table_column_template` 加尾参
+  `content_max: &[f32]`——**破坏（T-签名）**：调用方需追传内容宽度切片
+  （等价旧行为传 `&[]`）；auto 列按内容 max-content 比例分剩余宽
+  （m>0 且总量>0），全零回退等分，空列 0 宽（Chromium 一致）；引擎侧
+  `content_max_width` 子树文本叶测量兜底（taffy MaxContent 探针对文本
+  =0，同 settle_lines 范式）+根格水平内缩；嵌套盒结构组合近似单叶最大
+  （B 级在案）。锁定测试 +4（单测比例/零回退/空列零宽+引擎级比例与
+  等宽对照）。③**多动画组**（css-animations-1 `<single-animation>#`）：
+  七描述符列表化（`AnimationNameList/AnimationTimeList/
+  AnimationIterationList/AnimationTimingList/AnimationDirectionList/
+  AnimationFillModeList`，**T-扩展**加法式——旧单值变体保留兼容，
+  解析器恒产列表）；描述符按 `i % len` 循环补齐（组数=name 列表长）；
+  `apply_animations` 组循环逐组采样（后组胜同槽覆写、结束无填充组
+  逐槽恢复底层值、underlying 快照节点级共享锚定级联值、全组结束清
+  副本）；`animation` 简写升级 `<single-animation>#` 多组（组间逗号、
+  组内缺省回 CSS 初始、空组整条拒绝）；animation_covered_slots 组
+  并集。锁定测试 +3（解析九正五拒/简写两组缺省物化/双组并行
+  both-无fill 三时刻/循环补齐两组同 duration）。全量 **594** 测试绿
+  （584→594）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）

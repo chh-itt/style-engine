@@ -1517,6 +1517,20 @@ pub enum DeclValue {
     AnimationDirection(AnimDirection),
     /// animation-fill-mode — 动画外填充模式。
     AnimationFillMode(AnimFillMode),
+    /// animation-name 多值列表（P7-②）：`[ none | <custom-ident> ]#`。
+    /// `None` 项 = none（该组无动画）。解析器恒产列表（单值 = 单项）。
+    AnimationNameList(SmallVec<[Option<String>; 2]>),
+    /// animation-duration / animation-delay 多值列表（P7-②）：
+    /// `<time>#`，秒。duration 拒负、delay 允负（快进语义）。
+    AnimationTimeList(SmallVec<[f32; 2]>),
+    /// animation-iteration-count 多值列表（P7-②）：`[ <number> | infinite ]#`。
+    AnimationIterationList(SmallVec<[f32; 2]>),
+    /// animation-timing-function 多值列表（P7-②）：`<easing-function>#`。
+    AnimationTimingList(SmallVec<[TimingFn; 2]>),
+    /// animation-direction 多值列表（P7-②）：`<single-animation-direction>#`。
+    AnimationDirectionList(SmallVec<[AnimDirection; 2]>),
+    /// animation-fill-mode 多值列表（P7-②）：`<single-animation-fill-mode>#`。
+    AnimationFillModeList(SmallVec<[AnimFillMode; 2]>),
     // transition 描述符（G1，ADR-0032）：不可被过渡的目标、不参与
     // DeclValue 插值
     /// transition-property — 可过渡属性名列表（none|all|custom-ident#）。
@@ -5789,7 +5803,8 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::OutlineColor => parse_color(p),
         P::OutlineOffset => parse_len(p),
         P::AnimationName => parse_animation_name(p),
-        P::AnimationDuration | P::AnimationDelay => parse_time_seconds(p),
+        P::AnimationDuration => parse_animation_time(p, false),
+        P::AnimationDelay => parse_animation_time(p, true),
         P::AnimationIterationCount => parse_iteration_count(p),
         P::AnimationTimingFunction => parse_timing_fn(p),
         P::AnimationDirection => parse_anim_direction(p),
@@ -6250,51 +6265,110 @@ pub fn parse_quotes(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
+/// animation-name（P7-② 列表化）：`[ none | <custom-ident> ]#`。
+/// 自定义标识 --* 与 CSS 宽关键字拒绝为动画名；恒产列表变体。
 fn parse_animation_name(p: &mut Parser<'_>) -> ValResult<DeclValue> {
-    // none | <ident>（自定义标识 --* 与 CSS 宽关键字拒绝为动画名）
-    let t = p.next()?.clone();
-    match &t {
-        Token::Ident(id) if id.eq_ignore_ascii_case("none") => Ok(DeclValue::AnimationName(None)),
-        Token::Ident(id)
-            if !id.starts_with("--")
-                && !matches!(
-                    id.to_ascii_lowercase().as_str(),
-                    "initial" | "inherit" | "unset" | "revert"
-                ) =>
-        {
-            Ok(DeclValue::AnimationName(Some(id.to_string())))
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(id) if id.eq_ignore_ascii_case("none") => list.push(None),
+            Token::Ident(id)
+                if !id.starts_with("--")
+                    && !matches!(
+                        id.to_ascii_lowercase().as_str(),
+                        "initial" | "inherit" | "unset" | "revert"
+                    ) =>
+            {
+                list.push(Some(id.to_string()))
+            }
+            _ => return Err(p.new_error_for_next_token()),
         }
-        _ => Err(p.new_error_for_next_token()),
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
     }
+    Ok(DeclValue::AnimationNameList(list))
 }
 
-/// <time>（s/ms）→ 秒。负值合法（animation-delay 的提前段语义）。
-fn parse_time_seconds(p: &mut Parser<'_>) -> ValResult<DeclValue> {
-    let t = p.next()?.clone();
-    match &t {
-        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("s") => {
-            Ok(DeclValue::AnimationTime(*value))
+/// animation-duration / animation-delay 共用 `<time>#`（P7-② 列表化）：
+/// s/ms → 秒。duration 拒负（t∈[0,∞)）；delay 允负（快进语义）。
+fn parse_animation_time(p: &mut Parser<'_>, allow_negative: bool) -> ValResult<DeclValue> {
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        let t = p.next()?.clone();
+        let Token::Dimension { value, unit, .. } = &t else {
+            return Err(p.new_error_for_next_token());
+        };
+        let secs = if unit.eq_ignore_ascii_case("s") {
+            *value
+        } else if unit.eq_ignore_ascii_case("ms") {
+            value / 1000.0
+        } else {
+            return Err(p.new_error_for_next_token());
+        };
+        if secs < 0.0 && !allow_negative {
+            return Err(p.new_error_for_next_token());
         }
-        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("ms") => {
-            Ok(DeclValue::AnimationTime(value / 1000.0))
+        list.push(secs);
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
         }
-        _ => Err(p.new_error_for_next_token()),
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
     }
+    Ok(DeclValue::AnimationTimeList(list))
 }
 
+/// animation-iteration-count（P7-② 列表化）：`[ <number> | infinite ]#`。
 fn parse_iteration_count(p: &mut Parser<'_>) -> ValResult<DeclValue> {
-    let t = p.next()?.clone();
-    match &t {
-        Token::Ident(id) if id.eq_ignore_ascii_case("infinite") => {
-            Ok(DeclValue::AnimationIteration(f32::INFINITY))
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(id) if id.eq_ignore_ascii_case("infinite") => list.push(f32::INFINITY),
+            Token::Number { value, .. } if *value >= 0.0 => list.push(*value),
+            _ => return Err(p.new_error_for_next_token()),
         }
-        Token::Number { value, .. } if *value >= 0.0 => Ok(DeclValue::AnimationIteration(*value)),
-        _ => Err(p.new_error_for_next_token()),
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
     }
+    Ok(DeclValue::AnimationIterationList(list))
 }
 
+/// animation-timing-function（P7-② 列表化）：`<easing-function>#`。
 fn parse_timing_fn(p: &mut Parser<'_>) -> ValResult<DeclValue> {
-    parse_timing_fn_one(p).map(DeclValue::AnimationTiming)
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        list.push(parse_timing_fn_one(p)?);
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
+    }
+    Ok(DeclValue::AnimationTimingList(list))
 }
 
 /// <easing-function>（第五批⑰ 文法，G1 transition-timing-function 复用）：
@@ -6361,26 +6435,52 @@ pub(crate) fn timing_fn_steps_body(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     })
 }
 
+/// animation-direction（P7-② 列表化）：`<single-animation-direction>#`。
 fn parse_anim_direction(p: &mut Parser<'_>) -> ValResult<DeclValue> {
-    keyword(p, |k| match k.to_ascii_lowercase().as_str() {
-        "normal" => Some(DeclValue::AnimationDirection(AnimDirection::Normal)),
-        "reverse" => Some(DeclValue::AnimationDirection(AnimDirection::Reverse)),
-        "alternate" => Some(DeclValue::AnimationDirection(AnimDirection::Alternate)),
-        "alternate-reverse" => Some(DeclValue::AnimationDirection(
-            AnimDirection::AlternateReverse,
-        )),
-        _ => None,
-    })
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        list.push(keyword(p, |k| match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(AnimDirection::Normal),
+            "reverse" => Some(AnimDirection::Reverse),
+            "alternate" => Some(AnimDirection::Alternate),
+            "alternate-reverse" => Some(AnimDirection::AlternateReverse),
+            _ => None,
+        })?);
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
+    }
+    Ok(DeclValue::AnimationDirectionList(list))
 }
 
+/// animation-fill-mode（P7-② 列表化）：`<single-animation-fill-mode>#`。
 fn parse_anim_fill_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
-    keyword(p, |k| match k.to_ascii_lowercase().as_str() {
-        "none" => Some(DeclValue::AnimationFillMode(AnimFillMode::None)),
-        "forwards" => Some(DeclValue::AnimationFillMode(AnimFillMode::Forwards)),
-        "backwards" => Some(DeclValue::AnimationFillMode(AnimFillMode::Backwards)),
-        "both" => Some(DeclValue::AnimationFillMode(AnimFillMode::Both)),
-        _ => None,
-    })
+    let mut list = SmallVec::new();
+    loop {
+        p.skip_whitespace();
+        list.push(keyword(p, |k| match k.to_ascii_lowercase().as_str() {
+            "none" => Some(AnimFillMode::None),
+            "forwards" => Some(AnimFillMode::Forwards),
+            "backwards" => Some(AnimFillMode::Backwards),
+            "both" => Some(AnimFillMode::Both),
+            _ => None,
+        })?);
+        p.skip_whitespace();
+        if p.is_exhausted() {
+            break;
+        }
+        match p.next()? {
+            Token::Comma => continue,
+            _ => return Err(p.new_error_for_next_token()),
+        }
+    }
+    Ok(DeclValue::AnimationFillModeList(list))
 }
 
 // ---------- transition（G1，ADR-0032）：五长手解析 ----------

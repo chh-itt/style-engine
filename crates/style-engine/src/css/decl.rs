@@ -1437,21 +1437,55 @@ pub(crate) fn expand_shorthand(
             ]
         }
         "animation" => {
-            // 第五批⑰动画简写：单动画组 MVP——<time> 首现=duration、次现
-            // =delay；关键字先行消歧（infinite/方向/fill/timing/steps()），
-            // 余下 ident=动画名；<number>=iteration-count。多动画组（逗号
-            // 分隔）为残余偏差（遇逗号报错→整条容错丢弃）
-            let mut duration: Option<DeclValue> = None;
-            let mut delay: Option<DeclValue> = None;
-            let mut iteration: Option<DeclValue> = None;
-            let mut timing: Option<DeclValue> = None;
-            let mut direction: Option<DeclValue> = None;
-            let mut fill: Option<DeclValue> = None;
-            let mut name: Option<DeclValue> = None;
+            // 第五批⑰动画简写 + P7-② 多动画组：<single-animation>#。
+            // 组内顺序自由：<time> 首现=duration、次现=delay；关键字先行
+            // 消歧（infinite/方向/fill/timing/steps()），<number>=iteration
+            // -count，余下首个 ident=动画名（--* 与 none 例外：none=该组
+            // 无动画）。组间逗号分段；组内缺省部件回 CSS 初始
+            //（duration/delay=0s、iteration=1、timing=ease、direction=
+            // normal、fill=none、name=none）。空组（前导/尾逗号）→ 整条
+            // 拒绝（简写语义=整条容错丢弃）。
+            use crate::css::property::{AnimDirection, AnimFillMode, TimingFn};
+            #[derive(Clone)]
+            struct AnimGroup {
+                name: Option<String>,
+                duration: f32,
+                delay: f32,
+                iteration: f32,
+                timing: TimingFn,
+                direction: AnimDirection,
+                fill: AnimFillMode,
+                named: bool,
+                touched: bool,
+            }
+            impl Default for AnimGroup {
+                fn default() -> Self {
+                    Self {
+                        name: None,
+                        duration: 0.0,
+                        delay: 0.0,
+                        iteration: 1.0,
+                        timing: TimingFn::Ease,
+                        direction: AnimDirection::Normal,
+                        fill: AnimFillMode::None,
+                        named: false,
+                        touched: false,
+                    }
+                }
+            }
+            let mut groups: Vec<AnimGroup> = Vec::new();
+            let mut cur = AnimGroup::default();
             let mut times = 0u32;
             while let Ok(t) = p.next() {
                 let t = t.clone();
                 match &t {
+                    Token::Comma => {
+                        if !cur.touched {
+                            return Err(p.new_error_for_next_token());
+                        }
+                        groups.push(std::mem::take(&mut cur));
+                        times = 0;
+                    }
                     Token::Dimension { value, unit, .. }
                         if unit.eq_ignore_ascii_case("s") || unit.eq_ignore_ascii_case("ms") =>
                     {
@@ -1462,100 +1496,120 @@ pub(crate) fn expand_shorthand(
                         };
                         times += 1;
                         if times == 1 {
-                            duration = Some(DeclValue::AnimationTime(secs));
+                            cur.duration = secs;
                         } else if times == 2 {
-                            delay = Some(DeclValue::AnimationTime(secs));
+                            cur.delay = secs;
                         } else {
                             return Err(p.new_error_for_next_token());
                         }
+                        cur.touched = true;
                     }
                     Token::Number { value, .. } => {
                         if *value < 0.0 {
                             return Err(p.new_error_for_next_token());
                         }
-                        iteration = Some(DeclValue::AnimationIteration(*value));
+                        cur.iteration = *value;
+                        cur.touched = true;
                     }
                     Token::Function(f) if f.eq_ignore_ascii_case("steps") => {
-                        timing = Some(crate::css::property::timing_fn_steps_body(p)?);
+                        match crate::css::property::timing_fn_steps_body(p)? {
+                            DeclValue::AnimationTiming(t) => cur.timing = t,
+                            _ => return Err(p.new_error_for_next_token()),
+                        }
+                        cur.touched = true;
                     }
                     Token::Ident(id) => {
                         let lower = id.to_ascii_lowercase();
                         match lower.as_str() {
                             "infinite" => {
-                                iteration = Some(DeclValue::AnimationIteration(f32::INFINITY));
+                                cur.iteration = f32::INFINITY;
                             }
                             "reverse" => {
-                                direction = Some(DeclValue::AnimationDirection(
-                                    crate::css::property::AnimDirection::Reverse,
-                                ));
+                                cur.direction = AnimDirection::Reverse;
                             }
                             "alternate" => {
-                                direction = Some(DeclValue::AnimationDirection(
-                                    crate::css::property::AnimDirection::Alternate,
-                                ));
+                                cur.direction = AnimDirection::Alternate;
                             }
                             "alternate-reverse" => {
-                                direction = Some(DeclValue::AnimationDirection(
-                                    crate::css::property::AnimDirection::AlternateReverse,
-                                ));
+                                cur.direction = AnimDirection::AlternateReverse;
                             }
                             "forwards" => {
-                                fill = Some(DeclValue::AnimationFillMode(
-                                    crate::css::property::AnimFillMode::Forwards,
-                                ));
+                                cur.fill = AnimFillMode::Forwards;
                             }
                             "backwards" => {
-                                fill = Some(DeclValue::AnimationFillMode(
-                                    crate::css::property::AnimFillMode::Backwards,
-                                ));
+                                cur.fill = AnimFillMode::Backwards;
                             }
                             "both" => {
-                                fill = Some(DeclValue::AnimationFillMode(
-                                    crate::css::property::AnimFillMode::Both,
-                                ));
+                                cur.fill = AnimFillMode::Both;
                             }
                             "linear" | "ease" | "ease-in" | "ease-out" | "ease-in-out" => {
-                                timing = Some(DeclValue::AnimationTiming(match lower.as_str() {
-                                    "linear" => crate::css::property::TimingFn::Linear,
-                                    "ease" => crate::css::property::TimingFn::Ease,
-                                    "ease-in" => crate::css::property::TimingFn::EaseIn,
-                                    "ease-out" => crate::css::property::TimingFn::EaseOut,
-                                    _ => crate::css::property::TimingFn::EaseInOut,
-                                }));
+                                cur.timing = match lower.as_str() {
+                                    "linear" => TimingFn::Linear,
+                                    "ease" => TimingFn::Ease,
+                                    "ease-in" => TimingFn::EaseIn,
+                                    "ease-out" => TimingFn::EaseOut,
+                                    _ => TimingFn::EaseInOut,
+                                };
                             }
-                            "none" => name = Some(DeclValue::AnimationName(None)),
-                            _ if !id.starts_with("--") && name.is_none() => {
-                                name = Some(DeclValue::AnimationName(Some(id.to_string())));
+                            "none" => {
+                                cur.name = None;
+                                cur.named = true;
+                            }
+                            _ if !id.starts_with("--") && !cur.named => {
+                                cur.name = Some(id.to_string());
+                                cur.named = true;
                             }
                             _ => return Err(p.new_error_for_next_token()),
                         }
+                        cur.touched = true;
                     }
                     _ => return Err(p.new_error_for_next_token()),
                 }
             }
-            let mut out = Vec::new();
-            if let Some(v) = duration {
-                out.push((P::AnimationDuration, v));
+            if !cur.touched {
+                return Err(p.new_error_for_next_token());
             }
-            if let Some(v) = timing {
-                out.push((P::AnimationTimingFunction, v));
+            groups.push(cur);
+            if groups.is_empty() {
+                return Err(p.new_error_for_next_token());
             }
-            if let Some(v) = delay {
-                out.push((P::AnimationDelay, v));
+            let mut names: SmallVec<[Option<String>; 2]> = SmallVec::new();
+            let mut durs: SmallVec<[f32; 2]> = SmallVec::new();
+            let mut delays: SmallVec<[f32; 2]> = SmallVec::new();
+            let mut iterations: SmallVec<[f32; 2]> = SmallVec::new();
+            let mut timings: SmallVec<[TimingFn; 2]> = SmallVec::new();
+            let mut directions: SmallVec<[AnimDirection; 2]> = SmallVec::new();
+            let mut fills: SmallVec<[AnimFillMode; 2]> = SmallVec::new();
+            for g in &groups {
+                names.push(g.name.clone());
+                durs.push(g.duration);
+                delays.push(g.delay);
+                iterations.push(g.iteration);
+                timings.push(g.timing);
+                directions.push(g.direction);
+                fills.push(g.fill);
             }
-            if let Some(v) = iteration {
-                out.push((P::AnimationIterationCount, v));
-            }
-            if let Some(v) = direction {
-                out.push((P::AnimationDirection, v));
-            }
-            if let Some(v) = fill {
-                out.push((P::AnimationFillMode, v));
-            }
-            if let Some(v) = name {
-                out.push((P::AnimationName, v));
-            }
-            out
+            vec![
+                (P::AnimationDuration, DeclValue::AnimationTimeList(durs)),
+                (P::AnimationDelay, DeclValue::AnimationTimeList(delays)),
+                (
+                    P::AnimationTimingFunction,
+                    DeclValue::AnimationTimingList(timings),
+                ),
+                (
+                    P::AnimationIterationCount,
+                    DeclValue::AnimationIterationList(iterations),
+                ),
+                (
+                    P::AnimationDirection,
+                    DeclValue::AnimationDirectionList(directions),
+                ),
+                (
+                    P::AnimationFillMode,
+                    DeclValue::AnimationFillModeList(fills),
+                ),
+                (P::AnimationName, DeclValue::AnimationNameList(names)),
+            ]
         }
         "transition" => {
             // G1（ADR-0032）transition 简写：<single-transition>#。组内顺序
@@ -3436,6 +3490,160 @@ mod tests {
             "content: counter(a), counter(b)",
             "content: wat(1)",
         ] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+    }
+
+    #[test]
+    fn animation_descriptor_lists_parse() {
+        use crate::css::property::{
+            AnimDirection, AnimFillMode, DeclValue as Dv, PropertyId, TimingFn,
+        };
+        use smallvec::smallvec;
+        // P7-②：七描述符列表化（恒产列表变体，单值 = 单项）。
+        for (src, want) in [
+            (
+                "animation-name: a, b, none",
+                Dv::AnimationNameList(smallvec![Some("a".into()), Some("b".into()), None]),
+            ),
+            (
+                "animation-name: fade",
+                Dv::AnimationNameList(smallvec![Some("fade".into())]),
+            ),
+            (
+                "animation-duration: 1s, 250ms",
+                Dv::AnimationTimeList(smallvec![1.0, 0.25]),
+            ),
+            (
+                "animation-duration: 2s",
+                Dv::AnimationTimeList(smallvec![2.0]),
+            ),
+            (
+                "animation-delay: -0.5s, 1s",
+                Dv::AnimationTimeList(smallvec![-0.5, 1.0]),
+            ),
+            (
+                "animation-iteration-count: 2, infinite",
+                Dv::AnimationIterationList(smallvec![2.0, f32::INFINITY]),
+            ),
+            (
+                "animation-timing-function: linear, ease-in",
+                Dv::AnimationTimingList(smallvec![TimingFn::Linear, TimingFn::EaseIn]),
+            ),
+            (
+                "animation-direction: normal, alternate",
+                Dv::AnimationDirectionList(smallvec![
+                    AnimDirection::Normal,
+                    AnimDirection::Alternate
+                ]),
+            ),
+            (
+                "animation-fill-mode: none, forwards",
+                Dv::AnimationFillModeList(smallvec![AnimFillMode::None, AnimFillMode::Forwards]),
+            ),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            assert_eq!(parsed(&b.decls[0]), &want, "{src}");
+        }
+        // 拒绝：坏 token / 负 duration / 负 iteration。
+        for src in [
+            "animation-name: a, 2px",
+            "animation-duration: 1s, abc",
+            "animation-duration: -1s",
+            "animation-iteration-count: 2, -1",
+            "animation-timing-function: linear, wat",
+        ] {
+            let (_b, r) = block(src);
+            assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
+        }
+
+        // P7-②：animation 简写多组——组间逗号、组内缺省部件回 CSS 初始。
+        for (src, want) in [
+            (
+                "animation: a 1s linear, b 2s",
+                vec![
+                    (
+                        PropertyId::AnimationDuration,
+                        Dv::AnimationTimeList(smallvec![1.0, 2.0]),
+                    ),
+                    (
+                        PropertyId::AnimationDelay,
+                        Dv::AnimationTimeList(smallvec![0.0, 0.0]),
+                    ),
+                    (
+                        PropertyId::AnimationTimingFunction,
+                        Dv::AnimationTimingList(smallvec![TimingFn::Linear, TimingFn::Ease]),
+                    ),
+                    (
+                        PropertyId::AnimationIterationCount,
+                        Dv::AnimationIterationList(smallvec![1.0, 1.0]),
+                    ),
+                    (
+                        PropertyId::AnimationDirection,
+                        Dv::AnimationDirectionList(smallvec![
+                            AnimDirection::Normal,
+                            AnimDirection::Normal
+                        ]),
+                    ),
+                    (
+                        PropertyId::AnimationFillMode,
+                        Dv::AnimationFillModeList(smallvec![
+                            AnimFillMode::None,
+                            AnimFillMode::None
+                        ]),
+                    ),
+                    (
+                        PropertyId::AnimationName,
+                        Dv::AnimationNameList(smallvec![Some("a".into()), Some("b".into())]),
+                    ),
+                ],
+            ),
+            (
+                "animation: fade infinite alternate 3s both",
+                vec![
+                    (
+                        PropertyId::AnimationDuration,
+                        Dv::AnimationTimeList(smallvec![3.0]),
+                    ),
+                    (
+                        PropertyId::AnimationDelay,
+                        Dv::AnimationTimeList(smallvec![0.0]),
+                    ),
+                    (
+                        PropertyId::AnimationTimingFunction,
+                        Dv::AnimationTimingList(smallvec![TimingFn::Ease]),
+                    ),
+                    (
+                        PropertyId::AnimationIterationCount,
+                        Dv::AnimationIterationList(smallvec![f32::INFINITY]),
+                    ),
+                    (
+                        PropertyId::AnimationDirection,
+                        Dv::AnimationDirectionList(smallvec![AnimDirection::Alternate]),
+                    ),
+                    (
+                        PropertyId::AnimationFillMode,
+                        Dv::AnimationFillModeList(smallvec![AnimFillMode::Both]),
+                    ),
+                    (
+                        PropertyId::AnimationName,
+                        Dv::AnimationNameList(smallvec![Some("fade".into())]),
+                    ),
+                ],
+            ),
+        ] {
+            let (b, r) = block(src);
+            assert!(r.is_clean(), "{src}: {r:?}");
+            assert_eq!(b.decls.len(), want.len(), "{src}");
+            for (got, (pid, dv)) in b.decls.iter().zip(want.iter()) {
+                assert_eq!(&got.id, pid, "{src}");
+                assert_eq!(parsed(got), dv, "{src}");
+            }
+        }
+        // 拒绝：前导/尾逗号（空组）。
+        for src in ["animation: , a", "animation: a 1s,", "animation:"] {
             let (_b, r) = block(src);
             assert!(!r.is_clean(), "{src} 应整条拒绝: {r:?}");
         }

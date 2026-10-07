@@ -283,6 +283,19 @@ struct ActiveTransition {
     easing: TimingFn,
 }
 
+/// P7-②：单个动画组的运行参数视图（anim_groups 从描述符列表
+/// 循环补齐物化）。
+#[derive(Clone, Debug)]
+struct AnimGroupSpec {
+    name: Option<String>,
+    duration: f32,
+    delay: f32,
+    iterations: f32,
+    timing: crate::css::property::TimingFn,
+    direction: crate::css::property::AnimDirection,
+    fill: crate::css::property::AnimFillMode,
+}
+
 /// F1（P3，ADR-0034 D2）：行内参与者 TOP 装箱暂存——settle_lines 收集、
 /// flush_inline_line 消费（vertical-align 统一结算偏移+行盒扩展）。
 #[cfg(feature = "text")]
@@ -300,6 +313,16 @@ struct PendingLinePart {
     /// 参与者字体度量（middle x-height、text-top/bottom asc/desc）。
     fm: crate::css::value::FontMetrics,
 }
+
+/// P7-②：组预处理产物——（组参数，槽位→关键帧轨道）。轨道值借用
+/// 样式表（'sheet 生命周期内只读）。
+type PreparedAnimGroups<'a> = Vec<(
+    &'a AnimGroupSpec,
+    std::collections::BTreeMap<
+        crate::css::property::PropertyId,
+        Vec<(f32, &'a crate::css::property::DeclValue)>,
+    >,
+)>;
 
 /// G1（ADR-0032）：不可过渡的描述符槽——animation-* 与 transition-*
 /// 描述符自身（文档未定义其动画性；transition 描述符自指无意义）。
@@ -1088,6 +1111,66 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 }
             }
         }
+    }
+
+    /// P7-①（表格 auto 列）：单元格内容 max-content 宽度——子树文本
+    /// 叶 nowrap 测量取最大（同 settle_lines 盒探针的文本兜底范式）
+    /// 加根格水平内缩（padding+border）。嵌套盒结构组合（多块纵向
+    /// 叠加、行内横向并排）v1 近似为单叶最大——偏差【B】登记 ADR。
+    fn content_max_width(&mut self, nid: NodeId) -> f32 {
+        let mut w = 0.0f32;
+        let mut sub: Vec<NodeId> = vec![nid];
+        while let Some(s) = sub.pop() {
+            if let Some(text) = self.tree.node(s).text.clone()
+                && !text.is_empty()
+                && let Some(cs) = self.styles.get(&s).cloned()
+            {
+                let owned = self.span_styles.get(&s).cloned().unwrap_or_default();
+                let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                    owned.iter().map(|(a, b, sc)| (*a, *b, sc)).collect();
+                let (lw, _lh) =
+                    self.text
+                        .measure_rich(&text, &cs, &span_refs, None, &self.map_env());
+                if lw > w {
+                    w = lw;
+                }
+            }
+            for g in self.tree.children(s).iter().copied() {
+                sub.push(g);
+            }
+        }
+        let mut inset = 0.0f32;
+        if let Some(cs) = self.styles.get(&nid) {
+            let env = self.map_env();
+            let rctx = crate::css::value::ResolveCtx {
+                em: cs.font_size_px(),
+                rem: env.rem,
+                viewport_w: env.viewport_w,
+                viewport_h: env.viewport_h,
+                ..crate::css::value::ResolveCtx::base(
+                    cs.font_size_px(),
+                    16.0,
+                    env.viewport_w,
+                    env.viewport_h,
+                )
+            };
+            inset = [
+                (crate::css::property::PropertyId::PaddingLeft, None),
+                (crate::css::property::PropertyId::PaddingRight, None),
+                (
+                    crate::css::property::PropertyId::BorderLeftWidth,
+                    Some(crate::css::property::PropertyId::BorderLeftStyle),
+                ),
+                (
+                    crate::css::property::PropertyId::BorderRightWidth,
+                    Some(crate::css::property::PropertyId::BorderRightStyle),
+                ),
+            ]
+            .iter()
+            .filter_map(|(pid, style_pid)| used_h_inset(cs, *pid, *style_pid, &rctx))
+            .sum();
+        }
+        w + inset
     }
 
     /// P6（ADR-0035 D2）：`style_dirty_roots` 增量失效是否须升级全量。
@@ -2893,31 +2976,29 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         &self,
         cs: &ComputedStyle,
     ) -> Option<std::collections::BTreeSet<usize>> {
-        use crate::css::property::{DeclValue, PropertyId};
-        let name = match cs.get(PropertyId::AnimationName) {
-            Some(DeclValue::AnimationName(Some(n))) => n.clone(),
-            _ => return None,
-        };
-        let duration = match cs.get(PropertyId::AnimationDuration) {
-            Some(DeclValue::AnimationTime(s)) => *s,
-            _ => 0.0,
-        };
-        if duration <= 0.0 {
-            return None;
-        }
-        let rule = self
-            .extra_sheets
-            .iter()
-            .rev()
-            .find_map(|(_, _, s)| s.keyframes.iter().find(|r| r.name == name))
-            .or_else(|| self.sheet.keyframes.iter().find(|r| r.name == name))?;
         let mut slots = std::collections::BTreeSet::new();
-        for f in &rule.frames {
-            for d in &f.declarations.decls {
-                slots.insert(d.id.slot());
+        // P7-②：多组并集——任一组命中的槽位都抑制新过渡启动。
+        for g in Self::anim_groups(cs) {
+            let Some(name) = g.name else { continue };
+            if g.duration <= 0.0 {
+                continue;
+            }
+            let Some(rule) = self
+                .extra_sheets
+                .iter()
+                .rev()
+                .find_map(|(_, _, s)| s.keyframes.iter().find(|r| r.name == name))
+                .or_else(|| self.sheet.keyframes.iter().find(|r| r.name == name))
+            else {
+                continue;
+            };
+            for f in &rule.frames {
+                for d in &f.declarations.decls {
+                    slots.insert(d.id.slot());
+                }
             }
         }
-        Some(slots)
+        if slots.is_empty() { None } else { Some(slots) }
     }
 
     /// G1（ADR-0032）：transition 采样挂点——对每个活动过渡按 now 求插值
@@ -2976,11 +3057,85 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
+    /// P7-②：动画组视图——从计算样式提取动画组列表（CSS 多动画：
+    /// 组数 = name 列表长度，各描述符列表按 `i % len` 循环补齐，
+    /// 缺省值兜底：duration/delay=0s、iterations=1、ease/normal/none）。
+    /// 兼容旧单值变体（initial_value 遗留）；name 全空 → 无组。
+    fn anim_groups(cs: &ComputedStyle) -> Vec<AnimGroupSpec> {
+        use crate::css::property::{AnimDirection, AnimFillMode, DeclValue, PropertyId, TimingFn};
+        let names: Vec<Option<String>> = match cs.get(PropertyId::AnimationName) {
+            Some(DeclValue::AnimationNameList(v)) => v.iter().cloned().collect(),
+            Some(DeclValue::AnimationName(n)) => vec![n.clone()],
+            _ => return Vec::new(),
+        };
+        let n = names.len();
+        if n == 0 || names.iter().all(|o| o.is_none()) {
+            return Vec::new();
+        }
+        let times: Vec<f32> = match cs.get(PropertyId::AnimationDuration) {
+            Some(DeclValue::AnimationTimeList(v)) => v.iter().copied().collect(),
+            Some(DeclValue::AnimationTime(s)) => vec![*s],
+            _ => Vec::new(),
+        };
+        let delays: Vec<f32> = match cs.get(PropertyId::AnimationDelay) {
+            Some(DeclValue::AnimationTimeList(v)) => v.iter().copied().collect(),
+            Some(DeclValue::AnimationTime(s)) => vec![*s],
+            _ => Vec::new(),
+        };
+        let iters: Vec<f32> = match cs.get(PropertyId::AnimationIterationCount) {
+            Some(DeclValue::AnimationIterationList(v)) => v.iter().copied().collect(),
+            Some(DeclValue::AnimationIteration(x)) => vec![*x],
+            _ => Vec::new(),
+        };
+        let timings: Vec<TimingFn> = match cs.get(PropertyId::AnimationTimingFunction) {
+            Some(DeclValue::AnimationTimingList(v)) => v.iter().copied().collect(),
+            Some(DeclValue::AnimationTiming(t)) => vec![*t],
+            _ => Vec::new(),
+        };
+        let dirs: Vec<AnimDirection> = match cs.get(PropertyId::AnimationDirection) {
+            Some(DeclValue::AnimationDirectionList(v)) => v.iter().copied().collect(),
+            Some(DeclValue::AnimationDirection(d)) => vec![*d],
+            _ => Vec::new(),
+        };
+        let fills: Vec<AnimFillMode> = match cs.get(PropertyId::AnimationFillMode) {
+            Some(DeclValue::AnimationFillModeList(v)) => v.iter().copied().collect(),
+            Some(DeclValue::AnimationFillMode(f)) => vec![*f],
+            _ => Vec::new(),
+        };
+        let pick =
+            |v: &[f32], dflt: f32, i: usize| v.get(i % v.len().max(1)).copied().unwrap_or(dflt);
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| AnimGroupSpec {
+                name,
+                duration: pick(&times, 0.0, i),
+                delay: pick(&delays, 0.0, i),
+                iterations: pick(&iters, 1.0, i),
+                timing: timings
+                    .get(i % timings.len().max(1))
+                    .copied()
+                    .unwrap_or(TimingFn::Ease),
+                direction: dirs
+                    .get(i % dirs.len().max(1))
+                    .copied()
+                    .unwrap_or(AnimDirection::Normal),
+                fill: fills
+                    .get(i % fills.len().max(1))
+                    .copied()
+                    .unwrap_or(AnimFillMode::None),
+            })
+            .collect()
+    }
+
     /// @keyframes 动画采样（第五批⑰）：对声明了 animation-name 且命中
     /// @keyframes 的节点，按 now（宿主帧推进，秒）采样关键帧轨道并覆写
     /// 计算样式。动画层高于作者级联（CSS：动画覆盖普通声明，仅
     /// !important 更高——分层为残余偏差）；缓动按关键帧段施加（CSS 时序
     /// 函数语义）；不可插值对按离散规则（段进度<0.5 取前帧）。
+    /// P7-②：多动画组——逐组独立采样（组数 = name 列表长度，描述符
+    /// 循环补齐）；后组胜同槽覆写；underlying 快照节点级共享（首组
+    /// 捕获级联值），结束无填充组逐槽恢复底层值。
     fn apply_animations(&mut self) {
         use crate::css::property::{AnimDirection, AnimFillMode, DeclValue, PropertyId};
         use std::collections::BTreeMap;
@@ -2993,70 +3148,59 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         let styles = &mut self.styles;
         let anim_underlying = &mut self.anim_underlying;
         for (anim_id, cs) in styles.iter_mut() {
-            let name = match cs.get(PropertyId::AnimationName) {
-                Some(DeclValue::AnimationName(Some(n))) => n.clone(),
-                _ => continue,
-            };
-            let Some(rule) = extras
-                .iter()
-                .rev()
-                .find_map(|(_, _, s)| s.keyframes.iter().find(|r| r.name == name))
-                .or_else(|| sheet.keyframes.iter().find(|r| r.name == name))
-            else {
-                continue;
-            };
-            let duration = match cs.get(PropertyId::AnimationDuration) {
-                Some(DeclValue::AnimationTime(s)) => *s,
-                _ => 0.0,
-            };
-            if duration <= 0.0 || rule.frames.is_empty() {
+            let groups = Self::anim_groups(cs);
+            if groups.is_empty() {
                 continue;
             }
-            let delay = match cs.get(PropertyId::AnimationDelay) {
-                Some(DeclValue::AnimationTime(s)) => *s,
-                _ => 0.0,
-            };
-            let iterations = match cs.get(PropertyId::AnimationIterationCount) {
-                Some(DeclValue::AnimationIteration(n)) => *n,
-                _ => 1.0,
-            };
-            let timing = match cs.get(PropertyId::AnimationTimingFunction) {
-                Some(DeclValue::AnimationTiming(t)) => *t,
-                _ => crate::css::property::TimingFn::Ease,
-            };
-            let direction = match cs.get(PropertyId::AnimationDirection) {
-                Some(DeclValue::AnimationDirection(d)) => *d,
-                _ => crate::css::property::AnimDirection::Normal,
-            };
-            let fill = match cs.get(PropertyId::AnimationFillMode) {
-                Some(DeclValue::AnimationFillMode(f)) => *f,
-                _ => crate::css::property::AnimFillMode::None,
-            };
-            // 轨道收集（Parsed 声明；var() 载体不入轨——MVP 偏差）。
-            // 提前到 p_eff 判定前：G1 底层值副本管理需要槽集。
-            let mut tracks: BTreeMap<PropertyId, Vec<(f32, &DeclValue)>> = BTreeMap::new();
-            for f in &rule.frames {
-                for d in &f.declarations.decls {
-                    if let crate::css::decl::DeclSource::Parsed(v) = &d.value {
-                        tracks.entry(d.id).or_default().push((f.offset, v));
+            // P7-② 组预处理：逐组查找 @keyframes 并收集轨道；槽位并集
+            // 供 underlying 快照对齐。
+            let mut prepared: PreparedAnimGroups = Vec::new();
+            let mut slot_union: std::collections::BTreeSet<PropertyId> =
+                std::collections::BTreeSet::new();
+            for g in &groups {
+                let Some(name) = &g.name else { continue };
+                let Some(rule) = extras
+                    .iter()
+                    .rev()
+                    .find_map(|(_, _, s)| s.keyframes.iter().find(|r| r.name == *name))
+                    .or_else(|| sheet.keyframes.iter().find(|r| r.name == *name))
+                else {
+                    continue;
+                };
+                if g.duration <= 0.0 || rule.frames.is_empty() {
+                    continue;
+                }
+                // 轨道收集（Parsed 声明；var() 载体不入轨——MVP 偏差）。
+                let mut tracks: BTreeMap<PropertyId, Vec<(f32, &DeclValue)>> = BTreeMap::new();
+                for f in &rule.frames {
+                    for d in &f.declarations.decls {
+                        if let crate::css::decl::DeclSource::Parsed(v) = &d.value {
+                            tracks.entry(d.id).or_default().push((f.offset, v));
+                            slot_union.insert(d.id);
+                        }
                     }
                 }
+                prepared.push((g, tracks));
             }
-            // G1（ADR-0032）：底层值副本管理——首见动画快照关键帧槽位当前
-            // 值（覆写前 = 级联/底层值）；已有条目则槽值 ≠ 上帧写入值 =
-            // 外部重算（restyle 重建 cs）→ 刷新快照，使「恢复 underlying」
-            // 语义始终锚定最新级联值；槽集随轨道对齐（换动画名自愈）。
+            if prepared.is_empty() {
+                continue;
+            }
+            // G1（ADR-0032）：底层值副本管理（P7-② 节点级共享）——首见
+            // 动画快照各组槽位并集的当前值（覆写前 = 级联/底层值）；已有
+            // 条目则槽值 ≠ 上帧写入值 = 外部重算（restyle 重建 cs）→ 刷新
+            // 快照，使「恢复 underlying」语义始终锚定最新级联值；槽集随
+            // 并集对齐（换动画名自愈）。
             {
                 let entry = anim_underlying.entry(*anim_id).or_default();
                 if entry.is_empty() {
-                    for pid in tracks.keys() {
+                    for pid in &slot_union {
                         if let Some(v) = cs.value(*pid) {
                             entry.push((*pid, v.clone(), v.clone()));
                         }
                     }
                 } else {
-                    entry.retain(|(pid, _, _)| tracks.contains_key(pid));
-                    for pid in tracks.keys() {
+                    entry.retain(|(pid, _, _)| slot_union.contains(pid));
+                    for pid in &slot_union {
                         if !entry.iter().any(|(p, _, _)| p == pid)
                             && let Some(v) = cs.value(*pid)
                         {
@@ -3073,90 +3217,101 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     }
                 }
             }
-            let local = now - delay;
-            // 采样点：未开始（backwards/both → 0）/进行中/已结束
-            // （forwards/both → 1）；其余阶段用底层值（不覆写）
-            let total = duration * iterations.max(0.0);
-            let p_eff: Option<f32> = if local < 0.0 {
-                matches!(fill, AnimFillMode::Backwards | AnimFillMode::Both).then_some(0.0)
-            } else if iterations.is_infinite() || local < total {
-                let raw = local / duration;
-                let cycle_index = raw.floor();
-                let seg = raw - cycle_index;
-                // 方向折叠（缓动在段内施加）
-                let folded = match direction {
-                    AnimDirection::Normal => seg,
-                    AnimDirection::Reverse => 1.0 - seg,
-                    AnimDirection::Alternate => {
-                        if (cycle_index as i64) % 2 == 0 {
-                            seg
-                        } else {
-                            1.0 - seg
-                        }
-                    }
-                    AnimDirection::AlternateReverse => {
-                        if (cycle_index as i64) % 2 == 0 {
-                            1.0 - seg
-                        } else {
-                            seg
-                        }
-                    }
-                };
-                Some(folded)
-            } else {
-                matches!(fill, AnimFillMode::Forwards | AnimFillMode::Both).then_some(1.0)
-            };
-            let Some(p_eff) = p_eff else {
-                // G1：已结束且无 forwards/both 填充 → 恢复底层值
-                //（css-animations-1：结束后回落 underlying，不残留最后
-                // 动画采样值）；未开始（local<0）仅跳过。
-                if local >= total
-                    && local > 0.0
-                    && let Some(und) = anim_underlying.remove(anim_id)
-                {
-                    for (pid, under, _) in und {
-                        cs.set_value(pid, under);
-                    }
-                }
-                continue;
-            };
-            // G1：终值固定（forwards/both 已结束）→ 副本无后续用途
-            if local >= total {
-                anim_underlying.remove(anim_id);
-            }
-            for (pid, mut track) in tracks {
-                track.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                // p < 首帧 offset 或 > 末帧 offset → 合成帧取 underlying
-                //（CSS：缺 0%/100% 关键帧时以底层值补帧）→ 不覆写
-                if p_eff < track[0].0 || p_eff > track[track.len() - 1].0 {
-                    continue;
-                }
-                let sampled = track
-                    .iter()
-                    .find(|(o, _)| *o == p_eff)
-                    .map(|(_, v)| (*v).clone())
-                    .or_else(|| {
-                        // 区间括位插值；不可插值 → 离散（段进度<0.5 取前帧）
-                        let mut seg_pair: Option<(&f32, &DeclValue, &f32, &DeclValue)> = None;
-                        for w in track.windows(2) {
-                            if w[0].0 <= p_eff && p_eff <= w[1].0 {
-                                seg_pair = Some((&w[0].0, w[0].1, &w[1].0, w[1].1));
-                                break;
+            // P7-② 逐组采样：后组胜同槽覆写；结束无填充组恢复其槽位
+            // 底层值（后续组仍可覆写同槽——CSS 复合序）。
+            for (g, tracks) in &prepared {
+                let local = now - g.delay;
+                // 采样点：未开始（backwards/both → 0）/进行中/已结束
+                // （forwards/both → 1）；其余阶段用底层值（不覆写）
+                let total = g.duration * g.iterations.max(0.0);
+                let p_eff: Option<f32> = if local < 0.0 {
+                    matches!(g.fill, AnimFillMode::Backwards | AnimFillMode::Both).then_some(0.0)
+                } else if g.iterations.is_infinite() || local < total {
+                    let raw = local / g.duration;
+                    let cycle_index = raw.floor();
+                    let seg = raw - cycle_index;
+                    // 方向折叠（缓动在段内施加）
+                    let folded = match g.direction {
+                        AnimDirection::Normal => seg,
+                        AnimDirection::Reverse => 1.0 - seg,
+                        AnimDirection::Alternate => {
+                            if (cycle_index as i64) % 2 == 0 {
+                                seg
+                            } else {
+                                1.0 - seg
                             }
                         }
-                        let (o0, v0, o1, v1) = seg_pair?;
-                        let local_t = if o1 > o0 {
-                            (p_eff - o0) / (o1 - o0)
-                        } else {
-                            0.0
-                        };
-                        let eased = timing.sample(local_t);
-                        crate::css::property::lerp_decl(v0, v1, eased, dark)
-                            .or_else(|| Some(if eased < 0.5 { v0.clone() } else { v1.clone() }))
-                    });
-                if let Some(v) = sampled {
-                    cs.set_value(pid, v);
+                        AnimDirection::AlternateReverse => {
+                            if (cycle_index as i64) % 2 == 0 {
+                                1.0 - seg
+                            } else {
+                                seg
+                            }
+                        }
+                    };
+                    Some(folded)
+                } else {
+                    matches!(g.fill, AnimFillMode::Forwards | AnimFillMode::Both).then_some(1.0)
+                };
+                let Some(p_eff) = p_eff else {
+                    // G1：已结束且无 forwards/both 填充 → 恢复该组槽位底层值
+                    //（css-animations-1：结束后回落 underlying，不残留最后
+                    // 动画采样值；多组下后续组仍可覆写同槽）。
+                    if let Some(entry) = anim_underlying.get(anim_id) {
+                        for pid in tracks.keys() {
+                            if let Some((_, under, _)) = entry.iter().find(|(p, _, _)| p == pid) {
+                                cs.set_value(*pid, under.clone());
+                            }
+                        }
+                    }
+                    continue;
+                };
+                for (pid, track) in tracks.iter() {
+                    let mut track = track.clone();
+                    track
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    // p < 首帧 offset 或 > 末帧 offset → 合成帧取 underlying
+                    //（CSS：缺 0%/100% 关键帧时以底层值补帧）→ 不覆写
+                    if p_eff < track[0].0 || p_eff > track[track.len() - 1].0 {
+                        continue;
+                    }
+                    let sampled = track
+                        .iter()
+                        .find(|(o, _)| *o == p_eff)
+                        .map(|(_, v)| (*v).clone())
+                        .or_else(|| {
+                            // 区间括位插值；不可插值 → 离散（段进度<0.5 取前帧）
+                            let mut seg_pair: Option<(&f32, &DeclValue, &f32, &DeclValue)> = None;
+                            for w in track.windows(2) {
+                                if w[0].0 <= p_eff && p_eff <= w[1].0 {
+                                    seg_pair = Some((&w[0].0, w[0].1, &w[1].0, w[1].1));
+                                    break;
+                                }
+                            }
+                            let (o0, v0, o1, v1) = seg_pair?;
+                            let local_t = if o1 > o0 {
+                                (p_eff - o0) / (o1 - o0)
+                            } else {
+                                0.0
+                            };
+                            let eased = g.timing.sample(local_t);
+                            crate::css::property::lerp_decl(v0, v1, eased, dark)
+                                .or_else(|| Some(if eased < 0.5 { v0.clone() } else { v1.clone() }))
+                        });
+                    if let Some(v) = sampled {
+                        cs.set_value(*pid, v);
+                    }
                 }
+            }
+            // P7-②：全部组结束（local ≥ total）——forwards 组终值已固定
+            // 于槽位、无填充组已恢复底层值 → 副本无后续用途，清除。
+            let all_over = prepared.iter().all(|(g, _)| {
+                let local = now - g.delay;
+                let total = g.duration * g.iterations.max(0.0);
+                local >= total
+            });
+            if all_over {
+                anim_underlying.remove(anim_id);
             }
             // G1：记录本帧写入值（外部重算检测基准——下帧槽值 ≠ 此值即
             // 视为 restyle 重算，刷新底层值快照）。
@@ -3747,7 +3902,29 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     .into_iter()
                     .map(|d| d.unwrap_or((taffy::prelude::Dimension::auto(), 0.0)))
                     .collect();
-                let cols = crate::layout::table_column_template(tw, &declared, n_cols);
+                // P7-①：auto 列内容 max-content 测量——全行 span=1 且
+                // 未声明宽的单元格（声明列内容不参与分配）。
+                let mut content_max = vec![0.0f32; n_cols];
+                for (cell, start, span, _) in &placements {
+                    if *span != 1 || *start >= n_cols {
+                        continue;
+                    }
+                    if self.styles.get(cell).is_some_and(|cs| {
+                        map_style(cs, &self.map_env())
+                            .size
+                            .width
+                            .into_option()
+                            .is_some()
+                    }) {
+                        continue;
+                    }
+                    let w = self.content_max_width(*cell);
+                    if w > content_max[*start] {
+                        content_max[*start] = w;
+                    }
+                }
+                let cols =
+                    crate::layout::table_column_template(tw, &declared, n_cols, &content_max);
                 let cols_unchanged = self
                     .table_cols
                     .get(&table)
@@ -6471,6 +6648,81 @@ mod tests {
     }
 
     #[test]
+    fn animation_multi_groups_parallel() {
+        // P7-②：多动画组并行采样——组 0 both（结束后驻留终值）、组 1 无
+        // fill（结束后回底层值）；同节点两组各自推进互不干扰。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "@keyframes grow { from { width: 100px } to { width: 200px } } \
+             @keyframes fade { from { opacity: 1 } to { opacity: 0 } } \
+             div { width: 50px; opacity: 1; animation: grow 1s linear both, fade 2s linear; }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("div")).is_ok());
+        let idn = *engine.key_to_node.get(&Key(1)).unwrap();
+        use crate::css::property::{DeclValue, PropertyId};
+        use crate::css::value::LengthPercentage;
+        let probe = |engine: &mut StyleEngine<Key>, t: f64| -> (f32, f32) {
+            let _ = engine.frame((400.0, 100.0), 1.0, t);
+            let cs = engine.styles.get(&idn).unwrap();
+            let width = match cs.get(PropertyId::Width) {
+                Some(DeclValue::LenAuto(Some(LengthPercentage::Px(v)))) => *v,
+                other => panic!("width: {other:?}"),
+            };
+            let opacity = match cs.get(PropertyId::Opacity) {
+                Some(DeclValue::Number(v)) => *v,
+                other => panic!("opacity: {other:?}"),
+            };
+            (width, opacity)
+        };
+        // t=0.5：组 0 进度 0.5（width 150）、组 1 进度 0.25（opacity 0.75）。
+        assert_eq!(probe(&mut engine, 0.5), (150.0, 0.75));
+        // t=1.5：组 0 结束驻留终值（both）、组 1 进度 0.75（opacity 0.25）。
+        assert_eq!(probe(&mut engine, 1.5), (200.0, 0.25));
+        // t=2.5：全部结束——组 0 终值驻留、组 1 回底层值。
+        assert_eq!(probe(&mut engine, 2.5), (200.0, 1.0));
+    }
+
+    #[test]
+    fn animation_group_descriptor_cycling() {
+        // P7-②：描述符循环补齐——name 两组共用单值 duration/timing
+        //（CSS：各描述符列表按 i%len 循环）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        let report = engine.set_stylesheet(
+            "@keyframes grow { from { width: 100px } to { width: 200px } } \
+             @keyframes fade { from { opacity: 1 } to { opacity: 0 } } \
+             div { width: 50px; animation-name: grow, fade; \
+                   animation-duration: 1s; animation-timing-function: linear; }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str| StyleNode {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("div")).is_ok());
+        let idn = *engine.key_to_node.get(&Key(1)).unwrap();
+        use crate::css::property::{DeclValue, PropertyId};
+        use crate::css::value::LengthPercentage;
+        let _ = engine.frame((400.0, 100.0), 1.0, 0.5);
+        let cs = engine.styles.get(&idn).unwrap();
+        let width = match cs.get(PropertyId::Width) {
+            Some(DeclValue::LenAuto(Some(LengthPercentage::Px(v)))) => *v,
+            other => panic!("width: {other:?}"),
+        };
+        let opacity = match cs.get(PropertyId::Opacity) {
+            Some(DeclValue::Number(v)) => *v,
+            other => panic!("opacity: {other:?}"),
+        };
+        // 两组同 1s 线性：t=0.5 各自进度 0.5。
+        assert_eq!(width, 150.0);
+        assert!((opacity - 0.5).abs() < 1e-4, "opacity: {opacity}");
+    }
+
+    #[test]
     fn calc_layout_resolution() {
         // 二期①calc 直通：taffy 原生指针传输层公共接入点被 pub(crate) 内部
         // 阻断——引擎侧结算式直通（layout.rs DeferredRaw / settle_calc）：
@@ -6798,6 +7050,65 @@ mod tests {
         let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
         let frame3 = engine.frame((800.0, 600.0), 1.0, 0.0);
         assert_eq!(frame3.find(Key(5)).unwrap().x, 100.0);
+    }
+
+    #[test]
+    fn table_auto_columns_proportional_to_content() {
+        // P7-①：auto 列剩余宽按单元格内容 max-content 比例分配——长
+        // 内容列显著宽于短内容列（v1 均分时两列各 300）；等内容两列
+        // 退回等宽。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.add_font(TEST_FONT.to_vec());
+        let report = engine.set_stylesheet(
+            "tab { display: table; width: 600px } \
+             row { display: table-row } \
+             td { display: table-cell; height: 30px; white-space: nowrap; \
+                  font-family: \"DejaVu Sans\" }",
+        );
+        assert!(report.is_clean(), "{report:?}");
+        let mk = |name: &str, text: &str| StyleNode {
+            name: Some(name.to_string()),
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
+        assert!(engine.insert(None, Key(1), mk("tab", "")).is_ok());
+        assert!(engine.insert(Some(Key(1)), Key(2), mk("row", "")).is_ok());
+        assert!(engine.insert(Some(Key(2)), Key(3), mk("td", "ab")).is_ok());
+        assert!(
+            engine
+                .insert(Some(Key(2)), Key(4), mk("td", "wide content here"))
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let w3 = frame.find(Key(3)).unwrap().width;
+        let w4 = frame.find(Key(4)).unwrap().width;
+        assert!(
+            (w3 + w4 - 600.0).abs() < 0.5,
+            "两 auto 列应铺满表宽: {w3}+{w4}"
+        );
+        assert!(w4 > w3 * 3.0, "内容比例分配: {w3} vs {w4}");
+
+        // 等内容两列 → 等宽（测量接入后均分语义保持）。
+        let mut engine2: StyleEngine<Key> = StyleEngine::new();
+        engine2.add_font(TEST_FONT.to_vec());
+        let report2 = engine2.set_stylesheet(
+            "tab { display: table; width: 600px } \
+             row { display: table-row } \
+             td { display: table-cell; height: 30px; white-space: nowrap; \
+                  font-family: \"DejaVu Sans\" }",
+        );
+        assert!(report2.is_clean(), "{report2:?}");
+        assert!(engine2.insert(None, Key(1), mk("tab", "")).is_ok());
+        assert!(engine2.insert(Some(Key(1)), Key(2), mk("row", "")).is_ok());
+        assert!(engine2.insert(Some(Key(2)), Key(3), mk("td", "ab")).is_ok());
+        assert!(engine2.insert(Some(Key(2)), Key(4), mk("td", "ab")).is_ok());
+        let frame2 = engine2.frame((800.0, 600.0), 1.0, 0.0);
+        let a = frame2.find(Key(3)).unwrap().width;
+        let b = frame2.find(Key(4)).unwrap().width;
+        assert!(
+            (a - b).abs() < 0.5 && (a + b - 600.0).abs() < 0.5,
+            "等内容两列等宽: {a} vs {b}"
+        );
     }
 
     #[test]

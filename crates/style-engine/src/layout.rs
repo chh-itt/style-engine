@@ -643,13 +643,16 @@ pub fn multicol_requested(cs: &ComputedStyle) -> bool {
 /// 浏览器语义（Chromium 153 实测对齐）：Length 声明 = content-box，
 /// 列贡献 = px + 单元格水平内缩（padding+border）；Percent 声明 =
 /// border-box（列宽 = p×表内容宽，不追加内缩——单元格百分比宽的
-/// 已知非对称行为）。Auto 列取剩余 border-box 宽。
+/// 已知非对称行为）。Auto 列取剩余 border-box 宽——P7-①：剩余按
+/// `content_max`（各列内容 max-content 宽，同序对齐）比例分配；测量
+/// 缺失（切片不足/全 0）退回均分。
 /// 注：taffy 0.14 Dimension 为 CompactLength 编码结构体（非枚举），
 /// 分类用 is_auto/into_option/value。
 pub fn table_column_template(
     table_content_width: f32,
     declared: &[(taffy::prelude::Dimension, f32)],
     n_cols: usize,
+    content_max: &[f32],
 ) -> Vec<f32> {
     let mut cols: Vec<(taffy::prelude::Dimension, f32)> =
         vec![(taffy::prelude::Dimension::auto(), 0.0); n_cols.max(declared.len())];
@@ -658,21 +661,36 @@ pub fn table_column_template(
     }
     let mut used = 0.0f32;
     let mut autos = 0usize;
-    for (d, inset) in &cols {
+    let mut auto_max_total = 0.0f32;
+    for (i, (d, inset)) in cols.iter().enumerate() {
         if let Some(px) = d.into_option() {
             used += px + inset;
         } else if d.is_auto() {
             autos += 1;
+            auto_max_total += content_max.get(i).copied().unwrap_or(0.0);
         } else {
             used += d.value() * table_content_width;
         }
     }
     let share = ((table_content_width - used) / autos as f32).max(0.0);
+    // auto 列宽：剩余总宽按内容 max-content 比例；总量为 0（无文本/
+    // 测量缺失）→ 均分回退（v1 语义，单列份额=share）。
+    let auto_px = |i: usize| -> f32 {
+        let m = content_max.get(i).copied().unwrap_or(0.0);
+        if auto_max_total > 0.0 && m > 0.0 {
+            share * autos.max(1) as f32 * m / auto_max_total
+        } else if auto_max_total <= 0.0 {
+            share
+        } else {
+            0.0
+        }
+    };
     cols.into_iter()
-        .map(|(d, inset)| match d.into_option() {
+        .enumerate()
+        .map(|(i, (d, inset))| match d.into_option() {
             // Length 列 = 声明 px + 内缩（单元格 border-box，Chromium 语义）。
             Some(px) => px + inset,
-            None if d.is_auto() => share,
+            None if d.is_auto() => auto_px(i),
             None => d.value() * table_content_width,
         })
         .collect()
@@ -857,6 +875,7 @@ mod table_template_tests {
                 (Dimension::auto(), 0.0),
             ],
             3,
+            &[],
         );
         assert_eq!(cols, vec![166.0, 300.0, 134.0]);
     }
@@ -867,6 +886,7 @@ mod table_template_tests {
             600.0,
             &[(Dimension::auto(), 0.0), (Dimension::auto(), 0.0)],
             2,
+            &[],
         );
         assert_eq!(cols, vec![300.0, 300.0]);
     }
@@ -877,6 +897,7 @@ mod table_template_tests {
             600.0,
             &[(Dimension::length(700.0), 0.0), (Dimension::auto(), 0.0)],
             2,
+            &[],
         );
         assert_eq!(cols, vec![700.0, 0.0]);
     }
@@ -884,7 +905,45 @@ mod table_template_tests {
     #[test]
     fn missing_declarations_pad_as_auto() {
         // 首行 1 列声明、后续行共 3 列：补齐 auto 均分。
-        let cols = table_column_template(600.0, &[(Dimension::length(150.0), 0.0)], 3);
+        let cols = table_column_template(600.0, &[(Dimension::length(150.0), 0.0)], 3, &[]);
         assert_eq!(cols, vec![150.0, 225.0, 225.0]);
+    }
+
+    #[test]
+    fn auto_columns_proportional_to_content() {
+        // P7-①：剩余总宽按内容 max-content 比例（1:3 → 150/450）。
+        let cols = table_column_template(
+            600.0,
+            &[(Dimension::auto(), 0.0), (Dimension::auto(), 0.0)],
+            2,
+            &[100.0, 300.0],
+        );
+        assert!((cols[0] - 150.0).abs() < 0.01, "{cols:?}");
+        assert!((cols[1] - 450.0).abs() < 0.01, "{cols:?}");
+    }
+
+    #[test]
+    fn auto_columns_zero_content_falls_back_to_equal() {
+        let cols = table_column_template(
+            600.0,
+            &[(Dimension::auto(), 0.0), (Dimension::auto(), 0.0)],
+            2,
+            &[0.0, 0.0],
+        );
+        assert_eq!(cols, vec![300.0, 300.0]);
+    }
+
+    #[test]
+    fn auto_columns_empty_content_column_gets_zero() {
+        // 有内容列独占剩余、空列（无文本无内缩）取 0——Chromium 空列
+        // 语义一致（内缩在 content_max 内承载，空 td 有 padding 时非 0）。
+        let cols = table_column_template(
+            600.0,
+            &[(Dimension::auto(), 0.0), (Dimension::auto(), 0.0)],
+            2,
+            &[250.0, 0.0],
+        );
+        assert!((cols[0] - 600.0).abs() < 0.01, "{cols:?}");
+        assert!((cols[1] - 0.0).abs() < 0.01, "{cols:?}");
     }
 }

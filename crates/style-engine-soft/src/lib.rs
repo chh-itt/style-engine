@@ -1059,6 +1059,7 @@ fn apply_op(
             y,
             text,
             color,
+            spans,
             font_size,
             font_family,
             letter_spacing,
@@ -1071,13 +1072,15 @@ fn apply_op(
             ..
         } => {
             // v1 仅 Start 对齐（非 Start 按 Start 绘制——记录偏差）；
-            // span 覆盖/合成粗斜体/max_advance 折行同属记录边界。
+            // P7：span 覆盖已消费（color/font_size/family 逐字符感知）；
+            // 合成粗斜体/max_advance 折行同属记录边界。
             // F3d：features/variations 无消费点（FontBank 无 GSUB/gvar，
             // 记录偏差）；stretch/word-spacing 伪合成消费（见 draw_text）。
             let _ = text_align;
             // F2（ADR-0022 D5）：影字先绘。P1c：blur>0 → 字形遮罩真模糊
-            // （装饰线不投影——Chromium 同语义）；blur=0 → 原平移重发
-            // （含装饰线，保持既有像素输出）。
+            // （装饰线不投影——Chromium 同语义；span 形状覆盖不投影——
+            // 基样式形状记偏差）；blur=0 → 原平移重发（含装饰线与 span
+            // 字形覆盖，影色单色）。
             for s in shadows.iter() {
                 if s.blur > 0.0 {
                     draw_text_shadow_blur(
@@ -1114,6 +1117,7 @@ fn apply_op(
                         *word_spacing,
                         bank,
                         decorations,
+                        spans,
                     );
                 }
             }
@@ -1133,6 +1137,7 @@ fn apply_op(
                 *word_spacing,
                 bank,
                 decorations,
+                spans,
             );
         }
         // 未识别 op 忽略（PaintOp 非穷举演进——契约 sink 对未来 op 的默认
@@ -1443,7 +1448,7 @@ fn add_span(cov: &mut [f32], base_x: f32, xa: f32, xb: f32) {
 // ===== P1c：真 blur 基建（形状 alpha 遮罩 + 3×可分离盒模糊）=====
 
 /// 字形组：每字符一组轮廓（保持逐字符 fill_polygons 粒度）。
-type GlyphGroups = Vec<Vec<Vec<(f32, f32)>>>;
+type GlyphGroups = Vec<([f32; 4], Vec<Vec<(f32, f32)>>)>;
 /// 装饰线组：附色矩形折线（填充序=原实现）。
 type DecoGroups = Vec<([f32; 4], Vec<(f32, f32)>)>;
 /// 遮罩合成的额外钳位域（inset=盒矩形 x/y/w/h + 圆角）。
@@ -1808,6 +1813,7 @@ fn draw_text_shadow_blur(
         x,
         y,
         text,
+        color,
         font_size,
         family,
         letter_spacing,
@@ -1816,8 +1822,13 @@ fn draw_text_shadow_blur(
         word_spacing,
         bank,
         &[],
+        // span 形状覆盖不投影（基样式形状记偏差——P7）。
+        &[],
     );
-    let flat: Vec<Vec<(f32, f32)>> = glyphs.into_iter().flatten().collect();
+    let flat: Vec<Vec<(f32, f32)>> = glyphs
+        .into_iter()
+        .flat_map(|(_, contours)| contours)
+        .collect();
     if flat.is_empty() {
         return;
     }
@@ -1859,6 +1870,7 @@ fn text_device_polys(
     x: f32,
     y: f32,
     text: &str,
+    color: [f32; 4],
     font_size: f32,
     family: &FontFamilyList,
     letter_spacing: f32,
@@ -1867,21 +1879,27 @@ fn text_device_polys(
     word_spacing: Option<f32>,
     bank: &FontBank,
     decorations: &[style_engine::paint::TextDecorationPaint],
+    spans: &[style_engine::paint::TextSpanPaint],
 ) -> (GlyphGroups, DecoGroups) {
     let mut glyph_groups: GlyphGroups = Vec::new();
     let mut deco_groups: DecoGroups = Vec::new();
-    let Some(data) = family.0.iter().find_map(|f| match f {
-        FamilyName::Named(name) => bank.get(name),
-        _ => None,
-    }) else {
+    // P7（T5c soft 补齐）：逐字符 span 感知——字节偏移归属 span 取
+    // color/font_size/family 覆盖（font-weight/italic 覆盖无消费点：
+    // FontBank 单文件族无变体合成，记偏差）。族变化重解析字体、字号
+    // 变化重算 scale；装饰线仍基样式单行（既有近似在案）。
+    let resolve_family = |fams: &FontFamilyList| -> Option<ttf::SoftFont<'_>> {
+        let data = fams.0.iter().find_map(|f| match f {
+            FamilyName::Named(name) => bank.get(name.as_str()),
+            _ => None,
+        })?;
+        ttf::SoftFont::parse(data)
+    };
+    let Some(mut font) = resolve_family(family) else {
         return (glyph_groups, deco_groups); // 未命中字体 → 跳过该 Text（记录偏差）
     };
-    let Some(font) = ttf::SoftFont::parse(data) else {
-        return (glyph_groups, deco_groups);
-    };
-    let scale = font.scale_for(font_size);
-    let asc = font.ascender as f32 * scale;
-    let desc = -font.descender as f32 * scale;
+    let base_scale = font.scale_for(font_size);
+    let asc = font.ascender as f32 * base_scale;
+    let desc = -font.descender as f32 * base_scale;
     let (asc_i, desc_i) = (asc.round(), desc.round());
     let lh = line_height.unwrap_or(asc_i + desc_i);
     let baseline = y + (lh - (asc_i + desc_i)) * 0.5 + asc_i;
@@ -1889,7 +1907,29 @@ fn text_device_polys(
     let fw = (font_stretch / 100.0).max(0.01);
     let ws = word_spacing.unwrap_or(0.0);
     let mut pen = x;
+    let mut byte_off = 0usize;
+    // 当前生效族（span 族覆盖时切换并重解析字体）。
+    let mut cur_fam: &FontFamilyList = family;
     for ch in text.chars() {
+        // P7：span 归属（字节偏移 ∈ [start,end)；后 span 胜，同 vello）。
+        let span = spans.iter().rev().find(|s| {
+            (s.start as usize) <= byte_off && byte_off < (s.end as usize).min(text.len())
+        });
+        let (ch_color, ch_size, ch_fam) = match span {
+            Some(s) => (s.color.components, s.font_size, &s.font_family),
+            None => (color, font_size, family),
+        };
+        if !std::ptr::eq(ch_fam, cur_fam)
+            && let Some(f) = resolve_family(ch_fam)
+        {
+            font = f;
+            cur_fam = ch_fam;
+        }
+        let ch_scale = if ch_size != font_size {
+            font.scale_for(ch_size)
+        } else {
+            base_scale
+        };
         // 未映射码点 → notdef（gid 0，DejaVu 为盒形——与 Chromium 同语义）
         let gid = font.lookup(ch).unwrap_or(0);
         let polys_font = font.outline(gid);
@@ -1898,17 +1938,18 @@ fn text_device_polys(
             for cont in &polys_font {
                 let mut dp = Vec::with_capacity(cont.len());
                 for &(fx, fy) in cont {
-                    let (sx, sy) = (pen + fx * scale * fw, baseline - fy * scale);
+                    let (sx, sy) = (pen + fx * ch_scale * fw, baseline - fy * ch_scale);
                     dp.push(mat.apply(sx, sy));
                 }
                 contours.push(dp);
             }
-            glyph_groups.push(contours);
+            glyph_groups.push((ch_color, contours));
         }
-        pen += font.advance(gid, scale) * fw + letter_spacing;
+        pen += font.advance(gid, ch_scale) * fw + letter_spacing;
         if ch == ' ' {
             pen += ws;
         }
+        byte_off += ch.len_utf8();
     }
     // F2（ADR-0022 D4）：装饰线（单行语义——软 sink 不折行（记录边界），
     // 行几何=asc/desc 基线系；线位与 vello 同式：underline=baseline+
@@ -2035,12 +2076,14 @@ fn draw_text(
     word_spacing: Option<f32>,
     bank: &FontBank,
     decorations: &[style_engine::paint::TextDecorationPaint],
+    spans: &[style_engine::paint::TextSpanPaint],
 ) {
     let (glyph_groups, deco_groups) = text_device_polys(
         mat,
         x,
         y,
         text,
+        color,
         font_size,
         family,
         letter_spacing,
@@ -2049,9 +2092,10 @@ fn draw_text(
         word_spacing,
         bank,
         decorations,
+        spans,
     );
-    for contours in &glyph_groups {
-        fill_polygons(canvas, clips, contours, color);
+    for (ch_color, contours) in &glyph_groups {
+        fill_polygons(canvas, clips, contours, *ch_color);
     }
     for (dc, rect) in &deco_groups {
         fill_polygons(canvas, clips, std::slice::from_ref(rect), *dc);
@@ -2209,6 +2253,20 @@ mod tests {
     }
 
     // ===== P1c：真 blur =====
+
+    /// P7：带 span 覆盖的文本 op（spans 直传）。
+    fn op_text_spans(
+        x: f32,
+        y: f32,
+        text: &str,
+        spans: Vec<style_engine::paint::TextSpanPaint>,
+    ) -> PaintOp {
+        let mut op = op_text(x, y, text);
+        if let PaintOp::Text { spans: s, .. } = &mut op {
+            *s = spans;
+        }
+        op
+    }
 
     /// 文本 op 带单条装饰线（P4 D3 测试用；t=厚度）。
     fn op_text_deco_t(
@@ -3248,5 +3306,79 @@ mod tests {
         // 空内容区采样点 (6,1)：索引 = (y*8+x)*4
         p.copy_from_slice(&c.pixels[(1 * 8 + 6) * 4..(1 * 8 + 6) * 4 + 4]);
         assert_eq!(p, [255, 255, 255, 255], "空内容区保留快照白");
+    }
+
+    // ===== P7：span 富文本消费（T5c soft 补齐）=====
+
+    /// span 颜色分段：基色黑 + 第二字符 span 红——左字黑右字红。
+    #[test]
+    fn text_span_color_segments() {
+        let op = op_text_spans(
+            10.0,
+            12.0,
+            "ab",
+            vec![style_engine::paint::TextSpanPaint {
+                start: 1,
+                end: 2,
+                color: rgba([1.0, 0.0, 0.0, 1.0]),
+                font_size: 16.0,
+                font_weight: 400.0,
+                italic: false,
+                font_family: FontFamilyList(smallvec![FamilyName::Named("DejaVu Sans".into())]),
+            }],
+        );
+        let list = DisplayList {
+            ops: vec![op],
+            ..Default::default()
+        };
+        let c = render_with_fonts(&list, 64, 32, [255, 255, 255, 255], &font_bank());
+        // 左字符 'a'（x≈10..20）应为黑、右字符 'b'（x≈20..30）应为红。
+        let mut black = 0;
+        let mut red = 0;
+        for y in 0..32u32 {
+            for x in 0..64u32 {
+                let p = pixel(&c, x, y);
+                if p[0] < 128 && p[1] < 128 && p[2] < 128 {
+                    black += 1;
+                }
+                if p[0] > 180 && p[1] < 100 && p[2] < 100 {
+                    red += 1;
+                }
+            }
+        }
+        assert!(black > 0, "基色黑字符应有墨");
+        assert!(red > 0, "span 红字符应有墨");
+    }
+
+    /// span 字号覆盖：第二字符 32px → 整体 bbox 高于双 16px 基线版本。
+    #[test]
+    fn text_span_font_size_growth() {
+        let base = DisplayList {
+            ops: vec![op_text(10.0, 12.0, "ab")],
+            ..Default::default()
+        };
+        let span = DisplayList {
+            ops: vec![op_text_spans(
+                10.0,
+                12.0,
+                "ab",
+                vec![style_engine::paint::TextSpanPaint {
+                    start: 1,
+                    end: 2,
+                    color: rgba([0.0, 0.0, 0.0, 1.0]),
+                    font_size: 32.0,
+                    font_weight: 400.0,
+                    italic: false,
+                    font_family: FontFamilyList(smallvec![FamilyName::Named("DejaVu Sans".into())]),
+                }],
+            )],
+            ..Default::default()
+        };
+        let cb = render_with_fonts(&base, 64, 48, [255, 255, 255, 255], &font_bank());
+        let h_base = ink_bbox(&cb).map(|(_, y0, _, y1)| y1 - y0);
+        let cs = render_with_fonts(&span, 64, 48, [255, 255, 255, 255], &font_bank());
+        let h_span = ink_bbox(&cs).map(|(_, y0, _, y1)| y1 - y0);
+        let (hb, hs) = (h_base.unwrap(), h_span.unwrap());
+        assert!(hs > hb, "span 32px 字形应更高: {hs} vs {hb}");
     }
 }

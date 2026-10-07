@@ -1928,3 +1928,32 @@ D6 clip 圆段数自适应；附带头发现的 border-top/right/bottom/left 四
   「红不在场」而非 None。clippy while_let_on_iterator（for iter.by_ref()
   保 next_sequence 可用）；clippy/fmt 清零；全量 584 绿（580→584）、
   lib 243。
+
+## P7 批——span 富文本 soft 落地 / 表格 auto 列 max-content / 多动画组（2026-07-24，round 19–20）
+
+P7 三块均为收尾性收口（P1–P6 之后的最后批次）。全量 workspace --all-features **594 测试绿**（584→594：+2 soft span、+4 表格、+3 动画），clippy lib 零警告。
+
+### P7-① 表格 auto 列 max-content 比例分配
+
+- 语义升级：v1 对 auto 列「均分剩余」偏差退役（CSS 2.1 §17.5.2.2 按 min/max-content 比例分配、Chromium 同），改为**按内容 max-content 比例分配**：share=(tw−used)/autos 为单列份额，列宽=share·m/auto_max_total（m>0 且总量>0）；全零回退等分（v1 语义），m=0 列 0 宽（Chromium 空列不占宽）。
+- 实现点：layout.rs 	able_column_template 加尾参 content_max: &[f32]（**T-签名破坏**：等价旧行为传 &[]，迁移说明已入 CHANGELOG）；engine.rs settle_tables 新增 content_max 测量循环（跳 span≠1/起点越界/声明宽单元格）+ 新方法 content_max_width(nid)（DFS 子树文本叶 measure_rich 取最大 + 根格水平内缩 used_h_inset；&mut self 因 measure_rich 内部缓存；嵌套盒结构组合近似单叶最大=B 级在案）。
+- 实施教训：比例分支漏乘 autos 得半宽、回退分支再除 autos 又得半宽（share 已是单列份额）；taffy MaxContent 探针对文本叶恒 0——必须自测量（同 settle_lines 范式）；TextSystem 零副作用空字体集合测量恒 (0,0)（测试须 add_font+显式族名，ADR-0006）。
+- 锁定测试 +4：layout 单测 auto_columns_proportional_to_content（100:300→150/450）/zero_content_falls_back/empty_content_column_gets_zero（[250,0]→[600,0]）+ 引擎级 table_auto_columns_proportional_to_content（双引擎+等宽对照——等宽对照须同串"ab"/"ab"，DejaVu 不同串宽不等）。
+
+### P7-② 多动画组（css-animations-1 <single-animation>#）
+
+- 解析层：DeclValue 六列表变体（AnimationNameList/AnimationTimeList/AnimationIterationList/AnimationTimingList/AnimationDirectionList/AnimationFillModeList，SmallVec<[T;2]>，**T-扩展**——旧单值变体保留兼容）；parse_animation_name 重写 [none|<custom-ident>]#；parse_time_seconds 删除→parse_animation_time(p, allow_negative)（duration 拒负/delay 允负）；iteration/timing/direction/fill 五解析器列表循环化；decl.rs animation 简写重写 <single-animation># 多组（组间逗号、组内缺省物化 CSS 初始、空组整条拒绝、AnimGroup 局部 struct touched 追踪）。
+- 引擎层：模块级 AnimGroupSpec+PreparedAnimGroups<'a>（组参数+槽位→关键帧轨道，轨道值借样式表）；nim_groups(cs) 组数=name 列表长、各描述符 i%len 循环补齐、全 none→无组；apply_animations 组循环重构：组预处理（逐组 @keyframes 查找+轨道收集+slot_union 并集）→underlying 快照节点级共享（首组捕获级联值、retain/补齐对齐、外部重算刷新）→逐组采样（p_eff 三态、None 分支逐槽恢复 underlying 后续组可覆写同槽、track.clone() 后排序迭代）→尾部 all_over 清副本；animation_covered_slots 组遍历并集。
+- 锁定测试 +3：decl.rs animation_descriptor_lists_parse（9 正例含简写两组缺省物化+5 拒绝+3 简写空组拒绝）；engine.rs animation_multi_groups_parallel（grow 1s both + fade 2s 无 fill：t=0.5 (150,0.75)/t=1.5 (200,0.25)/t=2.5 (200,1.0)）+animation_group_descriptor_cycling（name 2 组 duration 1 值循环补齐）。
+- 实施教训：DeclValue 无 Opacity 变体——opacity 承载 DeclValue::Number(f32)；&BTreeMap 迭代不可 mut 须 clone；PreparedAnimGroups 类型别名内路径全限定（BTreeMap/DeclValue 非模块级 use）。
+
+### P7-③ soft 端 span 富文本消费（vello 端 T5c 收口补全）
+
+- soft lib.rs：GlyphGroups=Vec<([f32;4], Vec<Vec<(f32,f32)>>)>（每字形带色）；text_device_polys 加 color+spans 两参——逐字符 for ch in text.chars() + byte_off 累加（ch.len_utf8()），span 归属 spans.iter().rev().find（后 span 胜同 vello），族变化 ptr::eq 判定重解析、字号≠基重算 scale_for；draw_text 逐组 fill_polygons；影字 blur=0 平移重发传真实 spans、draw_text_shadow_blur 传 &[]（基样式形状，B 级在案）；装饰线仍基样式单行近似（B 级）。
+- 锁定测试 +2：text_span_color_segments（全画布扫描黑/红段）+text_span_font_size_growth（ink_bbox 高度比较）；测试 helper op_text_spans。
+- 实施教训：文本测试必须 render_with_fonts（render() 空 FontBank 无墨）；PowerShell .Replace 匹配 \r\n 但文件为 LF——替换未生效，改 edit 工具。
+
+### 文档
+
+- CHANGELOG：P7 条三段（soft span/表格 max-content 含 T-签名迁移说明/多动画组）+测试计数 594。
+- FEATURES：@keyframes 条改写（多组/列表化/组循环采样）、残余偏差「多动画组」条改已落地、表格条 auto 语义更新、文本条 soft span 收口补记。
