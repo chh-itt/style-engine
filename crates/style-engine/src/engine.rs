@@ -397,6 +397,10 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     /// 增量重样式（阶段5）：set_declarations 脏根（子树局部重算）。
     /// 全量失效标（dirty_style）优先；容器规则在场时增量退全量。
     style_dirty_roots: Vec<NodeId>,
+    /// P6（ADR-0035 D1）：`:has()` 单 compound host 快筛索引（键 = `:has`
+    /// 前 compound 的类型/类/id；表变更点重建，同 rebuild_font_faces 时机）。
+    /// 空 = 未建或无合格规则（判定回全量兜底）；含哨兵键（全空）= 恒升级。
+    has_host_index: Vec<crate::selector::HasHostKey>,
     viewport: (f32, f32),
     scale: f32,
     now: f64,
@@ -519,6 +523,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             dirty_struct: true,
             dirty_style: true,
             style_dirty_roots: Vec::new(),
+            has_host_index: Vec::new(),
             viewport: (0.0, 0.0),
             scale: 1.0,
             now: 0.0,
@@ -662,6 +667,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.rebuild_registered_props();
         // F3d：@font-face 登记表同点刷新。
         self.rebuild_font_faces();
+        // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
+        self.rebuild_has_host_index();
     }
 
     /// B2：author 表组快照（主表在前、附加表按登记序 = 文档序）。
@@ -671,9 +678,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             .collect()
     }
 
-    /// B2：全表集合是否含 @container 规则（收敛环 pass 判据）。
+    /// B2：全表集合是否含 @container 规则（收敛环 pass 判据）。P6 D3
+    /// （ADR-0035）：补齐 user_sheet 与 ua_sheet 漏检（原仅主表+附加表——
+    /// 含 @container 的 user 表此前被跳过，收敛环 pass 数判定可错）。
     fn any_container_rules(&self) -> bool {
         self.sheet.has_container_rules
+            || self
+                .ua_sheet
+                .as_ref()
+                .is_some_and(|s| s.has_container_rules)
+            || self
+                .user_sheet
+                .as_ref()
+                .is_some_and(|s| s.has_container_rules)
             || self
                 .extra_sheets
                 .iter()
@@ -1018,9 +1035,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// B3：全表集合是否含 `:has()` 相对选择器规则（变更类失效升级全量
     /// 重样式判据——相对选择器命中依赖后代/兄弟结构，增量子树 restyle
     /// 不感知远端变化）。user_sheet 变更本身即全量重样式，但后续增量
-    /// 变更需此判据感知。
+    /// 变更需此判据感知。P6 补 ua_sheet 漏检（自定义 UA 表可含 `:has`）。
     fn any_has_rules(&self) -> bool {
         self.sheet.has_relative_selectors
+            || self
+                .ua_sheet
+                .as_ref()
+                .is_some_and(|s| s.has_relative_selectors)
             || self
                 .user_sheet
                 .as_ref()
@@ -1029,6 +1050,71 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 .extra_sheets
                 .iter()
                 .any(|(_, _, s)| s.has_relative_selectors)
+    }
+
+    /// P6（ADR-0035 D1）：重建 `:has()` host 快筛索引（表变更点调用，同
+    /// rebuild_font_faces 时机——attach/set_stylesheet/user·ua 表装载路径）。
+    /// 逐表逐规则深扫 `:has`（含 `:is()`/`:where()`/`:not()` 参数内嵌套）：
+    /// 无 → 不进索引；有 → 逐选择器提键（合格）或记不合格；任一选择器
+    /// 不合格（前缀组合器/`:has` 不在顶层最右 compound）→ 追加无约束
+    /// 哨兵键（该规则任何 host 路径都可能命中，恒升级全量，保守正确）。
+    fn rebuild_has_host_index(&mut self) {
+        self.has_host_index.clear();
+        let sheets = std::iter::once(&self.sheet)
+            .chain(self.ua_sheet.as_ref())
+            .chain(self.user_sheet.as_ref())
+            .chain(self.extra_sheets.iter().map(|(_, _, s)| s));
+        for sheet in sheets {
+            for rule in &sheet.rules {
+                if !crate::selector::list_contains_has(&rule.selectors) {
+                    continue;
+                }
+                let mut qualified = false;
+                let mut unqualified = false;
+                for sel in rule.selectors.slice() {
+                    match crate::selector::has_host_key(sel) {
+                        Some(key) => {
+                            self.has_host_index.push(key);
+                            qualified = true;
+                        }
+                        None => unqualified = true,
+                    }
+                }
+                if unqualified || !qualified {
+                    // 不合格选择器在场，或深扫有 `:has` 但零合格键（例如
+                    // `:has` 仅存在于函数式伪类参数内）——全量兜底哨兵。
+                    self.has_host_index
+                        .push(crate::selector::HasHostKey::default());
+                }
+            }
+        }
+    }
+
+    /// P6（ADR-0035 D2）：`style_dirty_roots` 增量失效是否须升级全量。
+    /// 任一 dirty 节点（含自身）沿祖先链通过任一快筛键 → 可能命中 →
+    /// 升级；全部祖先被全部键否决 → 走增量。索引空（无合格规则/未建）
+    /// → 全量兜底（与既有 any_has_rules 行为兼容）。快筛只可能多升级
+    /// （false positive），不可能漏升级——保守正确。
+    fn has_invalidation_needs_full(&self) -> bool {
+        if !self.any_has_rules() {
+            return false;
+        }
+        if self.has_host_index.is_empty() {
+            return true;
+        }
+        for &root in &self.style_dirty_roots {
+            let mut cur = Some(root);
+            while let Some(nid) = cur {
+                let node = self.tree.node(nid);
+                if self.has_host_index.iter().any(|k| {
+                    k.matches_node(node.name.as_deref(), node.id.as_deref(), &node.classes)
+                }) {
+                    return true;
+                }
+                cur = self.tree.parent(nid);
+            }
+        }
+        false
     }
 
     /// 更新媒体环境（视口外因素：配色/动效偏好）。
@@ -1225,10 +1311,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             self.anim_underlying.remove(&d);
             self.taffy_node.remove(&d);
         }
+        // P6（ADR-0035）：结构变更改变 host 的后代集合，直接影响
+        // `:has()` 命中域——存活父进增量通道（快筛判定升级与否）。无
+        // `:has` 表时保持 v1 语义（remove 不触发样式重算，零行为变化）；
+        // B3 起 remove+`:has` 组合的失配缺口在此收口。
+        let survival_parent = self.tree.parent(id);
         self.tree.remove(id);
         self.overlay_roots.retain(|&k| k != key);
         self.top_layer.retain(|&k| k != key);
         self.dirty_struct = true;
+        if self.any_has_rules()
+            && let Some(p) = survival_parent
+        {
+            self.style_dirty_roots.push(p);
+        }
         Ok(())
     }
 
@@ -1815,8 +1911,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 self.restyle();
             } else if !self.style_dirty_roots.is_empty() {
                 // 增量重样式（阶段5）：无容器规则 → 脏根子树局部重算；
-                // 有容器规则 → 保守全量（容器快照收敛环自会处理）。
-                if self.any_container_rules() || self.any_has_rules() {
+                // 有容器规则 → 保守全量（容器快照收敛环自会处理）。P6
+                // （ADR-0035 D2）：`:has` 在场不再无脑全量——脏根祖先链
+                // 过 host 快筛，全否决才走增量（保守正确，见
+                // has_invalidation_needs_full）。
+                if self.any_container_rules() || self.has_invalidation_needs_full() {
                     self.restyle();
                 } else {
                     let roots = std::mem::take(&mut self.style_dirty_roots);
@@ -5338,6 +5437,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.rebuild_registered_props();
         // F3d：user 表可携带 @font-face（合并序最前）。
         self.rebuild_font_faces();
+        // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
+        self.rebuild_has_host_index();
         self.dirty_style = true;
         self.dirty_struct = true;
     }
@@ -5347,6 +5448,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.user_sheet = None;
         self.rebuild_registered_props();
         self.rebuild_font_faces();
+        // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
+        self.rebuild_has_host_index();
         self.dirty_style = true;
         self.dirty_struct = true;
     }
@@ -5360,6 +5463,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.ua_sheet = Some(crate::css::stylesheet::parse_stylesheet(css));
         self.rebuild_registered_props();
         self.rebuild_font_faces();
+        // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
+        self.rebuild_has_host_index();
         self.dirty_style = true;
         self.dirty_struct = true;
     }
@@ -5369,6 +5474,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.ua_sheet = None;
         self.rebuild_registered_props();
         self.rebuild_font_faces();
+        // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
+        self.rebuild_has_host_index();
         self.dirty_style = true;
         self.dirty_struct = true;
     }
@@ -9861,5 +9968,117 @@ mod tests {
             16.0,
             "clear 后回初始"
         );
+    }
+
+    /// P6（ADR-0035 D1）：host 快筛键提取矩阵——类/类型/通配/前缀组合器
+    /// 哨兵/id 键，且表装载路径重建索引。
+    #[test]
+    fn has_host_index_keys_and_sentinel() {
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine
+            .set_stylesheet(
+                ".card:has(img) { color: red } div:has(> p) { color: blue } \
+                 *:has(q) { color: gray } .a > .b:has(x) { color: black } \
+                 #lead:has(strong) { color: green }",
+            )
+            .is_clean();
+        // 5 条规则全部深扫含 :has → 全进索引。
+        assert_eq!(engine.has_host_index.len(), 5, "五条 :has 规则全建键");
+        // .card 键：类约束、无 tag/id。
+        let card = engine
+            .has_host_index
+            .iter()
+            .find(|k| k.classes == ["card".to_string()])
+            .expect(".card 键在场");
+        assert!(card.tag.is_none() && card.id.is_none());
+        // div 键：类型约束。
+        let div = engine
+            .has_host_index
+            .iter()
+            .find(|k| k.tag.as_deref() == Some("div"))
+            .expect("div 键在场");
+        assert!(div.classes.is_empty() && div.id.is_none());
+        // #lead 键：id 约束。
+        let lead = engine
+            .has_host_index
+            .iter()
+            .find(|k| k.id.as_deref() == Some("lead"))
+            .expect("#lead 键在场");
+        assert!(lead.tag.is_none() && lead.classes.is_empty());
+        // * 通配键与 .a > .b 前缀哨兵键同型（全空 = 恒不否决）。
+        let empty = engine
+            .has_host_index
+            .iter()
+            .filter(|k| k.tag.is_none() && k.id.is_none() && k.classes.is_empty())
+            .count();
+        assert_eq!(empty, 2, "通配键 + 前缀组合器哨兵键");
+        // 换表重建：无 :has 表 → 索引清空。
+        engine.set_stylesheet(".card { color: red }").is_clean();
+        assert!(engine.has_host_index.is_empty(), "非 :has 表零键");
+    }
+
+    /// P6（ADR-0035 D2）：增量失效快筛判定矩阵——无关子树否决（走增量）、
+    /// host 子树命中（升级全量）、前缀组合器哨兵恒升级、无 :has 表恒增量。
+    #[test]
+    fn has_invalidation_needs_full_matrix() {
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine
+            .set_stylesheet(".card:has(img) { color: red }")
+            .is_clean();
+        let mk = |name: &str, classes: &[&str]| StyleNode {
+            name: Some(name.into()),
+            classes: classes.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        };
+        engine.insert(None, Key(1), mk("root", &[])).unwrap();
+        engine
+            .insert(Some(Key(1)), Key(2), mk("div", &["card"]))
+            .unwrap();
+        engine.insert(Some(Key(2)), Key(3), mk("img", &[])).unwrap();
+        engine
+            .insert(Some(Key(1)), Key(4), mk("aside", &[]))
+            .unwrap();
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        // case A：脏根在 host 子树之外（aside）——祖先链 root 无 .card 约束
+        // 键命中 → 否决，走增量。
+        engine.set_declarations(Key(4), "color: blue").unwrap();
+        assert!(
+            !engine.has_invalidation_needs_full(),
+            "无关子树失效被快筛否决"
+        );
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        // case B：脏根在 host 子树内（img）——祖先链 img→.card 命中 → 升级。
+        engine.set_declarations(Key(3), "color: blue").unwrap();
+        assert!(
+            engine.has_invalidation_needs_full(),
+            "host 祖先链命中升级全量"
+        );
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        // case C：前缀组合器规则 → 哨兵键恒升级（保守兜底）。
+        engine
+            .set_stylesheet(".a > .b:has(x) { color: red }")
+            .is_clean();
+        engine.set_declarations(Key(4), "color: green").unwrap();
+        assert!(
+            engine.has_invalidation_needs_full(),
+            "前缀组合器 :has 恒全量"
+        );
+        let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
+        // case D：无 :has 表 → 判定恒否（增量通道畅通）。
+        engine.set_stylesheet(".a > .b { color: red }").is_clean();
+        engine.set_declarations(Key(4), "color: green").unwrap();
+        assert!(!engine.has_invalidation_needs_full(), "无 :has 零升级");
+    }
+
+    /// P6（ADR-0035 D3）：any_container_rules 补齐 user_sheet/ua_sheet
+    /// 漏检——user 表含 @container 时收敛环 pass 判定（cap=3）正确。
+    #[test]
+    fn container_rules_detected_in_user_sheet() {
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        assert!(!engine.any_container_rules());
+        engine.set_user_stylesheet("@container (min-width: 100px) { .a { color: red } }");
+        assert!(engine.any_container_rules(), "user 表 @container 不再漏检");
+        engine.clear_user_stylesheet();
+        assert!(!engine.any_container_rules(), "clear 后复位");
     }
 }

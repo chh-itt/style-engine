@@ -286,6 +286,59 @@ fn has_inside_nesting() {
     assert_rgb(color_of_at(&mut e, 2), 0.0, 1.0, 0.0);
 }
 
+#[test]
+fn has_narrowed_invalidation_unrelated_subtree() {
+    // P6（ADR-0035 D2）行为锁：`.card:has(img)` 在场时对无关子树
+    // （非 host 祖先链）set_declarations → 快筛否决走增量——远端生效
+    // 且 :has 命中不丢（否决不漏升级的正确性面）。
+    let mut e: StyleEngine<u64> = StyleEngine::new();
+    e.set_stylesheet(".card:has(img) { color: red } #note { color: blue }");
+    e.insert(None, 1, node("root", &[], Some("div"))).unwrap();
+    e.insert(Some(1), 2, node("c2", &["card"], Some("div")))
+        .unwrap();
+    e.insert(Some(2), 3, node("i3", &[], Some("img"))).unwrap();
+    e.insert(Some(1), 4, node("note", &[], Some("div")))
+        .unwrap();
+    assert_rgb(color_of_at(&mut e, 2), 1.0, 0.0, 0.0);
+    assert_rgb(color_of_at(&mut e, 4), 0.0, 0.0, 1.0);
+    // 无关子树内联变更（快筛否决 → 增量路径）：远端生效、:has 命中保持。
+    e.set_declarations(4, "color: green").unwrap();
+    assert_rgb(color_of_at(&mut e, 4), 0.0, 0.502, 0.0);
+    assert_rgb(color_of_at(&mut e, 2), 1.0, 0.0, 0.0);
+    // host 子树结构变更（快筛命中 → 全量）：img 摘除后 :has 失配——
+    // 红不再在场（重算后槽位回落非红值或无冠军）。
+    e.remove(3).unwrap();
+    let f = e.frame((800.0, 600.0), 1.0, 0.0);
+    assert!(!f.boxes.is_empty());
+    match e
+        .computed_style(2)
+        .and_then(|cs| cs.value(PropertyId::Color))
+    {
+        None => {}
+        Some(DeclValue::Color(ColorValue::Absolute(c))) => assert!(
+            (c.components[0] - 1.0).abs() > 0.5,
+            ":has(img) 失配后红色仍在场: {c:?}"
+        ),
+        other => panic!("unexpected color: {other:?}"),
+    }
+}
+
+#[test]
+fn has_prefix_combinator_still_hits() {
+    // P6（ADR-0035 D1）：带前缀组合器的 :has 不合格 → 哨兵全量兜底，
+    // 命中行为与收窄前一致。
+    let mut e: StyleEngine<u64> = StyleEngine::new();
+    e.set_stylesheet(".wrap > .box:has(.title) { color: lime }");
+    e.insert(None, 1, node("root", &[], Some("div"))).unwrap();
+    e.insert(Some(1), 2, node("w2", &["wrap"], Some("div")))
+        .unwrap();
+    e.insert(Some(2), 3, node("b3", &["box"], Some("div")))
+        .unwrap();
+    e.insert(Some(3), 4, node("t4", &["title"], Some("div")))
+        .unwrap();
+    assert_rgb(color_of_at(&mut e, 3), 0.0, 1.0, 0.0);
+}
+
 // ---------- :focus 族 ----------
 
 #[test]

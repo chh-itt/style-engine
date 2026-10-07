@@ -1893,3 +1893,38 @@ D6 clip 圆段数自适应；附带头发现的 border-top/right/bottom/left 四
   不可 .is_clean()）；PowerShell 跨行 -replace 批量修 assert 外壳会残留
   assert!(()) 且破坏行格式（回读逐处 edit 修复）；test 循环 for 模式不
   支持 `pattern: Type` 标注。
+
+## P6 批：:has 失效收窄（ADR-0035）
+
+范围：goal-c293e543 round 18；前置=P5 提交 95a817c。
+
+- **D1 宿主键**（selector.rs）：HasHostKey{tag,classes,id}（Default=哨兵
+  恒通过）+ list_contains_has（深扫 Is/Where/Negation 参数内嵌套，防
+  :is(:has(p)) 藏参绕过索引漏升级）+ has_host_key（Selector::iter() 首
+  sequence 收集 LocalName/ID/Class；Has 组件置位；next_sequence 存在=
+  前缀组合器→返 None 不合格；其余组件不进键=约束弱化保守正确）。tag
+  匹配与匹配器 has_local_name 同为大小写敏感（无 false negative）。
+  selectors 0.40 API 实锚：SelectorList::slice()、Selector::iter()、
+  SelectorIter::next_sequence()、Component::Has(Box<[RelativeSelector]>)。
+- **D1 索引**（engine.rs）：has_host_index 字段 + rebuild_has_host_index
+  （主表+ua+user+extra 逐规则；深扫有 :has 但零合格键或任一不合格→哨兵）
+  挂全部 5 个 rebuild_font_faces 调用点（attach/set_stylesheet/user·ua
+  装载/清除——pwsh 批量插入 verified）。
+- **D2 判定**：has_invalidation_needs_full——!any_has_rules→false；
+  索引空→true 兜底；dirty 根（含自身）沿祖先链任一节点命中任一键→
+  true。frame 增量分支 any_has_rules 替换为该判定。
+- **D2 结构失效收口（测试暴露的真缺口）**：remove（非根）原只标
+  dirty_struct——B3 起 remove+:has 组合失配（host 后代集合变化命中
+  不刷新）。修复=remove 前取存活父、any_has_rules 时 push 进
+  style_dirty_roots（快筛决定升级）；无 :has 表零行为变化。
+- **D3**：any_container_rules 补 ua/user 表漏检；any_has_rules 补
+  ua_sheet（P5 对称缺口）。
+- **测试 +5**：单元 3（键五类矩阵含哨兵/判定四 case/user 表 @container
+  检出）+ 行为锁 2（无关子树否决走增量双正确+remove 失配捕获、前缀
+  组合器哨兵命中）。既有 has_invalidation_upgrades_to_full_restyle 收窄
+  后仍绿（断言颜色非路径）。教训：node helper 首参 id 第三参 tag（类型
+  相对项 :has(img) 要求 name=Some("img")）；green=#008000 非纯绿；曾命中
+  后重算无冠军槽位回落非红值（全量 restyle 既有语义）——失配锁断言
+  「红不在场」而非 None。clippy while_let_on_iterator（for iter.by_ref()
+  保 next_sequence 可用）；clippy/fmt 清零；全量 584 绿（580→584）、
+  lib 243。

@@ -14,7 +14,7 @@ use selectors::context::{
 };
 use selectors::matching::{ElementSelectorFlags, matches_selector};
 use selectors::parser::{
-    NonTSPseudoClass, ParseRelative, Parser as SelectorParserTrait,
+    Component, NonTSPseudoClass, ParseRelative, Parser as SelectorParserTrait,
     PseudoElement as PseudoElementTrait, SelectorImpl as SelectorImplTrait, SelectorList,
     SelectorParseErrorKind,
 };
@@ -287,6 +287,85 @@ pub fn parse_selector_list(source: &str) -> Result<StyleSelectorList, String> {
     let mut parser = sel_css::Parser::new(&mut input);
     SelectorList::parse(&SelectorParser, &mut parser, ParseRelative::No)
         .map_err(|e| format!("{e:?}"))
+}
+
+/// P6（ADR-0035 D1）：`:has()` 规则 host compound 快筛键——`:has` 前单
+/// compound 提取的类型/类/id 约束。全空键（哨兵）= 无约束，预筛恒不否决
+/// （保守方向：只可能多升级、不可能漏升级）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HasHostKey {
+    /// 类型选择器约束（None = 无约束或通配）。
+    pub(crate) tag: Option<String>,
+    /// 类约束集合（空 = 无约束；命中要求键类集 ⊆ 目标类集）。
+    pub(crate) classes: Vec<String>,
+    /// id 约束（None = 无约束）。
+    pub(crate) id: Option<String>,
+}
+
+impl HasHostKey {
+    /// 对树节点快筛：tag 精确相等（与匹配器 `has_local_name` 同为大小写
+    /// 敏感 `==`，无 false negative）/ 键类集 ⊆ 节点类集 / id 精确相等；
+    /// None 字段 = 该轴无约束恒过。
+    pub(crate) fn matches_node(
+        &self,
+        name: Option<&str>,
+        id: Option<&str>,
+        classes: &[String],
+    ) -> bool {
+        self.tag.as_ref().is_none_or(|t| name == Some(t.as_str()))
+            && self.id.as_ref().is_none_or(|i| id == Some(i.as_str()))
+            && self
+                .classes
+                .iter()
+                .all(|c| classes.iter().any(|nc| nc == c))
+    }
+}
+
+/// P6（ADR-0035）：深扫选择器列表是否含 `:has()`（含 `:is()`/`:where()`/
+/// `:not()` 参数内嵌套——凡含相对选择器即受快筛守门，防止藏在函数式
+/// 伪类参数里的 `:has` 绕过索引造成漏升级）。
+pub(crate) fn list_contains_has(list: &StyleSelectorList) -> bool {
+    list.slice().iter().any(selector_contains_has)
+}
+
+fn selector_contains_has(selector: &selectors::parser::Selector<StyleSelectorImpl>) -> bool {
+    selector.iter_raw_match_order().any(|c| match c {
+        Component::Has(_) => true,
+        Component::Is(l) | Component::Where(l) | Component::Negation(l) => {
+            l.slice().iter().any(selector_contains_has)
+        }
+        _ => false,
+    })
+}
+
+/// P6（ADR-0035 D1）：提取单条选择器的 host 快筛键。
+///
+/// 返回 None = 该选择器不合格（无 `:has` / `:has` 带前缀组合器
+/// `.a > .b:has(x)` / `:has` 不在顶层最右 compound）——调用方对不合格
+/// 选择器回退全量兜底。合格判定：最右 compound（`iter()` 首 sequence）
+/// 含顶层 `Has` 组件且 `next_sequence()` 为 None（无前缀组合器）。
+/// compound 内其余组件（属性选择器/伪类/命名空间等）不进键——键只弱化
+/// 约束不强化，否决方向不受影响（保守正确）。
+pub(crate) fn has_host_key(
+    selector: &selectors::parser::Selector<StyleSelectorImpl>,
+) -> Option<HasHostKey> {
+    let mut key = HasHostKey::default();
+    let mut has_present = false;
+    let mut iter = selector.iter();
+    for c in iter.by_ref() {
+        match c {
+            Component::Has(_) => has_present = true,
+            Component::LocalName(ln) => key.tag = Some(ln.name.as_str().to_string()),
+            Component::ID(id) => key.id = Some(id.as_str().to_string()),
+            Component::Class(cl) => key.classes.push(cl.as_str().to_string()),
+            // 通配/命名空间/属性/伪类/结构伪类/伪元素：不进键（约束弱化）。
+            _ => {}
+        }
+    }
+    if !has_present || iter.next_sequence().is_some() {
+        return None;
+    }
+    Some(key)
 }
 
 /// 树视图：selectors Element 特征的挂载点。

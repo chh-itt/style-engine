@@ -822,6 +822,21 @@
   important 反转、内置表装载/清除、counter 解析 15 例、树序计数
   1/2/3、reset 作用域 1/1/1、嵌套 join "1.1"、attr 存在/缺失、quotes
   配对/越配静默。全量 **580** 测试绿（572→580）。
+- **:has 失效收窄（P6 批，ADR-0035）**：含 `:has()` 规则的表此前把整个
+  增量通道全量化（any_has_rules → 每帧 restyle()）；升级为**宿主键快筛
+  收窄**——①`HasHostKey{tag,classes,id}`（Default=哨兵恒通过）+
+  `list_contains_has` 深扫 Is/Where/Negation 参数内嵌套（防 `:is(:has)`
+  绕过索引漏升级）+ `has_host_key`（首 sequence 组件收集，前缀组合器
+  不合格返 None）；②`has_host_index` 随表重建（挂全部 5 个
+  rebuild_font_faces 调用点），规则级零合格键/任一不合格 → 哨兵；
+  ③`has_invalidation_needs_full`——dirty 根沿祖先链命中任一键 → 全量
+  升级，全否决 → 增量 subtree 通道（快筛只多升级不漏升级）；④**结构
+  失效收口**：remove（非根）+`:has` 此前只标 dirty_struct 不重算（B3
+  起失配缺口）——存活父 push style_dirty_roots；⑤`any_container_rules`
+  补 user_sheet/ua_sheet 漏检、`any_has_rules` 补 ua_sheet（P5 对称
+  缺口）。锁定测试 +5：键提取五类矩阵/判定四 case/user 表 @container
+  检出/无关子树否决走增量+remove 失配捕获/前缀组合器哨兵命中。全量
+  **584** 测试绿（580→584）。
 
 
 ### 阶段6 — 实施期 Phase 0：治理文档与测试基座（前置）
