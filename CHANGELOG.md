@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — var() 宽关键字整值语义
+
+- **custom property 宽关键字整值（fix）**：css-variables-1 §3——custom
+  property 终值恰为 CSS 宽关键字时，语义作用于 custom property 自身而非
+  文本代换：`--x: initial` → guaranteed-invalid（引用处带 fallback 用
+  fallback、无 fallback IACVT 继承或初始），`--x: inherit/unset`（custom
+  property 必继承）→ 父 custom 终值，缺席 = guaranteed-invalid；revert 族
+  级联已剔除（防御按 initial 处理）；注册属性回退 initial-value 后仍过
+  B4 语法门；var() fallback 文本代换结果恰为宽关键字的整值语义（B1 通路）
+  一并锁定。新增锁定测试 3 件。
+  （`crates/style-engine/src/computed.rs` `CustomResolver::get`、
+  `crates/style-engine/src/css/decl.rs` `whole_value_wide_keyword`）
+
 ### 1.0 对齐 — @counter-style 解析与注册表
 
 - **@counter-style 规则（feat）**：新增 `css::counter_style` 模块（经

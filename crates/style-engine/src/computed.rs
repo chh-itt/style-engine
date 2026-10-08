@@ -664,13 +664,36 @@ impl<'a> CustomResolver<'a> {
             // 继承值已是终值，直接可用
             None => return self.inherited.get(name).cloned(),
         };
-        stack.push(name.to_string());
-        let resolved = self.substitute(&raw, stack);
-        stack.pop();
+        // B1-3（css-variables-1 §3 / css-properties-1 §3）：custom property
+        // 整值恰为 CSS 宽关键字 → 语义作用于 custom property 自身，不进入
+        // 文本代换：initial（及级联已剔除的 revert 族，防御同）= guaranteed-
+        // invalid，注册属性回退 initial-value；inherit/unset（custom property
+        // 必继承）= 父 custom 终值，缺席时注册属性回退 initial-value，否则
+        // guaranteed-invalid。
+        let inherited = self.inherited;
+        let registered = self.registered;
+        let resolved = if let Some(kind) = crate::css::decl::whole_value_wide_keyword(&raw) {
+            use crate::css::property::WideKeyword as WK;
+            let reg_iv = || {
+                registered
+                    .get(name)
+                    .and_then(|r| r.initial_value.as_ref())
+                    .map(|iv| token_buf_to_string(iv))
+            };
+            match kind {
+                WK::Initial | WK::Revert | WK::RevertLayer => reg_iv(),
+                WK::Inherit | WK::Unset => inherited.get(name).cloned().or_else(reg_iv),
+            }
+        } else {
+            stack.push(name.to_string());
+            let sub = self.substitute(&raw, stack);
+            stack.pop();
+            sub
+        };
         // B4：注册属性语法门——终值不匹配 syntax → unset → initial-value
         //（Chrome 一致：var(--x) 解析到 initial 而非触发 fallback；Named
         // 注册必有 initial（注册有效性保证），门失败恒有回值）。
-        let resolved = resolved.and_then(|t| match self.registered.get(name) {
+        let resolved = resolved.and_then(|t| match registered.get(name) {
             Some(rule) if !crate::css::property_rule::syntax_matches(&rule.syntax, &t) => rule
                 .initial_value
                 .as_ref()
@@ -1717,6 +1740,89 @@ mod tests {
             c_style.get(PropertyId::Width),
             Some(DeclValue::LenAuto(None))
         ));
+    }
+
+    #[test]
+    fn var_custom_wide_keyword_initial_guaranteed_invalid() {
+        // B1-3（css-variables-1 §3）：--k: initial → guaranteed-invalid，
+        // 不是文本 "initial"。带 fallback → fallback 胜；无 fallback →
+        // IACVT（继承属性取父值）。
+        let s = sheet(
+            ".p { color: red } .c1 { --k: initial; color: var(--k, lime) } \
+             .c2 { --k: initial; color: var(--k) }",
+        );
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let p = tree.insert_child(root, node("div", &["p"], ""));
+        let c1 = tree.insert_child(p, node("span", &["c1"], ""));
+        let p_style = compute_node(&tree, p, &s, &MediaEnv::default(), None);
+        let c1_style = compute_node(&tree, c1, &s, &MediaEnv::default(), Some(&p_style));
+        assert_eq!(
+            color_rgb(&c1_style)[1],
+            1.0,
+            "initial → guaranteed-invalid → fallback lime"
+        );
+        // 无 fallback：color: var(--k) → IACVT → 父值 red
+        let c2 = tree.insert_child(p, node("span", &["c2"], ""));
+        let c2_style = compute_node(&tree, c2, &s, &MediaEnv::default(), Some(&p_style));
+        assert_eq!(color_rgb(&c2_style)[0], 1.0, "initial → IACVT → 父值 red");
+    }
+
+    #[test]
+    fn var_custom_wide_keyword_inherit_and_unset() {
+        // B1-3：--k: inherit / unset（custom property 必继承）→ 父 custom
+        // 终值；父缺席 = guaranteed-invalid（IACVT 归 auto），而非文本
+        // "inherit" 被代换成 width 的整值关键字。
+        let s = sheet(
+            ".p { --k: 5px; --j: 7px; color: blue } .c { --k: inherit; \
+             --j: unset; padding-top: var(--k); padding-bottom: var(--j) }",
+        );
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let p = tree.insert_child(root, node("div", &["p"], ""));
+        let c = tree.insert_child(p, node("span", &["c"], ""));
+        let p_style = compute_node(&tree, p, &s, &MediaEnv::default(), None);
+        let c_style = compute_node(&tree, c, &s, &MediaEnv::default(), Some(&p_style));
+        let px = |v: Option<&DeclValue>| match v {
+            Some(DeclValue::LenAuto(Some(LengthPercentage::Px(x)))) => *x,
+            Some(DeclValue::Len(LengthPercentage::Px(x))) => *x,
+            other => panic!("px: {other:?}"),
+        };
+        assert_eq!(
+            px(c_style.get(PropertyId::PaddingTop)),
+            5.0,
+            "inherit → 父 --k"
+        );
+        assert_eq!(
+            px(c_style.get(PropertyId::PaddingBottom)),
+            7.0,
+            "unset → 父 --j"
+        );
+        // 父无 --k：inherit → guaranteed-invalid → width IACVT → auto
+        let s2 = sheet(".c { --k: inherit; width: var(--k) }");
+        let c2 = tree.insert_child(root, node("div", &["c"], ""));
+        let c2_style = compute_node(&tree, c2, &s2, &MediaEnv::default(), None);
+        assert!(
+            matches!(
+                c2_style.get(PropertyId::Width),
+                Some(DeclValue::LenAuto(None))
+            ),
+            "父缺席 → guaranteed-invalid → auto（非代换文本 inherit）"
+        );
+    }
+
+    #[test]
+    fn var_fallback_text_wide_keyword_lock() {
+        // B1 锁：fallback 文本代换结果恰为宽关键字 → 整值语义
+        //（computed.rs 代换后 try_parse_wide_keyword 通路）。
+        let s = sheet(".p { color: red } .c { color: var(--undef, inherit) }");
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let p = tree.insert_child(root, node("div", &["p"], ""));
+        let c = tree.insert_child(p, node("span", &["c"], ""));
+        let p_style = compute_node(&tree, p, &s, &MediaEnv::default(), None);
+        let c_style = compute_node(&tree, c, &s, &MediaEnv::default(), Some(&p_style));
+        assert_eq!(color_rgb(&c_style)[0], 1.0, "fallback inherit → 父值 red");
     }
 
     #[test]

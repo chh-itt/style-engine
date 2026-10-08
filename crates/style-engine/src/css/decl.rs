@@ -397,6 +397,16 @@ pub(crate) fn try_parse_wide_keyword(input: &mut Parser<'_>) -> Option<WideKeywo
         .ok()
 }
 
+/// B1-3：整 token 串是否恰为一个 CSS 宽关键字（无其余成分；大小写不敏）。
+/// custom property 终值判定用（computed.rs）——宽关键字在 custom property
+/// 自身生效而非作为文本被 var() 代换（css-variables-1 §3）。
+pub(crate) fn whole_value_wide_keyword(text: &str) -> Option<WideKeyword> {
+    let mut input = cssparser::Parser::new(text);
+    let kw = try_parse_wide_keyword(&mut input)?;
+    input.skip_whitespace();
+    if input.is_exhausted() { Some(kw) } else { None }
+}
+
 impl<'i> cssparser::AtRuleParser<'i> for DeclarationBlockParser {
     type Prelude = ();
     type AtRule = ();
