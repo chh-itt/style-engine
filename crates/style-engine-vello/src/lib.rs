@@ -6,7 +6,9 @@
 //! 裁剪走 vello 图层（Mix::Clip）。
 //!
 //! MVP 偏差（FEATURES.md 同步）：
-//! - Shadow 无模糊（vello 0.10 无内置高斯模糊），以半透明矩形近似；
+//! - Shadow 模糊非真高斯（vello 0.10 无内置模糊）——box-shadow 以多重同心
+//!   扩张环、text-shadow 以多重同心偏移环近似：环 α = 1−(1−a)^(1/N)（N 层
+//!   复合恰为总 a），text 环数随 blur 自适应（≤0 单环=锐利副本）；
 //! - Text 基元跳过（字形 run 随 T5 落地后接入 vello 的 parley 绘制）。
 
 use style_engine::css::property::TextDecoStyleKind;
@@ -245,6 +247,134 @@ mod tests {
         );
         assert!((125..=130).contains(&b), "B 与 G 对称（白罩）实测 B={b}");
     }
+
+    // ── 纯函数单测（无 GPU）：不等宽圆角分界几何 + 影字模糊环近似 ──
+
+    #[test]
+    fn corner_diagonal_equal_widths_is_45deg() {
+        for (wu, wv) in [(1.0, 1.0), (2.0, 2.0), (0.5, 0.5)] {
+            let d = super::corner_diagonal_deg(wu, wv);
+            assert!((d - 45.0).abs() < 1e-9, "等宽对角线应为 45°，实测 {d}");
+        }
+    }
+
+    #[test]
+    fn corner_diagonal_extreme_width_ratio_shifts_angle() {
+        // (邻=2, 拥=10)：对角线陡化 atan2(10,2)≈78.69°（等宽为 45°）。
+        let d = super::corner_diagonal_deg(2.0, 10.0);
+        assert!((d - 78.690_068).abs() < 1e-6, "实测 {d}");
+    }
+
+    #[test]
+    fn diagonal_arc_crossing_equal_widths_at_quarter_midpoint() {
+        // 等宽 → 对角线 45° 方位 → 象限 [180°,270°] 中点 225°，与 r/rc 无关。
+        for (r, rc) in [(10.0, 9.5), (10.0, 5.0), (40.0, 30.0)] {
+            let a = super::diagonal_arc_crossing_deg(r, rc, 1.0, 1.0);
+            assert!((a - 225.0).abs() < 1e-9, "r={r} rc={rc} 实测 {a}");
+        }
+    }
+
+    #[test]
+    fn diagonal_arc_crossing_extreme_ratio_degenerates_to_full_quarter_side() {
+        // r=10，(w_u, w_v)=(邻, 拥)。拥有边弧与对角线无交（D<0）→ 钳至
+        // 180°=拥有边独占整象限；邻边弧 rc=9 交于 ≈198.04°。
+        assert_eq!(
+            super::diagonal_arc_crossing_deg(10.0, 5.0, 2.0, 10.0),
+            180.0
+        );
+        let n = super::diagonal_arc_crossing_deg(10.0, 9.0, 2.0, 10.0);
+        assert!((n - 198.04).abs() < 0.02, "实测 {n}");
+        // 镜像：拥有边弧交于 ≈251.96°；邻边弧无交 → 钳 270°=邻边独占。
+        let o = super::diagonal_arc_crossing_deg(10.0, 9.0, 10.0, 2.0);
+        assert!((o - 251.96).abs() < 0.02, "实测 {o}");
+        assert_eq!(
+            super::diagonal_arc_crossing_deg(10.0, 5.0, 10.0, 2.0),
+            270.0
+        );
+    }
+
+    #[test]
+    fn corner_arc_bounds_equal_widths_split_at_diagonal_per_corner_shift() {
+        // 等宽：邻接段终点 = 拥有段起点 = 对角线方位（局部 225°+平移），
+        // 两段合拢、与旧整象限弧回归一致。
+        for (shift, mid) in [(0.0, 225.0), (90.0, 315.0), (180.0, 45.0), (270.0, 135.0)] {
+            let (tn, to) = super::corner_arc_bounds(10.0, 4.0, 4.0, shift);
+            assert!(
+                (tn - mid).abs() < 1e-9 && (to - mid).abs() < 1e-9,
+                "shift={shift} tn={tn} to={to}"
+            );
+        }
+    }
+
+    #[test]
+    fn shrink_corner_radii_scales_when_adjacent_sum_exceeds_edge() {
+        // S_top=160 > L=100 → f=0.625：两角 80 → 50，其余不变。
+        assert_eq!(
+            super::shrink_corner_radii(100.0, 100.0, [80.0, 80.0, 0.0, 0.0]),
+            [50.0, 50.0, 0.0, 0.0]
+        );
+        // S_right=80 > h=50 → f=0.625：全角 40 → 25。
+        assert_eq!(
+            super::shrink_corner_radii(100.0, 50.0, [40.0; 4]),
+            [25.0; 4]
+        );
+        // 单角 120 > 宽 100 → 该角收到 100；0 角不放大。
+        assert_eq!(
+            super::shrink_corner_radii(100.0, 100.0, [120.0, 0.0, 0.0, 0.0]),
+            [100.0, 0.0, 0.0, 0.0]
+        );
+        // 未超边长 → 原样。
+        assert_eq!(
+            super::shrink_corner_radii(100.0, 100.0, [30.0, 30.0, 30.0, 30.0]),
+            [30.0, 30.0, 30.0, 30.0]
+        );
+    }
+
+    #[test]
+    fn ring_alpha_conserves_total_coverage() {
+        // N 层各 α_r 复合 = 1−(1−α_r)^N 恰等于总 a（含 a=1；n=1 恒等）。
+        for a in [0.25f32, 0.6, 1.0] {
+            for n in [1usize, 3, 8] {
+                let ring = super::ring_alpha(a, n as f32);
+                let total = 1.0 - (1.0 - ring).powi(n as i32);
+                assert!((total - a).abs() < 1e-5, "a={a} n={n} 复合={total}");
+            }
+        }
+        assert_eq!(super::ring_alpha(0.6, 1.0), 0.6);
+    }
+
+    #[test]
+    fn text_shadow_ring_count_adapts_to_blur() {
+        assert_eq!(super::text_shadow_ring_count(-1.0), 1);
+        assert_eq!(super::text_shadow_ring_count(0.0), 1);
+        assert_eq!(super::text_shadow_ring_count(4.0), 3);
+        assert_eq!(super::text_shadow_ring_count(7.9), 3);
+        assert_eq!(super::text_shadow_ring_count(8.0), 8);
+        assert_eq!(super::text_shadow_ring_count(16.0), 8);
+    }
+
+    #[test]
+    fn text_shadow_ring_offsets_spread_along_offset_direction() {
+        // (10,0) blur=6 n=3：沿 +x 外推 2/4/6 → (12,0)(14,0)(16,0)。
+        assert_eq!(
+            super::text_shadow_ring_offsets(10.0, 0.0, 6.0, 3),
+            vec![(12.0, 0.0), (14.0, 0.0), (16.0, 0.0)]
+        );
+        // 零偏移：各环重合于原点（复合 α = a 的锐影）。
+        assert_eq!(
+            super::text_shadow_ring_offsets(0.0, 0.0, 6.0, 3),
+            vec![(0.0, 0.0); 3]
+        );
+        // blur≤0 单环：恰落 (dx,dy)（与旧锐利副本回归一致）。
+        assert_eq!(
+            super::text_shadow_ring_offsets(5.0, 7.0, 0.0, 1),
+            vec![(5.0, 7.0)]
+        );
+        assert_eq!(
+            super::text_shadow_ring_offsets(5.0, 7.0, -2.0, 1),
+            vec![(5.0, 7.0)]
+        );
+    }
 }
 
 /// 将绘制清单写入 vello 场景（追加语义；调用方持有场景生命周期）。
@@ -291,34 +421,43 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
             let run_transform =
                 Affine::translate((state.offset.x + origin.x, state.offset.y + origin.y)) * top;
             // F2（ADR-0022 D5）：影字先绘（transform 平移重发；spans 置
-            // 空表=全字影色；blur=B 级在案——逐 run 模糊未启）。
+            // 空表=全字影色）。模糊=多重同心偏移环近似（与 box-shadow 同源
+            // ring_alpha）：环数随 blur 自适应（≤0 单环=锐利副本，回归一
+            // 致），环 i 沿 (dx,dy) 方向外推 blur·i/n，环 α = 1−(1−a)^(1/N)
+            // 使 N 层复合恰为 a；(dx,dy)=(0,0) 时各环重合、复合 α 仍 = a。
             for s in shadows.iter() {
-                let shadow_transform = Affine::translate((
-                    state.offset.x + origin.x + f64::from(s.dx),
-                    state.offset.y + origin.y + f64::from(s.dy),
-                )) * top;
-                text.draw_text(
-                    scene,
-                    shadow_transform,
-                    content,
-                    s.color,
-                    &[],
-                    *font_size,
-                    font_family,
-                    *font_weight,
-                    *italic,
-                    *max_advance,
-                    *line_height,
-                    *letter_spacing,
-                    *text_align,
-                    *word_break,
-                    *overflow_wrap,
-                    decorations,
-                    *font_stretch,
-                    *word_spacing,
-                    font_features,
-                    font_variations,
-                );
+                let n = text_shadow_ring_count(s.blur);
+                let ring_color = s
+                    .color
+                    .with_alpha(ring_alpha(s.color.components[3], n as f32));
+                for (ex, ey) in text_shadow_ring_offsets(s.dx, s.dy, s.blur, n) {
+                    let shadow_transform = Affine::translate((
+                        state.offset.x + origin.x + f64::from(ex),
+                        state.offset.y + origin.y + f64::from(ey),
+                    )) * top;
+                    text.draw_text(
+                        scene,
+                        shadow_transform,
+                        content,
+                        ring_color,
+                        &[],
+                        *font_size,
+                        font_family,
+                        *font_weight,
+                        *italic,
+                        *max_advance,
+                        *line_height,
+                        *letter_spacing,
+                        *text_align,
+                        *word_break,
+                        *overflow_wrap,
+                        decorations,
+                        *font_stretch,
+                        *word_spacing,
+                        font_features,
+                        font_variations,
+                    );
+                }
             }
             text.draw_text(
                 scene,
@@ -377,6 +516,45 @@ fn family_of(list: &style_engine::css::property::FontFamilyList) -> std::borrow:
         Some(_) => "sans-serif".into(),
         None => "sans-serif".into(),
     }
+}
+
+/// 同心环近似共享 α（box-shadow 与 text-shadow 共用）：N 层各以 α_r 复合，
+/// 结果 1−(1−α_r)^N —— 反解 α_r = 1−(1−a)^(1/N) 使 N 层复合恰为总 a
+/// （a=1 时 α_r=1，N 层实心不透）。
+fn ring_alpha(total: f32, n: f32) -> f32 {
+    1.0 - (1.0 - total).powf(1.0 / n)
+}
+
+/// text-shadow 环数随 blur 自适应：blur ≤ 0 → 1（单环=原锐利副本，回归
+/// 一致）；小模糊 → 3；大模糊（≥ 8）→ 8。
+fn text_shadow_ring_count(blur: f32) -> usize {
+    if blur <= 0.0 {
+        1
+    } else if blur < 8.0 {
+        3
+    } else {
+        8
+    }
+}
+
+/// 各环偏移：第 i 环（1..=n）在 (dx,dy) 基础上沿其单位方向外推
+/// blur·i/n（负外推截为 0，blur≤0 单环恰落 (dx,dy)）；(dx,dy)=(0,0)
+/// 时各环重合——复合 α = a，即无模糊锐影。
+fn text_shadow_ring_offsets(dx: f32, dy: f32, blur: f32, n: usize) -> Vec<(f32, f32)> {
+    let n = n.max(1);
+    let nf = n as f32;
+    let len = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = if len > 0.0 {
+        (dx / len, dy / len)
+    } else {
+        (0.0, 0.0)
+    };
+    (1..=n)
+        .map(|i| {
+            let e = (blur * i as f32 / nf).max(0.0);
+            (dx + ux * e, dy + uy * e)
+        })
+        .collect()
 }
 
 /// sink 侧文本系统（零副作用：系统字体禁用，字体由宿主推入）。
@@ -1082,8 +1260,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             // 后反转填充（EvenOdd：盒路径−影框路径），模糊=影框逐环外扩
             // （孔变大、影带变薄）。spread 外扩/内缩影框。
             let n = 6.0f32;
-            let ring_alpha = 1.0 - (1.0 - color.components[3]).powf(1.0 / n);
-            let ring_color = color.with_alpha(ring_alpha);
+            let ring_color = color.with_alpha(ring_alpha(color.components[3], n));
             if *inset {
                 let bx = *x + state.offset.x as f32;
                 let by = *y + state.offset.y as f32;
@@ -1692,20 +1869,116 @@ fn distribute_stops(
         .collect()
 }
 
-/// 90° 圆弧的三次贝塞尔近似（y-down，θ 递增 = 屏幕顺时针；起点须已 move_to）。
-fn quarter_arc(path: &mut BezPath, cx: f64, cy: f64, r: f64, start_deg: f64) {
-    let k = 0.552_284_7;
-    let (a1, a2) = (start_deg.to_radians(), (start_deg + 90.0).to_radians());
-    let (p0x, p0y) = (a1.cos(), a1.sin());
-    let (p3x, p3y) = (a2.cos(), a2.sin());
+/// 圆弧上另起一段（起点 move_to，不绘制；y-down，θ 递增 = 屏幕顺时针）。
+fn arc_move_to(path: &mut BezPath, cx: f64, cy: f64, r: f64, deg: f64) {
+    let a = deg.to_radians();
+    path.move_to(Point::new(cx + a.cos() * r, cy + a.sin() * r));
+}
+
+/// 任意跨度圆弧的三次贝塞尔近似（y-down，θ 递增 = 屏幕顺时针；起点须已
+/// move_to）。跨角 >90° 时按 ≤90° 分段，每段控制系数 k = 4/3·tan(Δθ/4)
+/// （90° 时即经典 k=0.5522847，与旧 quarter_arc 同精度）；零跨度 no-op。
+fn arc_segment(path: &mut BezPath, cx: f64, cy: f64, r: f64, start_deg: f64, end_deg: f64) {
+    let span = (end_deg - start_deg).to_radians();
+    if span.abs() < 1e-9 {
+        return;
+    }
+    let steps = (span.abs() / core::f64::consts::FRAC_PI_2).ceil().max(1.0);
+    let step = span / steps;
+    let k = (4.0 / 3.0) * (step / 4.0).tan();
     let half_pi = core::f64::consts::FRAC_PI_2;
-    let (t1x, t1y) = ((a1 + half_pi).cos(), (a1 + half_pi).sin());
-    let (t2x, t2y) = ((a2 + half_pi).cos(), (a2 + half_pi).sin());
-    path.curve_to(
-        Point::new(cx + (p0x + t1x * k) * r, cy + (p0y + t1y * k) * r),
-        Point::new(cx + (p3x - t2x * k) * r, cy + (p3y - t2y * k) * r),
-        Point::new(cx + p3x * r, cy + p3y * r),
+    let mut a = start_deg.to_radians();
+    for _ in 0..steps as u32 {
+        let a2 = a + step;
+        let (p0x, p0y) = (a.cos(), a.sin());
+        let (p3x, p3y) = (a2.cos(), a2.sin());
+        let (t1x, t1y) = ((a + half_pi).cos(), (a + half_pi).sin());
+        let (t2x, t2y) = ((a2 + half_pi).cos(), (a2 + half_pi).sin());
+        path.curve_to(
+            Point::new(cx + (p0x + t1x * k) * r, cy + (p0y + t1y * k) * r),
+            Point::new(cx + (p3x - t2x * k) * r, cy + (p3y - t2y * k) * r),
+            Point::new(cx + p3x * r, cy + p3y * r),
+        );
+        a = a2;
+    }
+}
+
+/// 角部颜色分界对角线在角局部系的方向角（度）：对角线自外角指向内角，
+/// 分量 = (邻接边有效宽, 拥有边有效宽)，方向角 = atan2(拥有, 邻接)；
+/// 等宽 → 45°（与方角 fill_tri 对角线一致）。
+fn corner_diagonal_deg(w_u: f64, w_v: f64) -> f64 {
+    w_v.atan2(w_u).to_degrees()
+}
+
+/// 颜色分界对角线与角弧（圆心 K=(r,r)、半径 rc）的交点方位角（角局部系，
+/// 钳入 [180°, 270°] 象限）。射线 t·(a,b)（(a,b)=单位对角方向）代入
+/// |P−K|=rc：t² − 2t·r·(a+b) + 2r² − rc² = 0，取近根
+/// t = r(a+b) − √(rc² − r²(a−b)²)；判别式 < 0（对角线与该中心线弧无交，
+/// 见于一边独厚）或 t < 0 时退化为最近点 t* = r(a+b)——方位角经钳制
+/// 自然落在 180°（宽边独占整象限）或 270°（窄边让出整象限）。
+fn diagonal_arc_crossing_deg(r: f64, rc: f64, w_u: f64, w_v: f64) -> f64 {
+    let len = (w_u * w_u + w_v * w_v).sqrt();
+    if len <= 0.0 {
+        return 180.0;
+    }
+    let phi = corner_diagonal_deg(w_u, w_v).to_radians();
+    let (a, b) = (phi.cos(), phi.sin());
+    let d = rc * rc - r * r * (a - b) * (a - b);
+    let t = if d >= 0.0 {
+        (r * (a + b) - d.sqrt()).max(0.0)
+    } else {
+        r * (a + b)
+    };
+    let angle = (t * b - r).atan2(t * a - r).to_degrees().rem_euclid(360.0);
+    angle.clamp(180.0, 270.0)
+}
+
+/// 边带中心线弧半径：r − w/2（下限 0.5 防退化；与旧直算一致）。
+fn centerline_radius(r: f32, w: f32) -> f64 {
+    f64::from((r - w / 2.0).max(0.5))
+}
+
+/// 角部两条弧段的分界角（屏幕系，已归一 [0°, 360°)）：返回
+/// (邻接段终点角, 拥有段起点角)。每段取自身中心线弧（半径 r−w/2）与
+/// 同一对角线的交点——两段在其各自弧上分别与对角线相接，且各自与所邻
+/// 直线段切向连续。等宽时两角重合于对角线 45° 方位（225°+shift）。
+/// shift = 角局部系到屏幕系的方位平移（TL 0°、TR 90°、BR 180°、BL 270°）。
+fn corner_arc_bounds(r: f32, w_owner: f32, w_neighbor: f32, shift_deg: f64) -> (f64, f64) {
+    let rf = f64::from(r);
+    let th_n = diagonal_arc_crossing_deg(
+        rf,
+        centerline_radius(r, w_neighbor),
+        f64::from(w_neighbor),
+        f64::from(w_owner),
     );
+    let th_o = diagonal_arc_crossing_deg(
+        rf,
+        centerline_radius(r, w_owner),
+        f64::from(w_neighbor),
+        f64::from(w_owner),
+    );
+    (
+        (th_n + shift_deg).rem_euclid(360.0),
+        (th_o + shift_deg).rem_euclid(360.0),
+    )
+}
+
+/// css-backgrounds-3 §4.5「Overlapping Curves」角弧重叠收缩：
+/// f = min(Lᵢ/Sᵢ)（仅 Sᵢ > Lᵢ 的边参与；Ltop=Lbottom=盒宽，Lleft=Lright=
+/// 盒高，Sᵢ = 该边两端角半径之和）；f < 1 时全部角半径乘 f。
+fn shrink_corner_radii(w: f32, h: f32, radius: [f32; 4]) -> [f32; 4] {
+    let [tl, tr, br, bl] = radius;
+    let mut f = 1.0f32;
+    for (edge_len, sum) in [(w, tl + tr), (h, tr + br), (w, br + bl), (h, bl + tl)] {
+        if sum > edge_len {
+            f = f.min(edge_len / sum);
+        }
+    }
+    if f < 1.0 {
+        [tl * f, tr * f, br * f, bl * f]
+    } else {
+        radius
+    }
 }
 
 fn stroke_side(
@@ -1735,8 +2008,9 @@ fn stroke_side(
 
 /// 方角（radius≈0）角部对角线二分（第四批⑤）：外角→内角对角线把角部方块
 /// 分给相邻两边（CSS 语义）；单边存在整块归该边；同色整块一次填充——消除
-/// 旧「全边长直线交叉」的半透明双重着色与「后画方」角色偏差。圆角仍走
-/// 角弧（归属不变）；不等宽圆角弧起点不随邻边带宽调整——近似记 FEATURES。
+/// 旧「全边长直线交叉」的半透明双重着色与「后画方」角色偏差。圆角弧段同以
+/// 该颜色分界对角线分界（方向 = (邻边宽, 拥有边宽)，见 corner_arc_bounds）；
+/// 极端宽窄比下沿对角线可余细缝/后画边覆盖窄边一条——近似记 FEATURES。
 fn fill_tri(scene: &mut Scene, xform: Affine, pts: [[f32; 2]; 3], color: AlphaColor<Srgb>) {
     let mut path = BezPath::new();
     path.move_to(Point::new(f64::from(pts[0][0]), f64::from(pts[0][1])));
@@ -1756,8 +2030,12 @@ fn fill_quad(scene: &mut Scene, xform: Affine, sq: [f32; 4], color: AlphaColor<S
 /// 方角角部条目：(圆角判定, 拥有边, 相邻边, 方块, 拥有边三角, 相邻边三角)。
 type CornerSpec = (f32, usize, usize, [f32; 4], [[f32; 2]; 3], [[f32; 2]; 3]);
 
-/// 四边分画（T4b）：每边一条「角弧 + 直线」描边路径；角弧按顺时针归属
-/// （TL→top、TR→right、BR→bottom、BL→left）。
+/// 四边分画（T4b）：每边一条「角弧段 + 直线」描边路径；角弧按顺时针归属
+/// （TL→top、TR→right、BR→bottom、BL→left）。不等宽时各角两段弧以颜色分界
+/// 对角线（方向 = (邻边有效宽, 拥有边有效宽)，等宽=45°）与该边中心线弧的
+/// 交点为界（corner_arc_bounds）——各段与所邻直线切向连续；半径和超出边长
+/// 先按 css-backgrounds §4.5 等比收缩（shrink_corner_radii）。极端宽窄比下
+/// 两段弧半径不同，接缝沿对角线可余细缝/后画边覆盖窄边一条——近似记 FEATURES。
 #[allow(clippy::too_many_arguments)]
 fn draw_border(
     scene: &mut Scene,
@@ -1770,7 +2048,7 @@ fn draw_border(
     xform: Affine,
 ) {
     use style_engine::css::property::BorderStyle;
-    let [tl, tr, br, bl] = radius;
+    let [tl, tr, br, bl] = shrink_corner_radii(w, h, radius);
     let (wt, wr, wb, wl) = (
         sides[0].width,
         sides[1].width,
@@ -1779,6 +2057,21 @@ fn draw_border(
     );
     let f = f64::from;
     let on = |s: &style_engine::paint::BorderSide| s.style != BorderStyle::None && s.width > 0.0;
+    // 有效宽（关闭边记 0）：分界对角线按有效宽计算，关闭边自然让出或
+    // 独占整象限（退化为 180°/270° 钳制），无需特判。
+    let we = [
+        if on(&sides[0]) { wt } else { 0.0 },
+        if on(&sides[1]) { wr } else { 0.0 },
+        if on(&sides[2]) { wb } else { 0.0 },
+        if on(&sides[3]) { wl } else { 0.0 },
+    ];
+    // 各角两段弧的分界角（屏幕系）：(邻接段终点, 拥有段起点)。
+    let bounds = [
+        corner_arc_bounds(tl, we[0], we[3], 0.0),
+        corner_arc_bounds(tr, we[1], we[0], 90.0),
+        corner_arc_bounds(br, we[2], we[1], 180.0),
+        corner_arc_bounds(bl, we[3], we[2], 270.0),
+    ];
 
     // 方角角部方块：(圆角判定, 拥有边, 相邻边, 方块, 拥有边三角, 相邻边三角)
     let corners: [CornerSpec; 4] = [
@@ -1840,12 +2133,12 @@ fn draw_border(
         }
     }
 
-    // top（TL 弧 / TL 方块右缘起）
+    // top（TL 拥有段 [θo,270°] / TL 方块右缘起）+ TR 邻接段 [270°,θn]
     let mut p = BezPath::new();
     if tl > 0.0 && wt > 0.0 {
-        let rc = f((tl - wt / 2.0).max(0.5));
-        p.move_to(Point::new(f(x + tl) - rc, f(y + tl)));
-        quarter_arc(&mut p, f(x + tl), f(y + tl), rc, 180.0);
+        let rc = centerline_radius(tl, wt);
+        arc_move_to(&mut p, f(x + tl), f(y + tl), rc, bounds[0].1);
+        arc_segment(&mut p, f(x + tl), f(y + tl), rc, bounds[0].1, 270.0);
     } else {
         p.move_to(Point::new(f(x + wl), f(y + wt / 2.0)));
     }
@@ -1857,14 +2150,18 @@ fn draw_border(
         },
         f(y + wt / 2.0),
     ));
+    if tr > 0.0 && wt > 0.0 {
+        let rc = centerline_radius(tr, wt);
+        arc_segment(&mut p, f(x + w - tr), f(y + tr), rc, 270.0, bounds[1].0);
+    }
     stroke_side(scene, &p, &sides[0], xform);
 
-    // right（TR 弧 / TR 方块下缘起）
+    // right（TR 拥有段 [θo,360°] / TR 方块下缘起）+ BR 邻接段 [0°,θn]
     let mut p = BezPath::new();
     if tr > 0.0 && wr > 0.0 {
-        let rc = f((tr - wr / 2.0).max(0.5));
-        p.move_to(Point::new(f(x + w - tr), f(y + tr) - rc));
-        quarter_arc(&mut p, f(x + w - tr), f(y + tr), rc, 270.0);
+        let rc = centerline_radius(tr, wr);
+        arc_move_to(&mut p, f(x + w - tr), f(y + tr), rc, bounds[1].1);
+        arc_segment(&mut p, f(x + w - tr), f(y + tr), rc, bounds[1].1, 360.0);
     } else {
         p.move_to(Point::new(f(x + w - wr / 2.0), f(y + wt)));
     }
@@ -1876,14 +2173,18 @@ fn draw_border(
             f(y + h - wb)
         },
     ));
+    if br > 0.0 && wr > 0.0 {
+        let rc = centerline_radius(br, wr);
+        arc_segment(&mut p, f(x + w - br), f(y + h - br), rc, 0.0, bounds[2].0);
+    }
     stroke_side(scene, &p, &sides[1], xform);
 
-    // bottom（BR 弧 / BR 方块左缘起）
+    // bottom（BR 拥有段 [θo,90°] / BR 方块左缘起）+ BL 邻接段 [90°,θn]
     let mut p = BezPath::new();
     if br > 0.0 && wb > 0.0 {
-        let rc = f((br - wb / 2.0).max(0.5));
-        p.move_to(Point::new(f(x + w - br) + rc, f(y + h - br)));
-        quarter_arc(&mut p, f(x + w - br), f(y + h - br), rc, 0.0);
+        let rc = centerline_radius(br, wb);
+        arc_move_to(&mut p, f(x + w - br), f(y + h - br), rc, bounds[2].1);
+        arc_segment(&mut p, f(x + w - br), f(y + h - br), rc, bounds[2].1, 90.0);
     } else {
         p.move_to(Point::new(f(x + w - wr), f(y + h - wb / 2.0)));
     }
@@ -1891,14 +2192,18 @@ fn draw_border(
         if bl > 0.0 { f(x + bl) } else { f(x + wl) },
         f(y + h - wb / 2.0),
     ));
+    if bl > 0.0 && wb > 0.0 {
+        let rc = centerline_radius(bl, wb);
+        arc_segment(&mut p, f(x + bl), f(y + h - bl), rc, 90.0, bounds[3].0);
+    }
     stroke_side(scene, &p, &sides[2], xform);
 
-    // left（BL 弧 / BL 方块上缘起）
+    // left（BL 拥有段 [θo,180°] / BL 方块上缘起）+ TL 邻接段 [180°,θn]
     let mut p = BezPath::new();
     if bl > 0.0 && wl > 0.0 {
-        let rc = f((bl - wl / 2.0).max(0.5));
-        p.move_to(Point::new(f(x + bl), f(y + h - bl) + rc));
-        quarter_arc(&mut p, f(x + bl), f(y + h - bl), rc, 90.0);
+        let rc = centerline_radius(bl, wl);
+        arc_move_to(&mut p, f(x + bl), f(y + h - bl), rc, bounds[3].1);
+        arc_segment(&mut p, f(x + bl), f(y + h - bl), rc, bounds[3].1, 180.0);
     } else {
         p.move_to(Point::new(f(x + wl / 2.0), f(y + h - wb)));
     }
@@ -1906,5 +2211,9 @@ fn draw_border(
         f(x + wl / 2.0),
         if tl > 0.0 { f(y + tl) } else { f(y + wt) },
     ));
+    if tl > 0.0 && wl > 0.0 {
+        let rc = centerline_radius(tl, wl);
+        arc_segment(&mut p, f(x + tl), f(y + tl), rc, 180.0, bounds[0].0);
+    }
     stroke_side(scene, &p, &sides[3], xform);
 }

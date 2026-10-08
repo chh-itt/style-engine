@@ -32,6 +32,11 @@
   Center/Right/End 对齐（max_advance 源空间偏移、溢出钳回起点，parley
   0.11 语义）；模糊 text-shadow 投影扩至装饰线与多 span 形状。soft 53 项
   测试全绿。
+- **vello sink 影模糊环近似（feat）**：vello 0.10 无内置高斯——box-shadow
+  以多重同心扩张环、text-shadow 以多重同心偏移环近似，环
+  α = 1−(1−a)^(1/N)（N 层复合恰为总 a），text 环数随 blur 自适应（≤0 单
+  环=锐利副本）；corner_diagonal_deg 补 .to_degrees() 修复（等宽对角线
+  45° 断言回归捕获）。纯函数单测无 GPU 覆盖。
 
 ### 阶段7 — A 批：语义补全
 
