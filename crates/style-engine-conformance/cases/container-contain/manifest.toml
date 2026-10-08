@@ -1,8 +1,9 @@
-# 容器强制 size containment（审计 B 偏差记账项）：先 xfail 钉预算；
-# 映射层禁用内容测量落地后转正。cq2/cqw 消费子区预期已绿，用于回归。
+# 容器强制 size containment（审计 B 偏差记账项）：映射层禁用内容测量已
+# 落地（taffy 主轴 flex_basis 固定 0 + min 0、纵轴高 0 仿真），转正。
+# cq2/cqw 消费子区预期已绿，用于回归。
 viewport = [800.0, 600.0]
 scale = 1.0
 fonts = []
 features = ["container-queries", "flex", "width", "height"]
-xfail = true
+xfail = false
 tolerance = 0.5

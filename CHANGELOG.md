@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 表格 wrapper/inner 拆分与对齐收束
+
+- **表格 wrapper/inner 拆分（fix）**：display:table 节点在 taffy 侧拆为
+  wrapper（表盒自身样式，size/max_size=auto，随包含块填充并随内容生长）与
+  inner（声明宽保留、Position::Relative、inset 清零）两节点；`<table>` 直下
+  非行块级子件提升至 wrapper、置于表盒上方（Chromium 153 实测语义，文档化
+  偏差①），裸 table-cell 以幻影行（单行 Grid，按 (table, slot) 缓存）纳入
+  行列分配，absolute 后代一律留内表（偏差②）。表盒 rect 消费 inner 布局。
+  `table-rowspan`、`table-anon` 金标全键零差异转正（后者 case.css 显式声明
+  display，与其他 table-* 用例同约定）。
+
 ### 阶段7 — A 批：语义补全
 
 - **行为提示属性（A1）**：新增 cursor（CSS UI 4 关键字子集 15 值；url()

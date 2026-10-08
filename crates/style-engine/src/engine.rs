@@ -448,6 +448,18 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     /// 三期④：上次结算的单元格列位签名（(cell, 列起点0基, 列跨, 行跨)；
     /// 全等免重写）。
     table_cells: HashMap<NodeId, Vec<(NodeId, usize, usize, u32)>>,
+    /// 表格 wrapper 重构：display:table 节点 → 内表 taffy 节点。CSS 2.2
+    /// 表格盒模型要求块级子件提升到表盒之外（匿名块包裹），taffy 无法在
+    /// 单节点内同时表达「表盒自身框」与「提升件堆叠」——故表元素的 taffy
+    /// 节点降级为 wrapper（Block、填满、零 margin/padding/border），新建
+    /// 内表节点承载真实表盒样式；行/组/标题等表格内部件挂内表，不当块级
+    /// 子件挂 wrapper。settle_table_fixup 填充；rebuild_taffy 清空；
+    /// collect 消费内表矩形。
+    taffy_table_inner: HashMap<NodeId, taffy::NodeId>,
+    /// 表格 wrapper 重构：裸单元格幻影行缓存——display:table-cell 直属表盒
+    /// 时 settle_tables 建单格行 Grid（幻影节点，同 multicol 幻影列模式）
+    /// 承接单元格；键（表节点, 行槽位）。rebuild_taffy 清空。
+    table_row_anon: HashMap<(NodeId, usize), taffy::NodeId>,
     /// ③multi-column：多列容器注册表（restyle 收集，settle_columns 结算）。
     multicols: Vec<NodeId>,
     /// ③multi-column：稳态缓存（幻影列节点 + 当前分配；全等免重排）。
@@ -562,6 +574,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             tables: Vec::new(),
             table_cols: HashMap::new(),
             table_cells: HashMap::new(),
+            taffy_table_inner: HashMap::new(),
+            table_row_anon: HashMap::new(),
             multicols: Vec::new(),
             multicol_state: HashMap::new(),
             column_rules: HashMap::new(),
@@ -2021,6 +2035,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             // → cb 集合逐帧变化）后、布局前，把 absolute 子件重挂到 CSS 包含块
             //（taffy 0.14 只按直父 padding box 锚定绝对子件）。
             self.settle_absolute_anchors();
+            // 表格 wrapper 重构：wrapper/inner 结构就绪须先于首次
+            // compute_layout（wrapper 填满 + 内表声明宽同帧生效）；表子树
+            // 结构由本函数与 settle_tables 独占（结构同步对表豁免，v1 契约）。
+            self.settle_table_fixup();
             // ADR-0010：超根全视口化 + overlay 根默认视口锚定（显式定位不动）
             self.apply_root_anchor_styles();
             // C3（ADR-0017 D4）：替换内容叶固有尺寸种子——须在首次
@@ -2705,6 +2723,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.tables.clear();
         self.table_cols.clear();
         self.table_cells.clear();
+        // wrapper 重构映射一并作废（内表 taffy 节点随整树销毁）。
+        self.taffy_table_inner.clear();
+        self.table_row_anon.clear();
         self.multicols.clear();
         self.multicol_state.clear();
         if self.root_key.is_some() {
@@ -3731,6 +3752,138 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// ②table：列模板结算——首遍布局给出表内容宽后，按首行单元格声明宽
     /// （定宽 px / 百分比 / auto）计算列模板回写各 table-row 的单行 Grid；
     /// 全等缓存则免重排（稳态帧零额外布局 pass）。嵌套表外层先行：变更
+    /// 表格 wrapper 重构（CSS 2.2 §17.4 匿名盒结构侧）：display:table 的
+    /// taffy 节点降级为 wrapper（Block、auto 尺寸、零 margin/padding/border、
+    /// overflow 复位），新建内表节点承载表盒自身全部样式（map_style 全量；
+    /// position 强制 Relative + inset 清零——inner 需充当其 absolute 后代的
+    /// taffy 包含块）；表盒不当块级子件（block/flex/grid/inline-table 等）
+    /// 提升到 wrapper（置于表盒上方，DOM 序——table-anon 金标实测：
+    /// div.c 先于表盒、宽 = 包含块宽），表格内部件（行/行组/单元格/标题）
+    /// 挂内表。collect 读内表矩形；settle_tables 以内表为结算基准。每帧
+    /// 重应用（restyle 会把原样式写回 wrapper tid）。幂等：内表节点按
+    /// taffy_table_inner 在场复用。表子树整体豁免于结构同步（settle_
+    /// absolute_anchors v1 契约），表结构由本函数与 settle_tables 独占。
+    /// 已知边界：absolute 子件随内表（inner 的 Relative 语境承接 taffy
+    /// 锚定，语义 ≈ Chromium 锚表盒 padding box）；提升件若 DOM 序晚于
+    /// 表格内部件，本实现仍置表盒上方（Chromium 同场景插序未建模）。
+    fn settle_table_fixup(&mut self) {
+        if self.tables.is_empty() {
+            return;
+        }
+        let tables = self.tables.clone();
+        for table in tables {
+            let Some(&wtid) = self.taffy_node.get(&table) else {
+                continue;
+            };
+            let pristine = match self.styles.get(&table) {
+                Some(cs) => crate::layout::map_style(cs, &self.map_env()),
+                None => continue,
+            };
+            // 内表 = 表盒自身样式；position 强制 Relative（abs 后代包含块），
+            // inset 清零（偏移语义归 wrapper）。
+            let mut inner_style = pristine.clone();
+            inner_style.position = taffy::prelude::Position::Relative;
+            inner_style.inset = taffy::prelude::Rect {
+                left: taffy::prelude::TaffyZero::ZERO,
+                right: taffy::prelude::TaffyZero::ZERO,
+                top: taffy::prelude::TaffyZero::ZERO,
+                bottom: taffy::prelude::TaffyZero::ZERO,
+            };
+            let itid = match self.taffy_table_inner.get(&table).copied() {
+                Some(itid) => itid,
+                None => {
+                    let itid = self
+                        .taffy
+                        .new_leaf(inner_style.clone())
+                        .expect("table inner leaf");
+                    self.taffy_table_inner.insert(table, itid);
+                    itid
+                }
+            };
+            let _ = self.taffy.set_style(itid, inner_style);
+            self.taffy_parent.insert(itid, wtid);
+            // 子件分类（样式树序）：表格内部件/none/absolute → 内表；
+            // 其余（不当块级）→ wrapper 提升。
+            let mut hoisted: Vec<taffy::NodeId> = Vec::new();
+            let mut proper: Vec<taffy::NodeId> = Vec::new();
+            for &c in self.tree.children(table) {
+                let Some(&ctid) = self.taffy_node.get(&c) else {
+                    continue;
+                };
+                let disp = self.display_of(c);
+                let internal = matches!(
+                    disp,
+                    Some(
+                        crate::css::property::Display::TableRow
+                            | crate::css::property::Display::TableRowGroup
+                            | crate::css::property::Display::TableCell
+                            | crate::css::property::Display::TableCaption
+                            | crate::css::property::Display::None
+                    )
+                ) || disp.is_none();
+                let is_abs = self.styles.get(&c).is_some_and(|ccs| {
+                    ccs.position() == crate::css::property::Position::Absolute
+                });
+                if internal || is_abs {
+                    proper.push(ctid);
+                    self.taffy_parent.insert(ctid, itid);
+                } else {
+                    hoisted.push(ctid);
+                    self.taffy_parent.insert(ctid, wtid);
+                }
+            }
+            // wrapper：填满包含块的 Block；表元素声明的尺寸/边距/内边距/
+            // 边框/overflow 全部移交内表，wrapper 只承担提升件堆叠与
+            // 定位语境（position/inset 保留自 pristine）。
+            let mut ws = pristine;
+            ws.display = taffy::prelude::Display::Block;
+            // 注意 Dimension 的零 = 定值 0px，wrapper 尺寸须 auto（内容推导）。
+            ws.size = taffy::prelude::Size {
+                width: taffy::prelude::Dimension::auto(),
+                height: taffy::prelude::Dimension::auto(),
+            };
+            ws.min_size = taffy::prelude::Size {
+                width: taffy::prelude::TaffyZero::ZERO,
+                height: taffy::prelude::TaffyZero::ZERO,
+            };
+            // max_size 的零同样是 0px 定值钳（默认应为 auto）——不能写 ZERO。
+            ws.max_size = taffy::prelude::Size {
+                width: taffy::prelude::LengthPercentageAuto::auto(),
+                height: taffy::prelude::LengthPercentageAuto::auto(),
+            };
+            ws.margin = taffy::prelude::Rect {
+                left: taffy::prelude::TaffyZero::ZERO,
+                right: taffy::prelude::TaffyZero::ZERO,
+                top: taffy::prelude::TaffyZero::ZERO,
+                bottom: taffy::prelude::TaffyZero::ZERO,
+            };
+            ws.padding = taffy::prelude::Rect {
+                left: taffy::prelude::TaffyZero::ZERO,
+                right: taffy::prelude::TaffyZero::ZERO,
+                top: taffy::prelude::TaffyZero::ZERO,
+                bottom: taffy::prelude::TaffyZero::ZERO,
+            };
+            ws.border = taffy::prelude::Rect {
+                left: taffy::prelude::TaffyZero::ZERO,
+                right: taffy::prelude::TaffyZero::ZERO,
+                top: taffy::prelude::TaffyZero::ZERO,
+                bottom: taffy::prelude::TaffyZero::ZERO,
+            };
+            ws.overflow = Default::default();
+            ws.aspect_ratio = None;
+            let _ = self.taffy.set_style(wtid, ws);
+            // 子表结构：wrapper = [提升件…, 内表]；内表 = 表格内部件。
+            let mut wrapper_children = hoisted;
+            wrapper_children.push(itid);
+            if self.taffy.children(wtid).unwrap_or_default() != wrapper_children {
+                let _ = self.taffy.set_children(wtid, &wrapper_children);
+            }
+            if self.taffy.children(itid).unwrap_or_default() != proper {
+                let _ = self.taffy.set_children(itid, &proper);
+            }
+        }
+    }
+
     /// 触发一次重排后二次迭代（上限 2 遍，内层表宽度取结算后值）。
     /// 三期④：行发现穿透行组；单元格图（CSS 2.1 §17.2.11.1 简化版）按
     /// colspan 属性分配显式列位；span-n 声明宽度均分给跨内未声明列。
@@ -3745,33 +3898,122 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let Some(&ttid) = self.taffy_node.get(&table) else {
                     continue;
                 };
-                let Ok(tl) = self.taffy.layout(ttid) else {
+                // wrapper 重构：结算基准 = 内表（表盒自身框；wrapper 仅承载
+                // 提升件堆叠，宽 = 包含块全宽）。
+                let itid = self
+                    .taffy_table_inner
+                    .get(&table)
+                    .copied()
+                    .unwrap_or(ttid);
+                let Ok(il) = self.taffy.layout(itid) else {
                     continue;
                 };
                 // 表内容宽 = 边框盒 − border − padding（百分比列基准）。
-                let tw = (tl.size.width
-                    - tl.border.left
-                    - tl.border.right
-                    - tl.padding.left
-                    - tl.padding.right)
+                let tw = (il.size.width
+                    - il.border.left
+                    - il.border.right
+                    - il.padding.left
+                    - il.padding.right)
                     .max(0.0);
                 // 三期④：行发现穿透行组（row-group/header/footer 组为透明
-                // 包装）；caption 与杂件跳过（匿名盒修补另批）。
-                let mut rows: Vec<NodeId> = Vec::new();
+                // 包装）；caption 与杂件不入行图。wrapper 重构匿名盒修补：
+                // 裸单元格（display:table-cell 直属表盒，CSS 2.1 §17.2.1）
+                // 建幻影单格行 Grid 承接——同 multicol 幻影列模式（无样式
+                // 节点、Frame 不报告，槽位键复用）。内表 taffy 子表同步重排
+                //（幻影行插在裸单元格原位；表子树结构同步豁免，该结构由
+                // settle_table_fixup 与本函数独占）。
+                struct TableRowSpec {
+                    /// 真实行样式节点（幻影行为 None——无样式节点）。
+                    node: Option<NodeId>,
+                    /// 行 taffy 节点（真实行 tid 或幻影行 tid）。
+                    tid: taffy::NodeId,
+                    /// 参与单元格图的本行单元格（真实行 = 全部样式子件，
+                    /// none/abs 由下方入图过滤剔除；幻影行 = 单个裸单元格）。
+                    cells: Vec<NodeId>,
+                }
+                let mut rows: Vec<TableRowSpec> = Vec::new();
+                let mut inner_children: Vec<taffy::NodeId> = Vec::new();
                 for &c in self.tree.children(table) {
+                    let Some(&ctid) = self.taffy_node.get(&c) else {
+                        continue;
+                    };
+                    let is_abs = self.styles.get(&c).is_some_and(|cs| {
+                        cs.position() == crate::css::property::Position::Absolute
+                    });
+                    // abs 后代一律内表（与 settle_table_fixup 的 is_abs 分支
+                    // 对齐——abs 包含块语境 ≈ 表格 padding box，文档化偏差②）。
+                    if is_abs {
+                        inner_children.push(ctid);
+                        continue;
+                    }
                     match self.display_of(c) {
-                        Some(crate::css::property::Display::TableRow) => rows.push(c),
+                        Some(crate::css::property::Display::TableRow) => {
+                            rows.push(TableRowSpec {
+                                node: Some(c),
+                                tid: ctid,
+                                cells: self.tree.children(c).to_vec(),
+                            });
+                            inner_children.push(ctid);
+                        }
                         Some(crate::css::property::Display::TableRowGroup) => {
+                            inner_children.push(ctid);
                             for &r in self.tree.children(c) {
                                 if self.display_of(r)
                                     == Some(crate::css::property::Display::TableRow)
+                                    && let Some(&rtid) = self.taffy_node.get(&r)
                                 {
-                                    rows.push(r);
+                                    rows.push(TableRowSpec {
+                                        node: Some(r),
+                                        tid: rtid,
+                                        cells: self.tree.children(r).to_vec(),
+                                    });
                                 }
                             }
                         }
-                        _ => {}
+                        Some(crate::css::property::Display::TableCell) => {
+                            let slot = rows.len();
+                            let ptid = match self.table_row_anon.get(&(table, slot)).copied() {
+                                Some(p) => p,
+                                None => {
+                                    let p = self
+                                        .taffy
+                                        .new_leaf(taffy::prelude::Style::default())
+                                        .expect("table anon row leaf");
+                                    self.table_row_anon.insert((table, slot), p);
+                                    p
+                                }
+                            };
+                            // 幻影行 = 单行 Grid（列模板由下方结算覆写）；
+                            // 单元格经 set_children 移动挂入（taffy move 语义，
+                            // 稳态重设同列表无副作用）。
+                            let ps = taffy::prelude::Style {
+                                display: taffy::prelude::Display::Grid,
+                                ..taffy::prelude::Style::default()
+                            };
+                            let _ = self.taffy.set_style(ptid, ps);
+                            let _ = self.taffy.set_children(ptid, &[ctid]);
+                            self.taffy_parent.insert(ptid, itid);
+                            self.taffy_parent.insert(ctid, ptid);
+                            rows.push(TableRowSpec {
+                                node: None,
+                                tid: ptid,
+                                cells: vec![c],
+                            });
+                            inner_children.push(ptid);
+                        }
+                        // 表格内部件兜底（caption / display:none / 无样式
+                        // 节点——与 fixup internal 分支对齐）；其余块级子件
+                        // 已被 fixup 提升至 wrapper，不得拉回内表。
+                        Some(crate::css::property::Display::TableCaption)
+                        | Some(crate::css::property::Display::None) => {
+                            inner_children.push(ctid)
+                        }
+                        None => inner_children.push(ctid),
+                        _ => {},
                     }
+                }
+                if self.taffy.children(itid).unwrap_or_default() != inner_children {
+                    let _ = self.taffy.set_children(itid, &inner_children);
                 }
                 // 三期④：单元格图（CSS 2.1 §17.2.11.1 简化版）——逐行游标
                 // 分配列位，colspan/rowspan 取属性（StyleNode.attrs，缺省 1），
@@ -3784,9 +4026,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 let mut occupied: std::collections::BTreeSet<(usize, usize)> = Default::default();
                 let mut n_cols = 0usize;
                 let mut first_row_len = 0usize;
-                for (ri, r) in rows.iter().enumerate() {
+                for (ri, spec) in rows.iter().enumerate() {
                     let mut cursor = 0usize;
-                    for &c in self.tree.children(*r) {
+                    for &c in &spec.cells {
                         // ④d 匿名盒（CSS 2.1 §17.2.1 第 3 条简化）：行内非
                         // 单元格元素（框架常见直写 <div>）→ 匿名单元格——
                         // 直接按单元格入图（列位/宽度拉伸与 td 一致，匿名
@@ -3942,29 +4184,29 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             )
                         })
                         .collect();
-                    for r in &rows {
-                        let Some(&rtid) = self.taffy_node.get(r) else {
-                            continue;
-                        };
-                        let Ok(mut rs) = self.taffy.style(rtid).cloned() else {
+                    for spec in &rows {
+                        let Ok(mut rs) = self.taffy.style(spec.tid).cloned() else {
                             continue;
                         };
                         rs.grid_template_columns = template.clone();
                         // ④c：行高 definite 时同时钉死行轨道——否则跨行单元
                         // 的高度覆写作为 auto 轨道的 min-content 贡献会把整
                         // 条轨道（及同轨其他单元格）撑高；Chromium 语义是跨
-                        // 行内容不改显式行高、只向下溢出。
-                        if let Some(row_h) = self
-                            .styles
-                            .get(r)
-                            .and_then(|cs| map_style(cs, &self.map_env()).size.height.into_option())
+                        // 行内容不改显式行高、只向下溢出。幻影行无样式节点
+                        //（node=None）→ 高度恒 auto。
+                        if let Some(row_h) = spec
+                            .node
+                            .and_then(|rn| self.styles.get(&rn))
+                            .and_then(|cs| {
+                                map_style(cs, &self.map_env()).size.height.into_option()
+                            })
                         {
                             rs.grid_template_rows =
                                 vec![taffy::style::GridTemplateComponent::Single(
                                     taffy::style_helpers::length(row_h),
                                 )];
                         }
-                        let _ = self.taffy.set_style(rtid, rs);
+                        let _ = self.taffy.set_style(spec.tid, rs);
                     }
                     self.table_cols.insert(table, cols);
                 }
@@ -3993,20 +4235,25 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             end: taffy::style::GridPlacement::Span(1),
                         };
                         if *rspan > 1 {
-                            // 宿主行 = 单元格直接父行（placements 即按行枚举产生）。
+                            // 宿主行 = 收纳该单元格的行规格（真实行含其样式
+                            // 子件；裸单元格行即幻影行自身）。
                             let ri = rows
                                 .iter()
-                                .position(|r| self.tree.parent(*cell) == Some(*r))
+                                .position(|spec| spec.cells.contains(cell))
                                 .unwrap_or(0);
                             let end = (ri + *rspan as usize).min(rows.len());
                             let heights: Vec<Option<f32>> = rows[ri..end]
                                 .iter()
-                                .map(|r| {
-                                    self.styles.get(r).map(|cs| {
-                                        map_style(cs, &self.map_env()).size.height.into_option()
-                                    })
+                                .map(|spec| {
+                                    spec.node
+                                        .and_then(|rn| self.styles.get(&rn))
+                                        .and_then(|cs| {
+                                            map_style(cs, &self.map_env())
+                                                .size
+                                                .height
+                                                .into_option()
+                                        })
                                 })
-                                .map(|o| o.flatten())
                                 .collect();
                             if heights.iter().all(|h| h.is_some()) {
                                 let total: f32 = heights.iter().map(|h| h.unwrap_or(0.0)).sum();
@@ -6257,11 +6504,62 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // ②table：单元格宽度交列模板（映射后覆写）——首行声明宽已折入模板，
         // 单元格一律拉伸至列宽（CSS 单元格 % 基准为表宽而非列宽；v1 契约：
         // 模板唯一权威，单元格自身 width 声明不直接生效）。
-        if parent_style
+        // wrapper 重构：裸单元格（display:table-cell 直属表盒）同样交列
+        // 模板——单元格由幻影单格行承接，行内单元格判定在样式父链上补
+        // 「父 = 表盒 且 自身 = 单元格」分支。
+        if parent_style.as_ref().is_some_and(|p| {
+            p.display() == crate::css::property::Display::TableRow
+        }) || (parent_style
             .as_ref()
-            .is_some_and(|p| p.display() == crate::css::property::Display::TableRow)
+            .is_some_and(|p| p.display() == crate::css::property::Display::Table)
+            && cs.display() == crate::css::property::Display::TableCell)
         {
             ts.size.width = taffy::prelude::Dimension::auto();
+        }
+        // 容器强制包含（container-type 的规范前提，css-contain-3 size/inline-size
+        // containment；container-query 案例暴露的 B 级缺口收敛）：taffy 无 contain
+        // 模型，按轴语境最小仿真「内容贡献视空」：
+        // - flex 主轴 auto → flex_basis 固定 0 + automatic minimum size 抑制
+        //   （min 0）——basis auto 的内容测量被断开；作者显式尺寸/basis 声明
+        //   不受影响（containment 只压内容推导，不压显式声明）。
+        // - 纵轴 auto（块流高/绝对定位高）→ 固定高 0（块高本就内容推导，
+        //   等价空内容；padding/border 照常外扩，box-sizing 语义不变）。
+        // 显式 width 的 inline-size 容器（taffy 按声明取值）与块流宽（fill
+        // 本就内容无关）天然合规，无需干预；grid 轨道与 flex 交叉轴
+        // align 非 stretch 的内容贡献断链留待后续（B 级，FEATURES 记偏差）。
+        if is_container {
+            let ctype = cs.container_type();
+            let inline_contained = ctype != crate::css::property::ContainerType::Normal;
+            let size_contained = ctype == crate::css::property::ContainerType::Size;
+            let parent_flex_dir = parent_style
+                .as_ref()
+                .filter(|p| p.display() == crate::css::property::Display::Flex)
+                .map(|p| p.flex_direction());
+            let main_axis_is_row = !matches!(
+                parent_flex_dir,
+                Some(crate::css::property::FlexDirection::Column)
+                    | Some(crate::css::property::FlexDirection::ColumnReverse)
+            );
+            if inline_contained
+                && !has_declared_len(&cs, crate::css::property::PropertyId::Width)
+                && ts.flex_basis.is_auto()
+                && main_axis_is_row
+                && parent_flex_dir.is_some()
+            {
+                ts.flex_basis = taffy::prelude::Dimension::length(0.0);
+                ts.min_size.width = taffy::prelude::LengthPercentageAuto::length(0.0);
+            }
+            if size_contained && !has_declared_len(&cs, crate::css::property::PropertyId::Height) {
+                if parent_flex_dir.is_some() && !main_axis_is_row {
+                    // flex 列主轴：高 = 内容推导（basis auto）→ 断开
+                    if ts.flex_basis.is_auto() {
+                        ts.flex_basis = taffy::prelude::Dimension::length(0.0);
+                        ts.min_size.height = taffy::prelude::LengthPercentageAuto::length(0.0);
+                    }
+                } else {
+                    ts.size.height = taffy::prelude::Dimension::length(0.0);
+                }
+            }
         }
         if let Some(&tid) = self.taffy_node.get(&id) {
             let _ = self.taffy.set_style(tid, ts);
@@ -6317,7 +6615,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 x = l.location.x + ox;
                 y = l.location.y + oy;
             }
-            let box_rect = (x, y, l.size.width, l.size.height);
+            // 表格 wrapper 重构：表元素矩形 = wrapper 原点 + 内表 location
+            //（wrapper 无 border/padding；子件递归基准仍是 wrapper 原点，
+            // inner/幻影行偏移由下方 effp 补偿自动叠加——内表子件的
+            // taffy_parent 指向 inner，链式累加到 wrapper 原点）。
+            let box_rect = match self
+                .taffy_table_inner
+                .get(&id)
+                .and_then(|&itid| self.taffy.layout(itid).ok())
+            {
+                Some(il) => (
+                    x + il.location.x,
+                    y + il.location.y,
+                    il.size.width,
+                    il.size.height,
+                ),
+                None => (x, y, l.size.width, l.size.height),
+            };
             layout_by_node.insert(id, box_rect);
             if let Some(&key) = self.node_to_key.get(&id) {
                 out.push(LayoutEntry {

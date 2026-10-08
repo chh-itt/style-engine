@@ -1,9 +1,14 @@
 body { margin: 0; }
-/* CSS 2.1 §17.2.1 匿名表格对象：table 直下非行子件（div 块级、裸 td）
- * 均被匿名行包裹（td 再包匿名单元格；div 包匿名单元格后其盒子承担
- * 单元格内容盒几何）。三路同列参与列宽分配（400 等分）。
- * 引擎现状：settle_tables 行发现对 table 直下非行子件静默丢弃（_ => {}）。 */
-.t { width: 400px; }
+/* CSS 2.1 §17.2.1 匿名表格对象。Chromium 153 实测语义：table 直下的
+ * 非行块级子件（div.c）被提升到表盒上方、宽取包含块（800）；裸 td
+ * 以匿名行包裹入表（行宽=表宽 400）；tr 行正常入表。列分配按行独立
+ * （每行单列 → 列宽 400，非三路等分——旧注释已废弃）。
+ * 引擎对齐：wrapper/inner 拆分后 fixup 提升 + settle_tables 匿名行，
+ * 与金标逐键一致。
+ * display 显式声明保持两侧对称（引擎不装载 UA 表，与其他 table-* 用例
+ * 同一约定）；div.c 保持块级（不声明 = 初始 Block）。 */
+.t { display: table; width: 400px; }
 .c { height: 30px; }
-.d { height: 20px; }
-.e { height: 25px; }
+.d { display: table-cell; height: 20px; }
+tr { display: table-row; }
+.e { display: table-cell; height: 25px; }

@@ -1,9 +1,9 @@
-# 表格匿名行/匿名单元格合成（审计项 §17.2.1）：先 xfail 钉预算；
-# settle_tables 匿名行落地后转正。若引擎侧节点直接缺框（run_case panic）
-# 则说明丢弃发生在更上游——以此用例显式暴露。
+# 表格匿名行/匿名单元格合成（审计项 §17.2.1）：引擎 wrapper/inner 拆分后
+# 与 Chromium 153 金标逐键一致（非行块级子件提升表盒上方、裸 td 匿名行），
+# 已转正（0 差异）；case.css 显式声明 display 与其他 table-* 用例同一约定。
 viewport = [800.0, 600.0]
 scale = 1.0
 fonts = []
 features = ["tables", "width", "height"]
-xfail = true
+xfail = false
 tolerance = 0.5
