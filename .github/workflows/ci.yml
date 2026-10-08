@@ -48,6 +48,11 @@ jobs:
       - name: clippy（短格式，全特性，警告即错）
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-features --message-format short -- -D warnings
+      # sink 忽略卫生门禁（块 A，docs/SINK-MATRIX.md）：soft/vello 源码
+      # 禁止静默忽略（let _ = / 假绑定 / .ok() 丢弃）——parity 无断层。
+      - name: sink ignore hygiene
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 crates/style-engine-conformance/tools/check_sink_ignores.py
       # 含 Numeric/Pixel Channel（golden 已入库，仅对比+软渲染，无需浏览器）；
       # golden 重生成属本地 Playwright 步骤（tools/dump_rects.py），不入 CI。
       # --locked：CI 一律按入库 Cargo.lock 解析（三期 Stage 4 锁定版本策略）。
