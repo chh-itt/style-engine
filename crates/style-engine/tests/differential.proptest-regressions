@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc d44334d90c114c1fd664d3998c95764074a706466ec662db419560a9107f6b2e # shrinks to ops = [Insert { parent: None, key: 1, class: 0, text: 0, decl: 0 }]
 cc 94771785db792b06f456eaaf2af4f03c5297c8c2c68456f2310c4412ba3b9dad # shrinks to ops = [Insert { parent: None, key: 1, class: 0, text: 0, decl: 0 }]
+cc 053abb481ea07a2eaa293276cc3d339981292f4b9dab75babaa1986ff4792d40 # shrinks to ops = [Insert { parent: None, key: 8, class: 8, text: 0, decl: 0 }, Insert { parent: Some(8), key: 7, class: 0, text: 1, decl: 0 }, Insert { parent: Some(8), key: 9, class: 0, text: 1, decl: 2 }, SetDecls { key: 7, decl: 10 }]

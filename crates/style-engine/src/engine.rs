@@ -1534,10 +1534,32 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             return Err(crate::error::ContractError::UnknownNode);
         };
         let (block, report) = parse_inline_declarations(style_text);
+        // 流参与翻转失效（差分锁定）：内联块是整体替换——新旧任一侧
+        // 声明了 position/display/float，本节点在父流程中的参与方式
+        // （出流锚定、行打包成员、流位槽、margin 塌穿）都可能翻转，
+        // 兄弟的布局结果随之改变但兄弟样式未变。把父节点一并记入脏根
+        // （restyle 父子树 → 兄弟 set_style → taffy 布局缓存失效），
+        // 仅结构性声明才付父子树代价，常规声明保持节点子树局部性。
+        let flow_structural = |b: &crate::css::decl::DeclarationBlock| {
+            b.decls.iter().any(|d| {
+                matches!(
+                    d.id,
+                    crate::css::property::PropertyId::Position
+                        | crate::css::property::PropertyId::Display
+                        | crate::css::property::PropertyId::Float
+                )
+            })
+        };
+        let parent_dirty =
+            flow_structural(&block) || flow_structural(&self.tree.node(id).declarations);
         self.tree.node_mut(id).declarations = block;
-        // 增量重样式（阶段5）：内联声明只影响自身与后代的样式求值
-        //（选择器命中只依赖自身/祖先的树数据与继承链，兄弟声明互不影响），
-        // 记脏根子树局部重算；frame 依容器规则在场与否择路。
+        // 增量重样式（阶段5）：内联声明默认只影响自身与后代的样式求值
+        //（选择器命中只依赖自身/祖先的树数据与继承链），记脏根子树局部
+        // 重算；frame 依容器规则在场与否择路。唯一例外即上方流参与翻转
+        // ——结构性声明额外脏化父节点。
+        if parent_dirty && let Some(pid) = self.tree.parent(id) {
+            self.style_dirty_roots.push(pid);
+        }
         self.style_dirty_roots.push(id);
         Ok(report)
     }
