@@ -171,7 +171,7 @@ fn main() {
         .expect("render to texture");
 
     // 纹理回读（bytes_per_row 对齐 256）
-    let bytes_per_row = ((W * 4 + 255) / 256) * 256;
+    let bytes_per_row = (W * 4).div_ceil(256) * 256;
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: u64::from(bytes_per_row * H),

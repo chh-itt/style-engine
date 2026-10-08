@@ -3843,9 +3843,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                             | crate::css::property::Display::None
                     )
                 ) || disp.is_none();
-                let is_abs = self.styles.get(&c).is_some_and(|ccs| {
-                    ccs.position() == crate::css::property::Position::Absolute
-                });
+                let is_abs = self
+                    .styles
+                    .get(&c)
+                    .is_some_and(|ccs| ccs.position() == crate::css::property::Position::Absolute);
                 if internal || is_abs {
                     proper.push(ctid);
                     self.taffy_parent.insert(ctid, itid);
@@ -3922,11 +3923,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 };
                 // wrapper 重构：结算基准 = 内表（表盒自身框；wrapper 仅承载
                 // 提升件堆叠，宽 = 包含块全宽）。
-                let itid = self
-                    .taffy_table_inner
-                    .get(&table)
-                    .copied()
-                    .unwrap_or(ttid);
+                let itid = self.taffy_table_inner.get(&table).copied().unwrap_or(ttid);
                 let Ok(il) = self.taffy.layout(itid) else {
                     continue;
                 };
@@ -4027,11 +4024,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         // 节点——与 fixup internal 分支对齐）；其余块级子件
                         // 已被 fixup 提升至 wrapper，不得拉回内表。
                         Some(crate::css::property::Display::TableCaption)
-                        | Some(crate::css::property::Display::None) => {
-                            inner_children.push(ctid)
-                        }
+                        | Some(crate::css::property::Display::None) => inner_children.push(ctid),
                         None => inner_children.push(ctid),
-                        _ => {},
+                        _ => {}
                     }
                 }
                 if self.taffy.children(itid).unwrap_or_default() != inner_children {
@@ -4219,9 +4214,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         if let Some(row_h) = spec
                             .node
                             .and_then(|rn| self.styles.get(&rn))
-                            .and_then(|cs| {
-                                map_style(cs, &self.map_env()).size.height.into_option()
-                            })
+                            .and_then(|cs| map_style(cs, &self.map_env()).size.height.into_option())
                         {
                             rs.grid_template_rows =
                                 vec![taffy::style::GridTemplateComponent::Single(
@@ -4270,10 +4263,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                                     spec.node
                                         .and_then(|rn| self.styles.get(&rn))
                                         .and_then(|cs| {
-                                            map_style(cs, &self.map_env())
-                                                .size
-                                                .height
-                                                .into_option()
+                                            map_style(cs, &self.map_env()).size.height.into_option()
                                         })
                                 })
                                 .collect();
@@ -6529,12 +6519,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // wrapper 重构：裸单元格（display:table-cell 直属表盒）同样交列
         // 模板——单元格由幻影单格行承接，行内单元格判定在样式父链上补
         // 「父 = 表盒 且 自身 = 单元格」分支。
-        if parent_style.as_ref().is_some_and(|p| {
-            p.display() == crate::css::property::Display::TableRow
-        }) || (parent_style
+        if parent_style
             .as_ref()
-            .is_some_and(|p| p.display() == crate::css::property::Display::Table)
-            && cs.display() == crate::css::property::Display::TableCell)
+            .is_some_and(|p| p.display() == crate::css::property::Display::TableRow)
+            || (parent_style
+                .as_ref()
+                .is_some_and(|p| p.display() == crate::css::property::Display::Table)
+                && cs.display() == crate::css::property::Display::TableCell)
         {
             ts.size.width = taffy::prelude::Dimension::auto();
         }
@@ -8011,7 +8002,7 @@ mod tests {
             }
             let _ = engine.frame((800.0, 600.0), 1.0, 0.0);
             let mc_id = engine.key_to_node[&Key(1)];
-            engine.column_rules.get(&mc_id).is_none()
+            !engine.column_rules.contains_key(&mc_id)
         };
         assert!(run(
             "mc { column-count: 2; width: 400px; column-rule: none } \

@@ -25,8 +25,10 @@ use style_engine_soft::FontBank;
 fn render(css: &str) -> style_engine_soft::SoftCanvas {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(css);
-    let mut root_node = StyleNode::default();
-    root_node.id = Some("root".to_string());
+    let root_node = StyleNode {
+        id: Some("root".to_string()),
+        ..Default::default()
+    };
     engine.insert(None, 1, root_node).unwrap();
     let frame = engine.frame((120.0, 120.0), 1.0, 0.0);
     style_engine_soft::render_with_fonts(

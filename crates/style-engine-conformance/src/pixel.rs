@@ -287,7 +287,7 @@ mod tests {
         (w, h, img)
     }
 
-    fn fill(img: &mut Vec<u8>, w: u32, x: u32, y: u32, rw: u32, rh: u32, rgba: [u8; 4]) {
+    fn fill(img: &mut [u8], w: u32, x: u32, y: u32, rw: u32, rh: u32, rgba: [u8; 4]) {
         for yy in y..y + rh {
             for xx in x..x + rw {
                 let i = ((yy * w + xx) * 4) as usize;

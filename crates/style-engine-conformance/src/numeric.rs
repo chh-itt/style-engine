@@ -328,9 +328,7 @@ pub fn parse_fixture_divs(html: &str) -> Result<Vec<FixtureNode>, String> {
                         // body 实体化：真实 DOM 有 body（金色基准经其堆叠）；
                         // 引擎侧同步实体化，data-key 缺省 0（用例自 1 起）。
                         None if tag_name == "body" => 0,
-                        None => {
-                            return Err(format!("{tag_name} 缺 data-key（fixture 约定必需）"))
-                        }
+                        None => return Err(format!("{tag_name} 缺 data-key（fixture 约定必需）")),
                     };
                     nodes.push(FixtureNode {
                         key,
