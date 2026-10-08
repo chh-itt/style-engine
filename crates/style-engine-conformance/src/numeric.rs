@@ -272,14 +272,21 @@ pub struct FixtureNode {
     pub attrs: Vec<(String, String)>,
 }
 
-/// 迷你 fixture 解析：支持 `<div>` 与表格标记（table/caption/thead/
-/// tbody/tfoot/tr/td/th）的 `class`/`data-key` 属性嵌套 + 文本节点
+/// 迷你 fixture 解析：支持 `<body>` 与 `<div>` 及表格标记（table/caption/
+/// thead/tbody/tfoot/tr/td/th）的 `class`/`data-key` 属性嵌套 + 文本节点
 /// （white-space:normal 折叠语义）；其余标签/内容忽略，其余属性（如
 /// colspan）原样挂在 FixtureNode.attrs。这是约定输入格式而非通用 HTML
 /// 解析——用例必须遵守（见 docs）。
+///
+/// `<body>` 特殊：Chromium 侧真实 DOM 中 body 的块级子件纵向堆叠；引擎
+/// 侧若把 body 子件解析为并列根，后续根按 ADR-0010 overlay 语义锚定
+/// (0,0)（不堆叠）→ 两侧结构分歧。故 body 实体化为 key=0 的节点（用例
+/// data-key 从 1 起，0 保留；body 无 data-key 也接受），使引擎得到与
+/// 真实 DOM 相同的单文档根结构。body 自身不入 golden（无 data-key 或
+/// key=0 未被 dump），其 `body { margin: 0 }` 声明两侧同源生效。
 pub fn parse_fixture_divs(html: &str) -> Result<Vec<FixtureNode>, String> {
-    const FIXTURE_TAGS: [&str; 9] = [
-        "div", "table", "caption", "thead", "tbody", "tfoot", "tr", "td", "th",
+    const FIXTURE_TAGS: [&str; 10] = [
+        "body", "div", "table", "caption", "thead", "tbody", "tfoot", "tr", "td", "th",
     ];
     let clean = strip_comments(html);
     let bytes = clean.as_bytes();
@@ -316,8 +323,14 @@ pub fn parse_fixture_divs(html: &str) -> Result<Vec<FixtureNode>, String> {
                             _ => attrs.push((k.to_ascii_lowercase(), v.to_string())),
                         }
                     }
-                    let Some(key) = key else {
-                        return Err(format!("{tag_name} 缺 data-key（fixture 约定必需）"));
+                    let key = match key {
+                        Some(k) => k,
+                        // body 实体化：真实 DOM 有 body（金色基准经其堆叠）；
+                        // 引擎侧同步实体化，data-key 缺省 0（用例自 1 起）。
+                        None if tag_name == "body" => 0,
+                        None => {
+                            return Err(format!("{tag_name} 缺 data-key（fixture 约定必需）"))
+                        }
                     };
                     nodes.push(FixtureNode {
                         key,
