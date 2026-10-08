@@ -1,10 +1,9 @@
-# var() 回退与宽关键字：实测 inherit 经回退通道已绿；缺口 = 自定义属性
-# 值 initial/unset 的 guaranteed-invalid 语义（--w: initial 后 var(--w,fb)
-# 应回退 fb，引擎当前当普通值替换）。css/var 层与解析簇改动冲突，
-# 先 xfail 钉预算，解析簇落地后转正。
+# var() 回退与宽关键字：initial/unset guaranteed-invalid 语义已随
+# css-variables-1 §3 宽关键字整值修复落地（custom property 终值恰为宽
+# 关键字时作用于自身），用例转正（引擎与 Chromium 153 golden 0.5px 一致）。
 viewport = [800.0, 600.0]
 scale = 1.0
 fonts = []
 features = ["css-variables", "var-fallback", "wide-keywords", "width", "height", "margin-single-side"]
-xfail = true
+xfail = false
 tolerance = 0.5
