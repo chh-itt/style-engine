@@ -21,6 +21,13 @@ use cssparser::{BasicParseError, ParseError, Parser, ToCss, Token};
 #[path = "counter_style.rs"]
 pub mod counter_style;
 
+/// E 计数器样式格式化（css-counter-styles-3 §2 生成算法 + §6 内置子集）：
+/// engine.rs eval_pseudo_content 的 counter()/counters() 经此按样式名
+/// 渲染（`#[path]` 同上，模块路径实为
+/// `crate::css::stylesheet::counter_format`）。
+#[path = "counter_format.rs"]
+pub mod counter_format;
+
 use self::counter_style::CounterStyleRule;
 
 /// 单条样式规则。

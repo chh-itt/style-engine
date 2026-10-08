@@ -1065,22 +1065,23 @@ pub enum UnicodeBidiKind {
 pub enum ContentPiece {
     /// 字符串字面量。
     Str(String),
-    /// counter(<custom-ident>, <counter-style>?)——最内作用域值；
-    /// style 仅 decimal 生效（其余解析接受、渲染按 decimal，偏差【B】）。
+    /// counter(<custom-ident>, <counter-style>?)——最内作用域值；style
+    /// 经文档级 @counter-style 登记表 + 内置样式渲染（css-counter-styles-3
+    /// §2/§6，见 counter_format 切片），未知名 → decimal。
     Counter {
         /// 计数器名。
         name: String,
-        /// 计数样式文法名（v1 仅 decimal 渲染，偏差【B】）。
+        /// 计数样式文法名（缺省 decimal；渲染语义见 counter_format）。
         style: String,
     },
     /// counters(<custom-ident>, <string>, <counter-style>?)——全作用域
-    /// 自外向内 join；style 同上。
+    /// 自外向内逐帧按 style 格式化后 join。
     Counters {
         /// 计数器名。
         name: String,
         /// 层间分隔串。
         separator: String,
-        /// 计数样式文法名（v1 仅 decimal 渲染，偏差【B】）。
+        /// 计数样式文法名（缺省 decimal；渲染语义见 counter_format）。
         style: String,
     },
     /// attr(<attr-name>)——宿主元素属性；伪元素上取 originating element。
@@ -2812,8 +2813,9 @@ fn parse_content_string(p: &mut Parser<'_>) -> ValResult<String> {
     }
 }
 
-/// 可选尾参 <counter-style>（ident；decimal/upper-roman 等文法名接受，
-/// 渲染仅 decimal 生效——偏差【B】）。前置逗号必需：`counter(x, style)`。
+/// 可选尾参 <counter-style>（ident；文法名按源文本留存，渲染经
+/// counter_format 切片：登记表 → 内置 → 未知名 decimal）。前置逗号
+/// 必需：`counter(x, style)`。
 fn parse_content_opt_style(p: &mut Parser<'_>) -> ValResult<Option<String>> {
     p.skip_whitespace();
     // 无逗号 → 无第二参（剩余 token 由上层 parse_entirely 判尾垃圾）。

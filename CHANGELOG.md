@@ -8,6 +8,25 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 计数器样式格式化
+
+- **@counter-style 接入 content 渲染（feat）**：新增 `css::stylesheet::counter_format`
+  切片——css-counter-styles-3 §2 全算法：extends 逐字段合并（缺省字段检测）
+  → system 最低符号数门（不满足 → decimal）→ range 门（auto：cyclic/
+  numeric/fixed 全域、alphabetic/symbolic 1..∞、additive 0..∞；extends
+  随基样式）→ fallback 链（未知/成环 → decimal，none → 空串）→ 六种
+  system 核心算法（cyclic 取模、fixed 窗、symbolic 重复、alphabetic 双射、
+  numeric 按位、additive 贪心 + 零权组）→ pad 补齐（差值按负号簇数折减）
+  → 负号包裹 → 60 码点上限 → decimal。prefix/suffix 不入 counter()/
+  counters() 输出（§5）。内置子集：decimal、decimal-leading-zero
+  （extends decimal + pad 2）、lower/upper-roman（additive + range
+  1 3999——0/负值域外走 decimal）、lower/upper-alpha·latin、lower-greek、
+  disc/circle/square；登记表同名后规则胜、可覆盖内置，未知名 → decimal。
+  engine 增 `counter_styles` 登记序列（ua → user → 主表 → 附加表），随
+  `rebuild_document_registries`（原 `rebuild_font_faces` 更名扩展）同步；
+  `content: counter()/counters()` 逐帧经登记表格式化渲染。新增锁定测试
+  22 件（counter_format 17 + pseudo_elements 引擎级 5）。
+
 ### 1.0 对齐 — var() 宽关键字整值语义
 
 - **custom property 宽关键字整值（fix）**：css-variables-1 §3——custom

@@ -1,7 +1,8 @@
 //! E @counter-style（css-counter-styles-3 子集）：规则解析与登记。
 //!
-//! 本切片仅解析与登记（`Vec` 来源序 + 同名后写胜查询）；不参与引擎计数
-//! 器渲染（engine.rs 不动）。宽容语义与 @font-face 对齐：条件组/嵌套体内
+//! 本切片仅解析与登记（`Vec` 来源序 + 同名后写胜查询）；渲染由
+//! counter_format 切片承担（engine.rs eval_pseudo_content 消费）。宽容
+//! 语义与 @font-face 对齐：条件组/嵌套体内
 //! 照常登记；已知描述符值非法 = 该描述符忽略、规则存活；未知描述符 =
 //! ParseReport 告警（任务要求，与 @font-face 的静默跳过刻意不对称）。
 //!

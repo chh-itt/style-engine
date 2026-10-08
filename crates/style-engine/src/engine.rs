@@ -382,6 +382,10 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     /// → 附加表；同族后规则胜；sheet 变更点统一重建）。字体字节仍由宿主
     /// add_font 推送——登记表仅描述映射与筛选元数据。
     font_faces: Vec<crate::css::stylesheet::FontFaceRule>,
+    /// E：文档级 @counter-style 登记表（与 @font-face 同变更点重建；合并
+    /// 序 = ua → user → 主表 → 附加表，同名后规则胜——查询按此序取末条）。
+    /// css-counter-styles-3 §3：登记可整体覆盖内置样式。
+    counter_styles: Vec<crate::css::stylesheet::counter_style::CounterStyleRule>,
     /// C1（ADR-0015）：伪元素注册表 (origin NodeId, which) → 伪节点 NodeId
     ///（引擎 materialize_pseudos 持有；宿主镜像通道不含伪键）。
     pseudo_ids: std::collections::BTreeMap<(NodeId, u8), NodeId>,
@@ -421,7 +425,7 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     /// 全量失效标（dirty_style）优先；容器规则在场时增量退全量。
     style_dirty_roots: Vec<NodeId>,
     /// P6（ADR-0035 D1）：`:has()` 单 compound host 快筛索引（键 = `:has`
-    /// 前 compound 的类型/类/id；表变更点重建，同 rebuild_font_faces 时机）。
+    /// 前 compound 的类型/类/id；表变更点重建，同 rebuild_document_registries 时机）。
     /// 空 = 未建或无合格规则（判定回全量兜底）；含哨兵键（全空）= 恒升级。
     has_host_index: Vec<crate::selector::HasHostKey>,
     viewport: (f32, f32),
@@ -537,6 +541,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             focused_node: None,
             registered_props: std::collections::BTreeMap::new(),
             font_faces: Vec::new(),
+            counter_styles: Vec::new(),
             pseudo_ids: std::collections::BTreeMap::new(),
             primary_source: String::new(),
             extra_sheets: Vec::new(),
@@ -703,7 +708,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // B4：注册表随全量重建刷新（add/remove/import 路由皆经此）。
         self.rebuild_registered_props();
         // F3d：@font-face 登记表同点刷新。
-        self.rebuild_font_faces();
+        self.rebuild_document_registries();
         // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
         self.rebuild_has_host_index();
     }
@@ -760,12 +765,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// F3d（ADR-0026 D4）：重建文档级 @font-face 登记表（与 @property 同
-    /// 变更点）。合并序 = ua_sheet → user_sheet → 主表 → 附加表登记序
-    /// （P5 ADR-0033 起源序）；同族后规则胜（css-fonts-4：同族多条
-    /// @font-face 按文档序后者覆盖）。字体字节仍由宿主 add_font 推送——
-    /// 登记表仅描述映射与筛选元数据。
-    fn rebuild_font_faces(&mut self) {
+    /// F3d（ADR-0026 D4）+ E：文档级登记表统一重建（@font-face +
+    /// @counter-style，同变更点）。合并序 = ua_sheet → user_sheet → 主表
+    /// → 附加表登记序（P5 ADR-0033 起源序）；@font-face 同族后规则胜
+    /// （css-fonts-4）；@counter-style 同名后规则胜（css-counter-styles-3，
+    /// 且可整体覆盖内置样式）。字体字节仍由宿主 add_font 推送——登记表
+    /// 仅描述映射与筛选元数据。
+    fn rebuild_document_registries(&mut self) {
         self.font_faces.clear();
         if let Some(ua) = &self.ua_sheet {
             self.font_faces.extend(ua.font_faces.iter().cloned());
@@ -777,6 +783,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             .extend(self.sheet.font_faces.iter().cloned());
         for (_, _, s) in &self.extra_sheets {
             self.font_faces.extend(s.font_faces.iter().cloned());
+        }
+        self.counter_styles.clear();
+        if let Some(ua) = &self.ua_sheet {
+            self.counter_styles
+                .extend(ua.counter_styles.iter().cloned());
+        }
+        if let Some(u) = &self.user_sheet {
+            self.counter_styles.extend(u.counter_styles.iter().cloned());
+        }
+        self.counter_styles
+            .extend(self.sheet.counter_styles.iter().cloned());
+        for (_, _, s) in &self.extra_sheets {
+            self.counter_styles.extend(s.counter_styles.iter().cloned());
         }
     }
 
@@ -988,16 +1007,34 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         for piece in pieces {
             match piece {
                 crate::css::property::ContentPiece::Str(s) => out.push_str(s),
-                crate::css::property::ContentPiece::Counter { name, .. } => {
-                    out.push_str(&counter_lookup(name).to_string());
+                crate::css::property::ContentPiece::Counter { name, style } => {
+                    let v = counter_lookup(name);
+                    out.push_str(
+                        &crate::css::stylesheet::counter_format::format_counter_with(
+                            style,
+                            v,
+                            &self.counter_styles,
+                        ),
+                    );
                 }
                 crate::css::property::ContentPiece::Counters {
-                    name, separator, ..
+                    name,
+                    separator,
+                    style,
                 } => {
-                    // counters()：全作用域帧自外向内 join；无实例 → 空串。
+                    // counters()：全作用域帧自外向内逐帧按样式格式化后
+                    // join；无实例 → 空串。
                     let vals: Vec<String> = scopes
                         .iter()
-                        .filter_map(|f| f.get(name).map(|v| v.to_string()))
+                        .filter_map(|f| {
+                            f.get(name).map(|v| {
+                                crate::css::stylesheet::counter_format::format_counter_with(
+                                    style,
+                                    *v,
+                                    &self.counter_styles,
+                                )
+                            })
+                        })
                         .collect();
                     out.push_str(&vals.join(separator));
                 }
@@ -1090,7 +1127,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 
     /// P6（ADR-0035 D1）：重建 `:has()` host 快筛索引（表变更点调用，同
-    /// rebuild_font_faces 时机——attach/set_stylesheet/user·ua 表装载路径）。
+    /// rebuild_document_registries 时机——attach/set_stylesheet/user·ua 表装载路径）。
     /// 逐表逐规则深扫 `:has`（含 `:is()`/`:where()`/`:not()` 参数内嵌套）：
     /// 无 → 不进索引；有 → 逐选择器提键（合格）或记不合格；任一选择器
     /// 不合格（前缀组合器/`:has` 不在顶层最右 compound）→ 追加无约束
@@ -5872,7 +5909,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // B4：user 表可携带 @property（合并序最前 = author 覆 user）。
         self.rebuild_registered_props();
         // F3d：user 表可携带 @font-face（合并序最前）。
-        self.rebuild_font_faces();
+        self.rebuild_document_registries();
         // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
         self.rebuild_has_host_index();
         self.dirty_style = true;
@@ -5883,7 +5920,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     pub fn clear_user_stylesheet(&mut self) {
         self.user_sheet = None;
         self.rebuild_registered_props();
-        self.rebuild_font_faces();
+        self.rebuild_document_registries();
         // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
         self.rebuild_has_host_index();
         self.dirty_style = true;
@@ -5898,7 +5935,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     pub fn set_ua_stylesheet(&mut self, css: &str) {
         self.ua_sheet = Some(crate::css::stylesheet::parse_stylesheet(css));
         self.rebuild_registered_props();
-        self.rebuild_font_faces();
+        self.rebuild_document_registries();
         // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
         self.rebuild_has_host_index();
         self.dirty_style = true;
@@ -5909,7 +5946,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     pub fn clear_ua_stylesheet(&mut self) {
         self.ua_sheet = None;
         self.rebuild_registered_props();
-        self.rebuild_font_faces();
+        self.rebuild_document_registries();
         // P6（ADR-0035 D1）：:has host 快筛索引同点重建。
         self.rebuild_has_host_index();
         self.dirty_style = true;

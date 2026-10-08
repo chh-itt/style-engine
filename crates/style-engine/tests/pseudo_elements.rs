@@ -376,3 +376,86 @@ fn content_quote_pairs_depth_match() {
         "越配 close-quote 钳 0 静默，实得 {texts2:?}"
     );
 }
+
+#[test]
+fn content_counter_style_upper_roman() {
+    // E：counter(x, upper-roman) 内置样式——additive 算法 + 负号路径不
+    // 触发（1..3 正域），decimal 时代锁 "1/2/3" 的升级版。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         li { counter-increment: x; } \
+         li::before { content: counter(x, upper-roman); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts == vec!["I".to_string(), "II".to_string(), "III".to_string()],
+        "upper-roman 应渲染 I/II/III，实得 {texts:?}"
+    );
+}
+
+#[test]
+fn content_counter_custom_registered_style() {
+    // E：@counter-style 登记 + fixed 耗尽回退——1 → 首符号，2/3 出窗 →
+    // fallback decimal（缺省）。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         @counter-style thumbs { system: fixed; symbols: \"T\"; } \
+         li { counter-increment: x; } \
+         li::before { content: counter(x, thumbs); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts == vec!["T".to_string(), "2".to_string(), "3".to_string()],
+        "fixed 耗尽应回退 decimal，实得 {texts:?}"
+    );
+}
+
+#[test]
+fn content_counter_style_range_fallback_chain() {
+    // E：range 域外 → fallback 样式重走完整算法（fixed 1..2 出窗 3 →
+    // upper-roman III）。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         @counter-style cap { system: fixed; symbols: \"A\" \"B\" \"C\"; range: 1 2; fallback: upper-roman; } \
+         li { counter-increment: x; } \
+         li::before { content: counter(x, cap); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts == vec!["A".to_string(), "B".to_string(), "III".to_string()],
+        "range 外应链至 upper-roman，实得 {texts:?}"
+    );
+}
+
+#[test]
+fn content_counters_style_roman_joined() {
+    // E：counters() 逐帧按样式格式化后 join（外层 I、内层各 I → "I.I"）。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         #t { counter-reset: x; counter-increment: x; } \
+         li { counter-reset: x; counter-increment: x; } \
+         li::before { content: counters(x, '.', upper-roman); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts == vec!["I.I".to_string(), "I.I".to_string(), "I.I".to_string()],
+        "counters(upper-roman) join 应为 I.I，实得 {texts:?}"
+    );
+}
+
+#[test]
+fn content_counter_registry_overrides_builtin() {
+    // E：登记表整体覆盖内置样式（css-counter-styles-3 §3）——用户重定义
+    // decimal 后 counter(x, decimal) 不再是数字。
+    let mut e = engine_list(
+        "#root { font-family: \"DejaVu Sans\"; } \
+         @counter-style decimal { system: alphabetic; symbols: \"d\" \"e\"; } \
+         li { counter-increment: x; } \
+         li::before { content: counter(x, decimal); font-size: 16px; }",
+    );
+    let texts = text_ops(&mut e);
+    assert!(
+        texts == vec!["d".to_string(), "e".to_string(), "dd".to_string()],
+        "登记 decimal 应覆盖内置（bijective d/e），实得 {texts:?}"
+    );
+}
