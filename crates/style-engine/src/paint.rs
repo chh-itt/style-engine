@@ -925,10 +925,95 @@ fn paint_border_image(
         }
     }
 
-    /// 边区平铺发射（css-backgrounds-3 §6.5）：stretch=单片拉伸；repeat=
-    /// 源片尺寸顺排末片截断（区域 PushClip）；round=整数片等分拉伸；
-    /// space=整数片均布（首尾贴边、间隙均摊），不足一片→单片拉伸。
-    /// `tile` = 源片沿轴尺寸（0 = 渐变无内在片尺寸 → stretch，B 级）。
+    /// 逐轴片位（css-backgrounds-3 §2.4/§5.5 逐轴规则）：返回 (轴上起点
+    /// 偏移, 片长) 序列（偏移相对区域起点）。stretch → 单片 [0, len]；
+    /// repeat → 原尺寸顺排、末片截断；round → n=max(1, round(len/tile))
+    /// 片均分（片长 len/n，整数片缩放）；space → n=floor(len/tile)：
+    /// n==0 不足一片 → 单片拉伸、n==1 → 单片原尺寸贴起点、否则首尾贴边、
+    /// 间隙均摊。tile ≤ 0（渐变源无内在片尺寸）→ 单片拉伸（B 级回退）。
+    fn bi_axis_segments(mode: BorderImageRepeatKind, len: f32, tile: f32) -> Vec<(f32, f32)> {
+        if len <= 0.0 || tile <= 0.0 {
+            return vec![(0.0, len.max(0.0))];
+        }
+        match mode {
+            BorderImageRepeatKind::Stretch => vec![(0.0, len)],
+            BorderImageRepeatKind::Repeat => {
+                let mut segs = Vec::new();
+                let mut p = 0.0;
+                while p < len {
+                    segs.push((p, tile.min(len - p)));
+                    p += tile;
+                }
+                segs
+            }
+            BorderImageRepeatKind::Round => {
+                let n = ((len / tile).round() as usize).max(1);
+                let tw = len / n as f32;
+                (0..n).map(|i| (tw * i as f32, tw)).collect()
+            }
+            BorderImageRepeatKind::Space => {
+                let n = (len / tile) as usize;
+                if n == 0 {
+                    vec![(0.0, len)]
+                } else if n == 1 {
+                    vec![(0.0, tile)]
+                } else {
+                    let gap = (len - tile * n as f32) / (n - 1) as f32;
+                    (0..n).map(|i| ((tile + gap) * i as f32, tile)).collect()
+                }
+            }
+        }
+    }
+
+    /// 中心区（fill）平铺发射（css-backgrounds-3 §5.5：repeat 作用于
+    /// 「the sides and the middle part」）：x 轴按 mode_x、y 轴按 mode_y
+    /// 求片位取笛卡尔积；任一轴 repeat 时区域 PushClip 兜裁。
+    #[allow(clippy::too_many_arguments)] // 平铺几何+双轴模式直传
+    fn emit_tiled_region(
+        out: &mut DisplayList,
+        paint: &BiPaint,
+        ox: f32,
+        oy: f32,
+        len_x: f32,
+        len_y: f32,
+        mode_x: BorderImageRepeatKind,
+        tile_x: f32,
+        mode_y: BorderImageRepeatKind,
+        tile_y: f32,
+        sx: f32,
+        sy: f32,
+        swd: f32,
+        shd: f32,
+    ) {
+        if len_x <= 0.0 || len_y <= 0.0 || swd <= 0.0 || shd <= 0.0 {
+            return;
+        }
+        let segs_x = bi_axis_segments(mode_x, len_x, tile_x);
+        let segs_y = bi_axis_segments(mode_y, len_y, tile_y);
+        let clipped = (tile_x > 0.0 && matches!(mode_x, BorderImageRepeatKind::Repeat))
+            || (tile_y > 0.0 && matches!(mode_y, BorderImageRepeatKind::Repeat));
+        if clipped {
+            out.ops.push(PaintOp::PushClip {
+                x: ox,
+                y: oy,
+                width: len_x,
+                height: len_y,
+                radius: [0.0; 8],
+            });
+        }
+        for (py, ph) in segs_y {
+            for (px, pw) in &segs_x {
+                emit_region(out, paint, ox + px, oy + py, *pw, ph, sx, sy, swd, shd);
+            }
+        }
+        if clipped {
+            out.ops.push(PaintOp::PopClip);
+        }
+    }
+
+    /// 边区平铺发射（css-backgrounds-3 §5.5 sides）：按 bi_axis_segments
+    /// 逐轴片位发射；repeat 时区域 PushClip 兜裁。`tile` = 源片沿轴尺寸
+    ///（0 = 渐变无内在片尺寸 → stretch，B 级）。
     #[allow(clippy::too_many_arguments)] // 平铺几何+模式直传
     fn emit_tiled_edge(
         out: &mut DisplayList,
@@ -948,97 +1033,47 @@ fn paint_border_image(
         if len <= 0.0 || thick <= 0.0 || swd <= 0.0 || shd <= 0.0 {
             return;
         }
-        // 单片拉伸（沿轴铺满 len）。
-        let stretch = |out: &mut DisplayList| {
-            if horizontal {
-                emit_region(out, paint, origin, cross_pos, len, thick, sx, sy, swd, shd);
-            } else {
-                emit_region(out, paint, cross_pos, origin, thick, len, sx, sy, swd, shd);
-            }
-        };
-        if tile <= 0.0 {
-            stretch(out);
-            return;
+        let clipped = tile > 0.0 && matches!(mode, BorderImageRepeatKind::Repeat);
+        if clipped {
+            out.ops.push(PaintOp::PushClip {
+                x: if horizontal { origin } else { cross_pos },
+                y: if horizontal { cross_pos } else { origin },
+                width: if horizontal { len } else { thick },
+                height: if horizontal { thick } else { len },
+                radius: [0.0; 8],
+            });
         }
-        match mode {
-            BorderImageRepeatKind::Stretch => stretch(out),
-            BorderImageRepeatKind::Repeat => {
-                // 顺排、末片截断：区域 PushClip 兜裁。
-                out.ops.push(PaintOp::PushClip {
-                    x: if horizontal { origin } else { cross_pos },
-                    y: if horizontal { cross_pos } else { origin },
-                    width: if horizontal { len } else { thick },
-                    height: if horizontal { thick } else { len },
-                    radius: [0.0; 8],
-                });
-                let mut p = origin;
-                let end = origin + len;
-                while p < end {
-                    if horizontal {
-                        emit_region(
-                            out,
-                            paint,
-                            p,
-                            cross_pos,
-                            tile.min(end - p),
-                            thick,
-                            sx,
-                            sy,
-                            swd,
-                            shd,
-                        );
-                    } else {
-                        emit_region(
-                            out,
-                            paint,
-                            cross_pos,
-                            p,
-                            thick,
-                            tile.min(end - p),
-                            sx,
-                            sy,
-                            swd,
-                            shd,
-                        );
-                    }
-                    p += tile;
-                }
-                out.ops.push(PaintOp::PopClip);
+        for (p, seg_len) in bi_axis_segments(mode, len, tile) {
+            if horizontal {
+                emit_region(
+                    out,
+                    paint,
+                    origin + p,
+                    cross_pos,
+                    seg_len,
+                    thick,
+                    sx,
+                    sy,
+                    swd,
+                    shd,
+                );
+            } else {
+                emit_region(
+                    out,
+                    paint,
+                    cross_pos,
+                    origin + p,
+                    thick,
+                    seg_len,
+                    sx,
+                    sy,
+                    swd,
+                    shd,
+                );
             }
-            BorderImageRepeatKind::Round => {
-                // 整数片等分拉伸：无截断、无裁剪。
-                let n = ((len / tile).round() as usize).max(1);
-                let tw = len / n as f32;
-                for i in 0..n {
-                    let p = origin + tw * i as f32;
-                    if horizontal {
-                        emit_region(out, paint, p, cross_pos, tw, thick, sx, sy, swd, shd);
-                    } else {
-                        emit_region(out, paint, cross_pos, p, thick, tw, sx, sy, swd, shd);
-                    }
-                }
-            }
-            BorderImageRepeatKind::Space => {
-                // 整数片均布：首尾贴边、间隙均摊（css-backgrounds-3 space）。
-                let n = (len / tile) as usize;
-                if n == 0 {
-                    stretch(out);
-                    return;
-                }
-                let gap = if n > 1 {
-                    (len - tile * n as f32) / (n - 1) as f32
-                } else {
-                    0.0
-                };
-                for i in 0..n {
-                    let p = origin + (tile + gap) * i as f32;
-                    if horizontal {
-                        emit_region(out, paint, p, cross_pos, tile, thick, sx, sy, swd, shd);
-                    } else {
-                        emit_region(out, paint, cross_pos, p, thick, tile, sx, sy, swd, shd);
-                    }
-                }
-            }
+        }
+        if clipped {
+            out.ops.push(PaintOp::PopClip);
         }
     }
 
@@ -1154,15 +1189,21 @@ fn paint_border_image(
         sr,
         mid_h,
     );
-    // 中心（fill 才绘制；恒拉伸，css-backgrounds-3 middle 无平铺）。
+    // 中心（fill 才绘制；css-backgrounds-3 §5.5：repeat 作用于「the sides
+    // and the middle part」——按 rep.x/rep.y 逐轴平铺、两轴片位取笛卡尔积；
+    // 渐变源 tile=0 → 两轴单片拉伸回退）。
     if fill {
-        emit_region(
+        emit_tiled_region(
             out,
             &paint,
             bx + wl,
             by + wt,
             (bwid - wl - wr).max(0.0),
             (bhei - wt - wb).max(0.0),
+            rep.x,
+            tile_for(mid_w),
+            rep.y,
+            tile_for(mid_h),
             sl,
             st,
             mid_w,
@@ -2629,8 +2670,9 @@ fn tile_axis(r: RepeatAxis) -> TileAxis {
 /// - None：单 tile（定位生效，origin/size 原样）；
 /// - Repeat：窗口 [win, win+len) 对齐步进（尺寸原样）；
 /// - Space：定位区 [area, area+area_len) 容纳 n=(area_len/size) 下取整
-///   片正空隙均分；n≤1 → 定位区单片（position 生效）；否则首片锚定
-///   定位区起点、步长 = size+gap（position 失效——css-backgrounds-3 §3.4）；
+///   片正空隙均分；n≤1（容不下两片）→ 单片按 position（origin 生效
+///   ——css-backgrounds-3 §2.4）；否则首片锚定定位区起点、步长 =
+///   size+gap（position 失效——css-backgrounds-3 §2.4）；
 /// - Round：n=round(area_len/size).max(1) 片均分定位区（ts=area_len/n），
 ///   窗口对齐步进铺满（定位失效）；size≤0/area≤0 退单 tile 防御。
 fn tile_axis_positions(
@@ -2651,7 +2693,10 @@ fn tile_axis_positions(
         }
         let n = (area_len / size) as usize;
         if n <= 1 {
-            return vec![(area_origin, size)];
+            // 容不下两片 → 单片按 background-position 定位（css-backgrounds-3
+            // §2.4 space：「only one image is placed, and background-position
+            // determines its position in this axis」）。
+            return vec![(origin, size)];
         }
         let gap = (area_len - size * n as f32) / (n as f32 - 1.0);
         let step = size + gap;
@@ -3441,14 +3486,11 @@ mod tests {
         let out2 = run(&tree2, id2, style2, &HashMap::new());
         let mut saw_invert = false;
         for op in &out2.ops {
-            match op {
-                PaintOp::PushFilter { filters, .. } => {
-                    assert_eq!(filters.len(), 2);
-                    assert_eq!(filters[0], FilterEffect::Invert(1.0));
-                    assert_eq!(filters[1], FilterEffect::Blur(2.0));
-                    saw_invert = true;
-                }
-                _ => {}
+            if let PaintOp::PushFilter { filters, .. } = op {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(filters[0], FilterEffect::Invert(1.0));
+                assert_eq!(filters[1], FilterEffect::Blur(2.0));
+                saw_invert = true;
             }
         }
         assert!(saw_invert, "PushFilter 应携带解析序滤镜链");
@@ -4199,10 +4241,12 @@ mod tests {
             tile_axis_positions(Space, 5.0, 30.0, 10.0, 100.0, 0.0, 100.0),
             vec![(0.0, 30.0), (35.0, 30.0), (70.0, 30.0)]
         );
-        // Space 单片：n=1 → 定位区单片（position 生效）。
+        // Space 单片：n=1 容不下两片 → 单片按 background-position 定位
+        //（css-backgrounds-3 §2.4：only one image is placed, and
+        // background-position determines its position in this axis）。
         assert_eq!(
             tile_axis_positions(Space, 5.0, 60.0, 10.0, 100.0, 0.0, 100.0),
-            vec![(0.0, 60.0)]
+            vec![(5.0, 60.0)]
         );
         // Round：n=round(100/30)=3 → ts=100/3，锚定定位区、铺满窗口。
         let rp = tile_axis_positions(Round, 5.0, 30.0, 10.0, 100.0, 0.0, 100.0);
@@ -4446,8 +4490,8 @@ mod tests {
 
     #[test]
     fn border_image_repeat_tiles_with_clip() {
-        // repeat 模式：源片尺寸（10px）顺排 80px 上边 → 8 整片 + 区域 PushClip；
-        // 角仍单片
+        // repeat 模式：源片尺寸（10px）顺排 80px 上边 → 8 整片 + 区域
+        // PushClip；角仍单片；fill 中心按 rep 逐轴平铺（8×3 = 24 片）
         let (tree, id, cs) = setup(
             "border: 5px solid black; border-image-source: url(t.png); \
              border-image-slice: 10 fill; border-image-width: 10px; \
@@ -4462,8 +4506,8 @@ mod tests {
             .iter()
             .filter(|op| matches!(op, PaintOp::Image { .. }))
             .count();
-        // 4 角 + 上 8 + 下 8 + 左 3（30/10） + 右 3 + 中心 = 27
-        assert_eq!(img_count, 27, "{:?}", out.ops.len());
+        // 4 角 + 上 8 + 下 8 + 左 3（30/10） + 右 3 + 中心 8×3 = 50
+        assert_eq!(img_count, 50, "{:?}", out.ops.len());
         assert!(
             out.ops
                 .iter()
@@ -4722,10 +4766,7 @@ mod tests {
             Some("hi"),
         );
         let out = run(&tree, id, style, &HashMap::new());
-        match out.ops.iter().find_map(|op| match op {
-            PaintOp::Text { .. } => Some(op),
-            _ => None,
-        }) {
+        match out.ops.iter().find(|op| matches!(op, PaintOp::Text { .. })) {
             Some(PaintOp::Text {
                 font_stretch,
                 word_spacing,
