@@ -18,6 +18,11 @@
   行列分配，absolute 后代一律留内表（偏差②）。表盒 rect 消费 inner 布局。
   `table-rowspan`、`table-anon` 金标全键零差异转正（后者 case.css 显式声明
   display，与其他 table-* 用例同约定）。
+- **paint 平铺 space/round 精确化（feat）**：background-repeat 补三值文法
+  （`<repeat-style> <repeat-style>` 双轴）与 round（按整倍数重标定 tile
+  尺寸）/space（首尾贴边、余隙均匀分布）两轴语义；border-image repeat
+  round/space 对九宫格边缘做逐边重标定（round/space 交叉取积）+ 端部
+  裁剪。新增锁定测试 `tests/repeat_round_space.rs` 九件。
 
 ### 阶段7 — A 批：语义补全
 
