@@ -1008,4 +1008,97 @@ mod tests {
             .is_empty()
         );
     }
+
+    // ---------- B1 任务3：简写宽关键字 → 逐长手还原（css-cascade-5） ----------
+    //
+    // 简写 `margin: revert` 经 decl.rs 宽关键字整值拦截展开为 margin 四长手
+    // 各自一条 WideKeyword(Revert) 声明（B1 逐长手物化语义）；resolve_revert
+    // 赛后回滚 = 严格更低 origin 档冠军。以下三个场景固定该语义。
+
+    /// 读 margin 长手冠军的 px 值（None = 该长手无冠军 = 已回滚剔除或未写）。
+    fn margin_px(out: &CascadeOutput<'_>, pid: PropertyId) -> Option<f32> {
+        let (_, cands) = out.winners.iter().find(|(p, _)| *p == pid)?;
+        let cand = cascade_winner(cands)?;
+        match cand.value {
+            DeclSource::Parsed(DeclValue::LenAuto(Some(
+                crate::css::value::LengthPercentage::Px(v),
+            ))) => Some(*v),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn margin_shorthand_revert_rolls_all_longhands_to_lower_origin() {
+        // 简写 revert：四长手整体回滚到 User 档（5px）——简写展开必须覆盖
+        // 长手全集（漏一条则该长手留 10px）。
+        let sheet = parse_stylesheet("div { margin: 10px } div { margin: revert }");
+        assert!(sheet.report.is_clean());
+        let user = parse_stylesheet("div { margin: 5px }");
+        let (tree, n) = tree_one("");
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            Some(&user),
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
+        for pid in [
+            PropertyId::MarginTop,
+            PropertyId::MarginRight,
+            PropertyId::MarginBottom,
+            PropertyId::MarginLeft,
+        ] {
+            assert_eq!(margin_px(&out, pid), Some(5.0), "{pid:?}");
+        }
+    }
+
+    #[test]
+    fn margin_shorthand_revert_without_lower_tier_drops_all_longhands() {
+        // 无更低起源档：revert 回滚目标不存在 → 四长手冠军全部剔除
+        //（计算值期落初值 0，级联输出不出现 margin-* 冠军）。
+        let sheet = parse_stylesheet("div { margin: 10px } div { margin: revert }");
+        assert!(sheet.report.is_clean());
+        let (tree, n) = tree_one("");
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            None,
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
+        assert!(out.winners.iter().all(|(p, _)| !matches!(
+            p,
+            PropertyId::MarginTop
+                | PropertyId::MarginRight
+                | PropertyId::MarginBottom
+                | PropertyId::MarginLeft
+        )));
+    }
+
+    #[test]
+    fn margin_longhand_revert_only_affects_that_longhand() {
+        // 长手 revert 仅还原该长手：margin-top 回滚到 User 档 5px，同简写
+        // 写入的兄弟长手（10px）不受牵连——逐长手独立回滚（B1 在案语义）。
+        let sheet = parse_stylesheet("div { margin: 10px } div { margin-top: revert }");
+        assert!(sheet.report.is_clean());
+        let user = parse_stylesheet("div { margin-top: 5px }");
+        let (tree, n) = tree_one("");
+        let out = cascade_declarations(
+            &tree,
+            n,
+            vec![&sheet],
+            Some(&user),
+            &MediaEnv::default(),
+            &[],
+            None,
+        );
+        assert_eq!(margin_px(&out, PropertyId::MarginTop), Some(5.0));
+        assert_eq!(margin_px(&out, PropertyId::MarginRight), Some(10.0));
+        assert_eq!(margin_px(&out, PropertyId::MarginBottom), Some(10.0));
+        assert_eq!(margin_px(&out, PropertyId::MarginLeft), Some(10.0));
+    }
 }

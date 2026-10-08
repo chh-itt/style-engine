@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — @counter-style 解析与注册表
+
+- **@counter-style 规则（feat）**：新增 `css::counter_style` 模块（经
+  stylesheet `#[path]` 挂载）——`CounterStyleRule` 承载 system（cyclic/
+  numeric/alphabetic/symbolic/additive/fixed/extends + counter-style
+  引用）、range、pad、negative、prefix/suffix（默认 suffix "· "）、
+  fallback、additive-symbols 全描述符面；Stylesheet 增 `counter_styles`
+  注册表与 `counter_style(name)` 查询（last-write-wins、大小写敏感，与
+  @property/@font-face 同约定）。容错语义（css-counter-styles-3 §对齐）：
+  逐描述符解析失败忽略该描述符、规则存活；prelude 名称非法（含 `none`）
+  → 警告 + 空注册表项；未知描述符 → 警告 + 规则存活；@media 等嵌套内
+  注册有效。新增锁定测试 20 件（stylesheet 17 + cascade 3）。
+
 ### 1.0 对齐 — 增量重样式流参与翻转失效
 
 - **内联声明流参与翻转失效（fix）**：`set_declarations` 整体替换内联声明

@@ -15,6 +15,14 @@ use crate::error::ParseReport;
 use crate::selector::{StyleSelectorList, parse_selector_list};
 use cssparser::{BasicParseError, ParseError, Parser, ToCss, Token};
 
+/// E @counter-style：登记规则与解析（css-counter-styles-3 子集）。经
+/// `#[path]` 挂为 stylesheet 子模块（css/mod.rs 并行切片禁改——模块路径
+/// 实为 `crate::css::stylesheet::counter_style`）。
+#[path = "counter_style.rs"]
+pub mod counter_style;
+
+use self::counter_style::CounterStyleRule;
+
 /// 单条样式规则。
 #[derive(Debug, Clone)]
 pub struct Rule {
@@ -67,6 +75,10 @@ pub struct Stylesheet {
     /// 子表并入；引擎附着期按 user→主表→附加表序并入文档级登记表
     /// font_faces——同族后规则胜）。
     pub font_faces: Vec<FontFaceRule>,
+    /// E @counter-style（css-counter-styles-3 子集）：登记规则（源顺序
+    /// Vec；查询 `counter_style()` 同名后写胜——与 @property/@font-face
+    /// 登记模式一致）。仅解析/存储，不参与计数器渲染。
+    pub counter_styles: Vec<CounterStyleRule>,
 }
 
 /// B2：@import prelude 数据（url + 修饰子句）。
@@ -168,6 +180,13 @@ pub struct FontFaceRule {
     pub features: Vec<([u8; 4], u16)>,
     /// font-variation-settings 描述符（tag,值）对（normal = 空表）。
     pub variations: Vec<([u8; 4], f32)>,
+    /// ascent-override 描述符：`normal | <percentage>`（css-fonts-4 §4.6；
+    /// None = 未写 = normal；Some = 百分比 /100 存储）。
+    pub ascent_override: Option<f32>,
+    /// descent-override 描述符：`normal | <percentage>`（None = 未写）。
+    pub descent_override: Option<f32>,
+    /// line-gap-override 描述符：`normal | <percentage>`（None = 未写）。
+    pub line_gap_override: Option<f32>,
 }
 
 // ---------- @media 子集 ----------
@@ -1338,6 +1357,13 @@ struct StylesheetParser {
     /// B3：嵌套层累积声明（体尾 flush 为单条隐式规则；B 级：声明组不按
     /// 规则插入点分裂）。
     pending_decls: crate::css::decl::DeclarationBlock,
+    /// E css-nesting-1 隐式最外层样式规则：顶层裸声明容错开关。仅样式表
+    /// 主解析器为 true（Default = false）；子解析器（嵌套体/条件组臂）在
+    /// 字面量处显式 false——裸声明在嵌套/条件组语境维持无效语义。
+    implicit_outer_decls: bool,
+    /// E @counter-style：登记规则（顶层/条件组/嵌套体均登记，宽容语义同
+    /// @font-face；来源序 Vec，同名后写胜）。
+    counter_styles: Vec<CounterStyleRule>,
 }
 
 /// B3：嵌套深度上限（防爆炸；超出 = 规则丢弃 + 告警）。
@@ -1409,6 +1435,82 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
         // B3：嵌套项出现 = 声明组到此前源位置截止——先 flush 隐式 & 规则
         //（css-nesting-1 嵌套声明按源位置分裂；尾 flush 只兜最后一组）。
         self.flush_pending_decls();
+        // E css-nesting-1：顶层裸声明容错（隐式最外层样式规则）。仅主样式
+        // 表顶层启用（implicit_outer_decls）；条件组/嵌套体子解析器不设
+        //（其经 RuleBodyParser 恢复语义 prelude 吞至首个 '{'——在案限制，
+        // 见测试 bare_declaration_inside_media_stays_invalid）。判别：探测
+        // Ident+':' 命中后扫描 post-colon 顶层是否存在 ';'——存在 → 声明
+        // 提交（合法选择器 prelude 从不含顶层 ';'）；不存在 → 回退常规
+        // 选择器路径（保护 h1:hover / a:is() 等伪类写法）。缺 ';' 的裸
+        // 声明按 css-syntax 分隔符语义吞掉下一规则 prelude（在案限制，
+        // 测试 top_level_bare_declaration_missing_semicolon_swallows_next_
+        // prelude 固定观察行为）。
+        let mut saw_bare = false;
+        if self.implicit_outer_decls {
+            loop {
+                // 顶层 CDO/CDC 无条件忽略（css-syntax §5.3.2，同驱动器语义；
+                // cssparser 的 skip_cdc_and_cdo 为 pub(crate)——手动跳过）。
+                loop {
+                    let save = input.state();
+                    match input.next() {
+                        Ok(Token::CDO) | Ok(Token::CDC) => continue,
+                        _ => {
+                            input.reset(&save);
+                            break;
+                        }
+                    }
+                }
+                let save0 = input.state();
+                let probe = input.try_parse(|p| -> Result<(), ParseError<()>> {
+                    p.skip_whitespace();
+                    match p.next()? {
+                        Token::Ident(id) if !id.starts_with("--") => {}
+                        _ => return Err(ParseError::unexpected_token()),
+                    }
+                    p.expect_colon()?;
+                    Ok(())
+                });
+                if probe.is_err() {
+                    break;
+                }
+                // 探测命中（位置 = 冒号后）：';' 存在性扫描。块 token 不透明
+                //（括号内视图整块吞）；带引号字符串/url 内 ';' 为 token 内容
+                // 非分隔符——正确的仅顶层语义。
+                let save1 = input.state();
+                let has_semicolon = loop {
+                    match input.next() {
+                        Ok(Token::Semicolon) => break true,
+                        Ok(_) => {}
+                        Err(_) => break false,
+                    }
+                };
+                input.reset(&save1);
+                if !has_semicolon {
+                    // 非声明（伪类等）→ 回退常规选择器路径（探测自动已回退，
+                    // 此处显式复位至探测前状态）。
+                    input.reset(&save0);
+                    break;
+                }
+                // 声明提交：复位至探测前位置 → 整段消费至 ';'（含）→ 告警。
+                input.reset(&save0);
+                let loc = input.current_source_location();
+                skip_until_semicolon(input);
+                self.report.push(
+                    loc.line + 1,
+                    loc.column + 1,
+                    crate::error::ParseSeverity::Dropped,
+                    "top-level bare declaration discarded (implicit outermost style rule)"
+                        .to_string(),
+                );
+                saw_bare = true;
+            }
+            if saw_bare && input.is_exhausted() {
+                // 提前退出：裸声明后无后续规则——避免驱动器对空 prelude 追加
+                // "invalid selector ''" 虚警（驱动器仍补 "invalid rule skipped"，
+                // 合计 2 告警为已知美观差异，测试不断言确切计数）。
+                return Err(ParseError::unexpected_token());
+            }
+        }
         let loc = input.current_source_location();
         let mut buf = TokenBuf::new();
         capture_tokens(input, &mut buf);
@@ -1471,6 +1573,10 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
             pending_effective: String::new(),
             enclosing_prelude: Some(prelude.clone()),
             pending_decls: crate::css::decl::DeclarationBlock::default(),
+            // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style 登记
+            // 容器（容错语义如 @font-face——条件组/嵌套体内照常登记）。
+            implicit_outer_decls: false,
+            counter_styles: Vec::new(),
         };
         {
             let iter = cssparser::RuleBodyParser::new(input, &mut sub);
@@ -1487,6 +1593,9 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
         // F3d @font-face：样式规则体内出现 = 宽容登记（css-nesting-1 语法定
         // 条件组白名单，此处按登记处理语义无损——B 级在案）。
         self.font_faces.extend(sub.font_faces);
+        // E @counter-style：样式规则体内出现 = 宽容登记（同 @font-face 语义；
+        // 注意 @layer 块臂登记后不并入——现状镜像 font_faces 的在案缺口）。
+        self.counter_styles.extend(sub.counter_styles);
         self.report.extend(sub.report);
         self.layers.merge(sub.layers);
         if !sub.imports.is_empty() {
@@ -1648,6 +1757,33 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     Err(ParseError::unexpected_token())
                 }
             }
+        } else if name.eq_ignore_ascii_case("counter-style") {
+            // E @counter-style（css-counter-styles-3 子集）：prelude = 计数
+            // 样式名（custom-ident；`none` 为保留字无效——css-counter-styles-3
+            // §3.1.1）。块体描述符在 parse_block 的 CounterStyle 臂登记。
+            let loc = input.current_source_location();
+            match input.try_parse(|p| -> Result<String, ParseError<()>> {
+                p.skip_whitespace();
+                match p.next()?.clone() {
+                    Token::Ident(id)
+                        if !id.starts_with("--") && !id.eq_ignore_ascii_case("none") =>
+                    {
+                        Ok(id.to_string())
+                    }
+                    _ => Err(ParseError::unexpected_token()),
+                }
+            }) {
+                Ok(n) => Ok(AtPrelude::CounterStyle(n)),
+                Err(_) => {
+                    self.report.push(
+                        loc.line + 1,
+                        loc.column + 1,
+                        crate::error::ParseSeverity::Dropped,
+                        "invalid @counter-style name".to_string(),
+                    );
+                    Err(ParseError::unexpected_token())
+                }
+            }
         } else if name.eq_ignore_ascii_case("property") {
             // B4 @property（css-properties-values-api）：prelude = 注册名
             //（-- 前缀自定义属性名，块体描述符在 parse_block 解析）。
@@ -1750,6 +1886,18 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                 }
                 Ok(())
             }
+            AtPrelude::CounterStyle(cs_name) => {
+                // E @counter-style：块体描述符登记（宽容语义同 @font-face——
+                // 条件组/嵌套体内照常登记；未知描述符记 ParseReport 告警——
+                // 任务要求，与 @font-face 的静默跳过刻意不对称）。名称查询
+                // 大小写敏感（counter-style-name spec 语义，在案决策）。
+                if let Some(rule) =
+                    counter_style::parse_counter_style_rule(&cs_name, input, &mut self.report)
+                {
+                    self.counter_styles.push(rule);
+                }
+                Ok(())
+            }
             AtPrelude::Import(_) => {
                 // @import 无块体（css-cascade-5）——块形无效，整块消费不产出
                 while input.next().is_ok() {}
@@ -1810,6 +1958,10 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
+                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
+                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
+                    implicit_outer_decls: false,
+                    counter_styles: Vec::new(),
                 };
                 {
                     let iter = cssparser::RuleBodyParser::new(input, &mut sub);
@@ -1822,6 +1974,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                 self.rules.extend(sub.rules);
                 self.keyframes.extend(sub.keyframes);
                 self.font_faces.extend(sub.font_faces);
+                self.counter_styles.extend(sub.counter_styles);
                 self.report.extend(sub.report);
                 self.layers.merge(sub.layers);
                 if !sub.imports.is_empty() {
@@ -1855,6 +2008,10 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
+                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
+                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
+                    implicit_outer_decls: false,
+                    counter_styles: Vec::new(),
                 };
                 {
                     let iter = cssparser::RuleBodyParser::new(input, &mut sub);
@@ -1870,6 +2027,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                 // at-rule 照常产出）。
                 self.keyframes.extend(sub.keyframes);
                 self.font_faces.extend(sub.font_faces);
+                self.counter_styles.extend(sub.counter_styles);
                 self.report.extend(sub.report);
                 self.layers.merge(sub.layers);
                 if !sub.imports.is_empty() {
@@ -1906,6 +2064,10 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
+                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
+                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
+                    implicit_outer_decls: false,
+                    counter_styles: Vec::new(),
                 };
                 {
                     let iter = cssparser::RuleBodyParser::new(input, &mut sub);
@@ -1920,6 +2082,7 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                 // 子表 keyframes。
                 self.keyframes.extend(sub.keyframes);
                 self.font_faces.extend(sub.font_faces);
+                self.counter_styles.extend(sub.counter_styles);
                 self.report.extend(sub.report);
                 self.layers.merge(sub.layers);
                 if !sub.imports.is_empty() {
@@ -1964,6 +2127,10 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
+                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
+                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
+                    implicit_outer_decls: false,
+                    counter_styles: Vec::new(),
                 };
                 {
                     let iter = cssparser::RuleBodyParser::new(input, &mut sub);
@@ -2026,6 +2193,9 @@ enum AtPrelude {
     /// @font-face（F3d，ADR-0026 D4）：块体描述符登记（原第五批⑯静默
     /// 跳过演进为登记表——字体字节仍由宿主 add_font 推送）。
     FontFace,
+    /// E @counter-style（css-counter-styles-3 子集）：计数样式名（prelude
+    /// 已验证 custom-ident 且非 `none`；块体描述符在 parse_block 登记）。
+    CounterStyle(String),
 }
 
 // ---------- @font-face 块体解析（F3d，ADR-0026 D4） ----------
@@ -2045,6 +2215,9 @@ fn parse_font_face_block(input: &mut Parser<'_>) -> Option<FontFaceRule> {
         unicode_ranges: Vec::new(),
         features: Vec::new(),
         variations: Vec::new(),
+        ascent_override: None,
+        descent_override: None,
+        line_gap_override: None,
     };
     loop {
         let name = match input.next() {
@@ -2306,8 +2479,36 @@ fn parse_font_face_descriptor(name: &str, v: &mut Parser<'_>, rule: &mut FontFac
         }
         return false;
     }
+    // E：三个度量 override 描述符（css-fonts-4 §4.6）：`normal |
+    // <percentage>`（百分比 /100 存储；normal = None = 未写语义同缺省）。
+    if name.eq_ignore_ascii_case("ascent-override") {
+        return parse_font_face_override(v, |val| rule.ascent_override = val);
+    }
+    if name.eq_ignore_ascii_case("descent-override") {
+        return parse_font_face_override(v, |val| rule.descent_override = val);
+    }
+    if name.eq_ignore_ascii_case("line-gap-override") {
+        return parse_font_face_override(v, |val| rule.line_gap_override = val);
+    }
     // 未知描述符：宽容跳过（值域由 parse_until_before 整体消费）
     false
+}
+
+/// `normal | <percentage>` 单描述符值解析（css-fonts-4 §4.6 override 家族）。
+/// None = normal；Some = 百分比 /100。false = 值非法（该描述符忽略）。
+fn parse_font_face_override(v: &mut Parser<'_>, set: impl FnOnce(Option<f32>)) -> bool {
+    v.skip_whitespace();
+    match v.next() {
+        Ok(Token::Ident(id)) if id.eq_ignore_ascii_case("normal") => {
+            set(None);
+            true
+        }
+        Ok(Token::Percentage { unit_value, .. }) => {
+            set(Some(*unit_value));
+            true
+        }
+        _ => false,
+    }
 }
 
 /// <urange> 字符文法（css-fonts-4）：`U+XXXX` | `U+XXXX-YYYY` | `U+X??`
@@ -2548,6 +2749,9 @@ pub fn parse_stylesheet_in_layer(source: &str, current_layer: Vec<String>) -> St
     let mut input = Parser::new(source);
     let mut sp = StylesheetParser {
         current_layer,
+        // E 任务1：主样式表顶层启用裸声明容错（隐式最外层样式规则）；
+        // 条件组/嵌套体子解析器保持 false（在案限制）。
+        implicit_outer_decls: true,
         ..StylesheetParser::default()
     };
     let mut skipped: Vec<(u32, u32)> = Vec::new();
@@ -2593,6 +2797,7 @@ pub fn parse_stylesheet_in_layer(source: &str, current_layer: Vec<String>) -> St
         layers: sp.layers,
         property_rules: sp.property_rules,
         font_faces: sp.font_faces,
+        counter_styles: sp.counter_styles,
     }
 }
 
@@ -2831,6 +3036,14 @@ impl Stylesheet {
             }
         }
     }
+
+    /// E @counter-style：按名称查询登记规则（css-counter-styles-3）。
+    /// 语义：同名后写胜（源顺序 Vec 逆序查找，与 @property/@font-face
+    /// 登记模式一致）；名称匹配大小写敏感（counter-style-name spec 语义，
+    /// 与属性名不区分大小写不同——在案决策）。
+    pub fn counter_style(&self, name: &str) -> Option<&CounterStyleRule> {
+        self.counter_styles.iter().rev().find(|r| r.name == name)
+    }
 }
 
 /// @import 拼接（引擎附着期；css-cascade-5：导入规则视同写在导入点）。
@@ -2933,6 +3146,7 @@ fn import_one(
     sheet.layers.merge(std::mem::take(&mut sub.layers));
     sheet.keyframes.extend(sub.keyframes);
     sheet.font_faces.extend(sub.font_faces);
+    sheet.counter_styles.extend(sub.counter_styles);
     sheet.report.extend(sub.report);
     seen.pop();
     Some(
@@ -2951,6 +3165,7 @@ mod tests {
     use super::*;
     use crate::css::decl::DeclSource;
     use crate::css::property::DeclValue;
+    use crate::css::stylesheet::counter_style::{CounterStyleRange, CounterStyleSystem};
 
     #[test]
     fn parses_rules_and_media() {
@@ -3275,5 +3490,253 @@ mod tests {
         assert!(!sheet.report.is_clean());
         assert_eq!(sheet.rules.len(), 1);
         assert!(sheet.rules[0].container.is_none());
+    }
+
+    // ---------- E css-nesting-1 隐式最外层样式规则（顶层裸声明容错） ----------
+
+    #[test]
+    fn top_level_bare_declaration_tolerated() {
+        // 主复现：`p{...} color: blue; h1{...}`——cssparser 顶层 prelude 以
+        // 首个 '{' 分界，裸声明并入 h1 prelude 致 h1 丢失；容错后 = 裸声明
+        // 丢弃 + 告警，后续规则存活。
+        let sheet = parse_stylesheet("p { color: red }\ncolor: blue;\nh1 { color: green }");
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.rules.len(), 2);
+        assert_eq!(sheet.rules[0].declarations.decls.len(), 1);
+        assert_eq!(sheet.rules[1].declarations.decls.len(), 1);
+        assert!(
+            sheet
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("bare declaration")),
+            "{:?}",
+            sheet.report
+        );
+    }
+
+    #[test]
+    fn multiple_top_level_bare_declarations() {
+        // 多条裸声明逐条丢弃 + 告警；两条规则均存活。
+        let sheet = parse_stylesheet(
+            "color: red; width: 10px; font-family: 'X'; h1 { color: green } .a { color: blue }",
+        );
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.rules.len(), 2);
+        assert!(sheet.rules.iter().all(|r| r.declarations.decls.len() == 1));
+    }
+
+    #[test]
+    fn top_level_bare_declaration_missing_semicolon_swallows_next_prelude() {
+        // 缺 ';'：值域到 '{' 前——后续规则 prelude 被吞（css-syntax 分界
+        // 语义，在案限制）；规则丢失 + 告警。
+        let sheet = parse_stylesheet("color: blue\nh1 { color: green }");
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert!(sheet.rules.is_empty(), "{:?}", sheet.rules);
+    }
+
+    #[test]
+    fn top_level_bare_declaration_with_cdo_between_rules() {
+        // CDO/CDC 干扰：裸声明与后续规则之间的 <!-- 由循环头跳过；规则体
+        // 之间的 --> 由驱动器跳过——两规则均存活。
+        let sheet = parse_stylesheet(
+            "p { color: red }\ncolor: blue;\n<!--\nh1 { color: green }\n-->\n.a { color: black }",
+        );
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.rules.len(), 3);
+    }
+
+    #[test]
+    fn bare_declaration_inside_media_stays_invalid() {
+        // 条件组内裸声明维持无效语义（子解析器 implicit_outer_decls=false，
+        // 顶层容错不外溢）。现状基线：媒体臂 parse_declarations()=false →
+        // RuleBodyParser 走 nested=false 限定规则路径（cssparser
+        // rules_and_declarations.rs:563-566 前导码视图横跨至首个 '{'）——
+        // 坏 prelude 连带吞掉后续规则块（既有恢复语义，非本切片目标）。
+        let sheet = parse_stylesheet("@media screen { color: blue; p { color: green } }");
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert!(sheet.rules.is_empty(), "{:?}", sheet.rules);
+    }
+
+    #[test]
+    fn top_level_pseudo_selectors_unaffected_by_bare_decl_tolerance() {
+        // 歧义防护：伪类/伪元素/函数伪类选择器（值域无顶层 ';' → 归选择器
+        // 路径）不受裸声明容错影响；';' 分隔的裸声明 + 规则混合照常容错。
+        let sheet = parse_stylesheet(
+            "a:hover { color: red } p::before { content: 'x' } .b:is(.c) { color: blue } \
+             color: green; .d { color: black }",
+        );
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.rules.len(), 4);
+    }
+
+    // ---------- E 任务2：@counter-style 登记 + @font-face 覆盖描述符 ----------
+
+    #[test]
+    fn counter_style_rule_parsed_with_descriptors() {
+        let sheet = parse_stylesheet(
+            "@counter-style thumbs { system: cyclic; symbols: '\\1F44D' '\\1F44E'; suffix: ' ' }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.counter_styles.len(), 1);
+        let cs = &sheet.counter_styles[0];
+        assert_eq!(cs.name, "thumbs");
+        assert_eq!(cs.system, CounterStyleSystem::Cyclic);
+        assert_eq!(cs.symbols, vec!["👍".to_string(), "👎".to_string()]);
+        assert_eq!(cs.suffix, " ");
+        // 查询 API：命中
+        assert!(sheet.counter_style("thumbs").is_some());
+    }
+
+    #[test]
+    fn counter_style_default_suffix_is_dot_space() {
+        // css-counter-styles-3：suffix 初始值 ". "（点 + 空格）。
+        let sheet = parse_stylesheet("@counter-style a { system: cyclic; symbols: 'x' }");
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.counter_styles[0].suffix, ". ");
+        assert_eq!(sheet.counter_styles[0].prefix, None);
+        assert_eq!(sheet.counter_styles[0].pad, None);
+        assert_eq!(sheet.counter_styles[0].range, CounterStyleRange::Auto);
+    }
+
+    #[test]
+    fn counter_style_system_fixed_and_extends() {
+        let sheet = parse_stylesheet(
+            "@counter-style f { system: fixed 3; symbols: a b } \
+             @counter-style e { system: extends decimal }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.counter_styles[0].system, CounterStyleSystem::Fixed(3));
+        assert_eq!(
+            sheet.counter_styles[1].system,
+            CounterStyleSystem::Extends("decimal".to_string())
+        );
+        // fixed 缺省整数 = 1（§3.2）
+        let sheet2 = parse_stylesheet("@counter-style g { system: fixed; symbols: a }");
+        assert_eq!(
+            sheet2.counter_styles[0].system,
+            CounterStyleSystem::Fixed(1)
+        );
+    }
+
+    #[test]
+    fn counter_style_none_name_invalid() {
+        // counter-style-name 排除 none（custom-ident 语义）→ 整规则丢弃 +
+        // Dropped 告警，登记表为空。
+        let sheet = parse_stylesheet("@counter-style none { system: cyclic; symbols: 'x' }");
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert!(
+            sheet
+                .report
+                .warnings
+                .iter()
+                .any(|m| m.message == "invalid @counter-style name"),
+            "{:?}",
+            sheet.report
+        );
+        assert!(sheet.counter_styles.is_empty());
+    }
+
+    #[test]
+    fn counter_style_unknown_descriptor_warns_but_rule_survives() {
+        // 未知描述符：Dropped 告警 + 值段消费 + 规则存活（与 @font-face 的
+        // 静默跳过刻意不对称——任务在案）。
+        let sheet = parse_stylesheet("@counter-style a { bogus: 1; symbols: 'x' }");
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        assert!(
+            sheet
+                .report
+                .warnings
+                .iter()
+                .any(|m| m.message == "unknown @counter-style descriptor 'bogus'"),
+            "{:?}",
+            sheet.report
+        );
+        assert_eq!(sheet.counter_styles.len(), 1);
+        assert_eq!(sheet.counter_styles[0].symbols, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn counter_style_last_write_wins_case_sensitive_lookup() {
+        // 同名后写胜（源顺序登记，iter().rev() 查找）；查询大小写敏感
+        //（counter-style-name spec 语义，在案决策）。
+        let sheet = parse_stylesheet(
+            "@counter-style X { system: cyclic; symbols: 'a' } \
+             @counter-style X { system: fixed; symbols: 'b' }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.counter_styles.len(), 2);
+        let winner = sheet.counter_style("X").unwrap();
+        assert_eq!(winner.system, CounterStyleSystem::Fixed(1));
+        assert!(sheet.counter_style("x").is_none());
+    }
+
+    #[test]
+    fn counter_style_inside_media_registered() {
+        // 条件组内照常登记（宽容语义同 @font-face——在案决策）。
+        let sheet =
+            parse_stylesheet("@media screen { @counter-style a { system: cyclic; symbols: 'x' } }");
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.counter_styles.len(), 1);
+    }
+
+    #[test]
+    fn counter_style_additive_and_range_and_pad() {
+        let sheet = parse_stylesheet(
+            "@counter-style roman { system: additive; \
+             additive-symbols: 10 X, 9 IX, 5 V, 4 IV, 1 I; \
+             range: 2 5; pad: 2 '0'; negative: '(' ')' }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        let cs = &sheet.counter_styles[0];
+        assert_eq!(cs.system, CounterStyleSystem::Additive);
+        assert_eq!(
+            cs.additive_symbols,
+            vec![
+                (10, "X".to_string()),
+                (9, "IX".to_string()),
+                (5, "V".to_string()),
+                (4, "IV".to_string()),
+                (1, "I".to_string())
+            ]
+        );
+        assert_eq!(
+            cs.range,
+            CounterStyleRange::Ranges(vec![(Some(2), Some(5))])
+        );
+        assert_eq!(cs.pad, Some((2, "0".to_string())));
+        assert_eq!(cs.negative, vec!["(".to_string(), ")".to_string()]);
+    }
+
+    #[test]
+    fn font_face_override_descriptors() {
+        // ascent/descent/line-gap-override：normal → None（未写同义），
+        // 百分比 → /100 小数（cssparser unit_value 语义）。
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: X; src: url(f.woff2); ascent-override: normal; \
+             descent-override: 50%; line-gap-override: 120% }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        let ff = &sheet.font_faces[0];
+        assert_eq!(ff.ascent_override, None);
+        assert_eq!(ff.descent_override, Some(0.5));
+        assert!((ff.line_gap_override.unwrap() - 1.2).abs() < 1e-6);
+        // 未写 = None
+        let sheet2 = parse_stylesheet("@font-face { font-family: Y; src: url(y.woff2) }");
+        let ff2 = &sheet2.font_faces[0];
+        assert_eq!(ff2.ascent_override, None);
+        assert_eq!(ff2.descent_override, None);
+        assert_eq!(ff2.line_gap_override, None);
+    }
+
+    #[test]
+    fn font_face_override_invalid_value_ignored_silently() {
+        // 非法值（长度）：描述符静默忽略（@font-face 语义，在案不对称），
+        // 字段留 None、规则存活、无告警。
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: Z; src: url(z.woff2); ascent-override: 10px }",
+        );
+        assert!(sheet.report.is_clean(), "{:?}", sheet.report);
+        assert_eq!(sheet.font_faces[0].ascent_override, None);
     }
 }
