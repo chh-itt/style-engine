@@ -1957,3 +1957,34 @@ P7 三块均为收尾性收口（P1–P6 之后的最后批次）。全量 works
 
 - CHANGELOG：P7 条三段（soft span/表格 max-content 含 T-签名迁移说明/多动画组）+测试计数 594。
 - FEATURES：@keyframes 条改写（多组/列表化/组循环采样）、残余偏差「多动画组」条改已落地、表格条 auto 语义更新、文本条 soft span 收口补记。
+
+## P8 批——1.0 对齐收口：@counter-style 全链 / var 宽关键字语义 / sink 矩阵 / 字体文档对拍（2026-10-08，round 21–24）
+
+P8 为 1.0 对齐路线收口批。全量 workspace `--all-features` 绿（主库 294 通过：+22 counter_format 单测、+5 引擎级锁定；既有套件零回归），clippy `-D warnings` 与 fmt 清零；conformance 35 用例零 xfail。main 领先 origin 31 提交（f38599d 时点）。
+
+### P8-① @counter-style 解析+格式化全链（b1199a4 + f38599d）
+
+- 解析/登记：crates/style-engine/src/css/counter_style.rs（485 行）——system 七形（cyclic/numeric/alphabetic/symbolic/additive/fixed <integer>?/extends）+ symbols/additive-symbols/negative/prefix/suffix/range（auto|[<integer>|infinite]{2}#）/pad/fallback 九描述符；宽容语义：已知描述符值非法=丢描述符规则存活、未知描述符=ParseReport 告警（与 @font-face 静默跳过刻意不对称）；登记语境不设限；fallback 宽容接受 none（在案 B 级）。引擎字段 `counter_styles: Vec<CounterStyleRule>`，`rebuild_document_registries` 统一同步（ua→user→主表→附加表，附加表胜、可覆盖内置；名称区分大小写、内置 ASCII 不区分）。
+- 格式化：crates/style-engine/src/css/counter_format.rs（~750 行，`#[path]` 挂 stylesheet 模块树）——`format_counter_with(name, value, registry)`；管线=extends 逐字段合并→system 最低符号数门（不满足→decimal）→range 门（auto 语义随 system）→未知/越界→fallback 链（成环→decimal）→六 system 核心（cyclic i128 rem_euclid/fixed 窗/symbolic 重复/alphabetic 双射/numeric 按位/additive 贪心+零权组）→pad（差值=pad−簇数−负号簇，mag.div_ceil）→负号包裹→60 码点上限→decimal；counter()/counters() 输出不带 prefix/suffix。内置 12 族；关键语义按 css-counter-styles-3 Bikeshed 源逐条锁定（源存 target/csl3.bs 未追踪参考件）：lower/upper-roman=additive+range 1 3999（0/负值/4000+ 走 decimal）、decimal-leading-zero=extends decimal+pad 2（−5→"-5"）、§3.6 pad 差值减负号簇数。engine.rs `eval_pseudo_content` Counter/Counters 臂接入（#[cfg(feature = "text")]）。
+- 锁定：counter_format 22 单测 + crates/style-engine/tests/pseudo_elements.rs 五件引擎级（content_counter_style_upper_roman / content_counter_custom_registered_style / content_counter_style_range_fallback_chain / content_counters_style_roman_joined / content_counter_registry_overrides_builtin）。
+- **教训：4 个早期测试期望写错（实现符合规范，勿反向"修"实现）**——decimal-leading-zero −5 期望 "-05"（对为 "-5"）、roman −5 期望 "-V"（内置 range 1 3999 落 decimal，对为 "-5"）、fallback_loop 测试符号表自重（b 符号写成 ["y","z"]）、extends −4 期望 "-4"（范围未中走回退）。
+
+### P8-② var 宽关键字整值语义（55b5102 + 5b4476a）
+
+- fix：custom property 终值恰为宽关键字按 css-variables-1 §3 作用于自身（guaranteed-invalid）而非文本代换——var(--x, fb) 的 fallback 生效。
+- conformance var-wide-keywords 对 Chromium 153 golden 逐盒 0.5px 一致→manifest 转正（xfail=false+注释转正），35 用例零 xfail 回归达成。
+
+### P8-③ sink 一致性矩阵（5a7080e）
+
+- docs/SINK-MATRIX.md：soft/vello 双 sink 逐 op 一致性矩阵与忽略项卫生约定；run.ps1 门禁接线防漂移。
+
+### P8-④ 修复与收口（f48a01a / d84372b / 81ed887 / 66b30ce / 2239d5c）
+
+- vello 影模糊多重同心环近似（box 同心扩张/text 同心偏移，环 α 复合公式）+ corner_diagonal_deg 度数修复；纯函数单测 13 项。
+- fix：内联声明流参与翻转失效——父节点记入脏根。
+- clippy/fmt 收口三连：div_ceil、fill 切片签名、StyleNode 字面量、collapsible_if、field_reassign_with_default。
+
+### P8-⑤ 文档对拍（本提交）
+
+- FEATURES 七处：@counter-style 新条（算法+B/C 偏差）、counter 偏差句重写（"恒按 decimal"退役）、宽关键字补 custom property 终值语义、var 残余条对拍转正注记、@font-face 条重写（F3d 登记表取代第五批⑯「静默跳过」）、T0 ⑤ 描述符清单补 ascent/descent/line-gap-override、字体残余清单补 font-display/描述符级 features/variations/format() 提示/size-adjust/src tech()。
+- 字体对拍结论（子代理只读审计）：12 描述符全解析透出、引擎 0 消费（F3d metadata-only 契约维持）；无 A 级缺口；size-adjust 未解析（与三 override 不对称）记 B。
