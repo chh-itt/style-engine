@@ -31,7 +31,7 @@
 vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29 与 30 是 semver 不兼容的大版本：若我们直接声明 wgpu 30.0.1，应用会同时编译两份 wgpu（或无法与 vello 统一）。因此：
 
 - sink 与宿主统一使用 vello 传递的 wgpu 29.x，sink crate 显式声明同版本（其测试代码直接使用 wgpu API；**公有 API 不暴露任何 wgpu 类型，无需 re-export**——阶段4 审计修正，此前的 `pub use wgpu` 计划未落地也不再需要）。
-- 这符合"选**兼容的**最新版本"原则：29.x 就是当前兼容的最新。~~等 vello 升级支持 wgpu 30（linebender 节奏通常数周内跟上）后整体升级。~~ **2026-10-06 更新：vello 0.11.0 已发布（锁 wgpu ^30），升级路径就绪**——按"一次升级整条 linebender 链"规则（vello+peniko+parley 同批 0.11 代 + workspace wgpu 统一 30.x），作为升级阶梯候选待排期；当前 29.x 组合仍为最新兼容稳定组合，无安全/缺陷驱动，不单独追高。
+- 这符合"选**兼容的**最新版本"原则：29.x 就是当前兼容的最新。~~等 vello 升级支持 wgpu 30（linebender 节奏通常数周内跟上）后整体升级。~~ **2026-10-06 更新：vello 0.11.0 已发布（锁 wgpu ^30），升级路径就绪**——按"一次升级整条 linebender 链"规则（2026-10-08 官方 changelog 核实修正：0.10→0.11 唯一 breaking=wgpu/naga 升 30 #1909，Scene/Renderer/kurbo/peniko 使用面零变化、我方 sink API 无触碰，sbix 字形修复与自管字形无关——实际升级面仅 vello+wgpu 两件；先前「vello+peniko+parley 同批 0.11 代」有误，peniko 0.11 代仍 ^0.6.1、parley 已在 0.11.1），作为升级阶梯候选待排期；当前 29.x 组合仍为最新兼容稳定组合，无安全/缺陷驱动，不单独追高；重评条件=需要 wgpu 30 新特性或 29.x 出现 RustSec advisory。
 - winit 0.31-beta 与 wgpu 的对接走 raw-window-handle，不受此影响。
 
 ## 版本策略
