@@ -16,6 +16,9 @@ slotmap = { workspace = true }
 bitflags = { workspace = true }
 smallvec = { workspace = true }
 tracing = { workspace = true }
+# C2 capitalize（css-text-4）：UAX#29 词界分词——纯 Rust、MIT/Apache-2.0、
+# 零传递依赖。
+unicode-segmentation = "1"
 taffy = { workspace = true, optional = true }
 parley = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"], optional = true }

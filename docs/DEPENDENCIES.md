@@ -15,6 +15,7 @@
 | slotmap | 1.1.1 | 核心 | StyleTree 与 secondary map 存储 | |
 | bitflags | 2.13.2 | 核心 | StateFlags | |
 | smallvec | 1.x | L1 | 声明/子选择器内联存储 | 由 cargo update 定 patch |
+| unicode-segmentation | 1.x | 核心 | text-transform capitalize 的 UAX#29 词界分词 | css-text-4 capitalize 要求 UAX#29 词界；纯 Rust、零传递依赖，MIT/Apache-2.0 |
 | peniko | 0.6.1 | 核心(词汇表) | 画笔/颜色/图片类型 | 无 GPU 依赖，vello 同款，见 ADR-0001 |
 | kurbo | (peniko 传递) | 核心(词汇表) | 几何词汇表（仅经 peniko 传递） | 阶段4 审计：本方 DisplayList 几何全部为 `f32` 字段，kurbo 类型不出现在公有面 |
 | parley | 0.11.1 | L2 核心 | 文本 shaping/测量/行布局（测量内置，见 ADR-0006） | 传递引入 fontique |

@@ -3,11 +3,13 @@
 //! 纯字符串变换（无 cfg 门——度量路径 text.rs 与绘制路径 paint.rs 共用）：
 //! 按 span 边界切段、每段用管辖样式的 text_transform（CSS 语义 = 变换按
 //! 元素框独立，词界不跨框）；逐字符执行并记录 old→new 字节映射（ß→SS 等
-//! 扩缩安全），span 偏移经映射重写。树内 node.text 恒存原文（唯一真源），
-//! 变换为幂等消费。
+//! 扩缩安全），span 偏移经映射重写。capitalize 词界按 css-text-4 取
+//! UAX#29（unicode-segmentation）：每词段首个排印字母单元大写。树内
+//! node.text 恒存原文（唯一真源），变换为幂等消费。
 
 use crate::computed::ComputedStyle;
 use crate::css::property::{FontVariantCapsKind, TextTransformKind};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 变换结果：变换后文本 + 逐字符 old→new 字节映射。
 pub(crate) struct TransformedText {
@@ -78,29 +80,42 @@ pub(crate) fn segments(
 }
 
 /// 分段变换。segments = (旧字节起点, 旧字节终点, 种类)（互斥升序；未覆盖
-/// 字符按 None）。capitalize 词界状态跨段重置（变换按元素框独立）。
+/// 字符按 None）。capitalize 段内按 UAX#29 词界分词（css-text-4：每词段
+/// 首个排印字母单元大写，即使词前有标点），词界状态跨段重置（变换按元素
+/// 框独立）。
 pub(crate) fn transform(
     text: &str,
     segments: &[(usize, usize, TextTransformKind)],
 ) -> TransformedText {
-    let mut out = String::with_capacity(text.len() + 16);
-    let mut old_starts: Vec<usize> = Vec::with_capacity(text.len());
-    let mut new_starts: Vec<usize> = Vec::with_capacity(text.len() + 1);
-    let mut word_char = false;
-    let mut last_seg: Option<usize> = None;
-    for (idx, ch) in text.char_indices() {
-        let seg_i = segments.iter().position(|(s, e, _)| *s <= idx && idx < *e);
-        if seg_i != last_seg {
-            // 进入新段（或未覆盖区）→ 词界状态重置
-            word_char = false;
-            last_seg = seg_i;
+    let len = text.len();
+    // capitalize 预标记：每个 capitalize 段独立 UAX#29 分词，标记词段内
+    // 首个排印字母单元（char::is_alphabetic）的字节起点；该字符经完整
+    // to_uppercase 展开（ß→SS 等多字符扩缩安全），无字母词段原样。
+    let mut cap_first = vec![false; len];
+    for &(s, e, kind) in segments {
+        if kind != TextTransformKind::Capitalize {
+            continue;
         }
-        let kind = seg_i
-            .map(|i| segments[i].2)
-            .unwrap_or(TextTransformKind::None);
+        let (s, e) = (s.min(len), e.max(s).min(len));
+        if let Some(seg) = text.get(s..e) {
+            for (wi, word) in seg.split_word_bound_indices() {
+                if let Some((oi, _)) = word.char_indices().find(|&(_, c)| c.is_alphabetic()) {
+                    cap_first[s + wi + oi] = true;
+                }
+            }
+        }
+    }
+    let mut out = String::with_capacity(len + 16);
+    let mut old_starts: Vec<usize> = Vec::with_capacity(len);
+    let mut new_starts: Vec<usize> = Vec::with_capacity(len + 1);
+    for (idx, ch) in text.char_indices() {
+        let kind = segments
+            .iter()
+            .find(|(s, e, _)| *s <= idx && idx < *e)
+            .map_or(TextTransformKind::None, |&(_, _, k)| k);
         old_starts.push(idx);
         new_starts.push(out.len());
-        push_transformed(&mut out, ch, kind, &mut word_char);
+        push_transformed(&mut out, ch, kind, cap_first[idx]);
     }
     new_starts.push(out.len());
     TransformedText {
@@ -110,20 +125,20 @@ pub(crate) fn transform(
     }
 }
 
-/// 单字符变换（capitalize 词界状态经 word_char 跨字符维持）。
-fn push_transformed(out: &mut String, ch: char, kind: TextTransformKind, word_char: &mut bool) {
+/// 单字符变换（capitalize：词段内首个排印字母单元已由 transform 按
+/// UAX#29 词界预标记，first_alpha 时整字 to_uppercase 展开，其余原样——
+/// 词界判定在分词侧，此处只执行）。
+fn push_transformed(out: &mut String, ch: char, kind: TextTransformKind, first_alpha: bool) {
     match kind {
         TextTransformKind::None => out.push(ch),
         TextTransformKind::Uppercase => out.extend(ch.to_uppercase()),
         TextTransformKind::Lowercase => out.extend(ch.to_lowercase()),
         TextTransformKind::Capitalize => {
-            let is_word = ch.is_alphanumeric();
-            if is_word && !*word_char {
+            if first_alpha {
                 out.extend(ch.to_uppercase());
             } else {
                 out.push(ch);
             }
-            *word_char = is_word;
         }
         TextTransformKind::FullWidth => {
             if ch == ' ' {
@@ -378,6 +393,62 @@ mod tests {
         let segs = segments("ab cd", &cap, &[]);
         let t = transform("ab cd", &segs);
         assert_eq!(t.text, "Ab Cd");
+    }
+
+    #[test]
+    fn capitalize_words_baseline() {
+        // 基线：UAX#29 空格分词，每词段首排印字母大写
+        let cap = style_of("c");
+        let segs = segments("hello world", &cap, &[]);
+        let t = transform("hello world", &segs);
+        assert_eq!(t.text, "Hello World");
+    }
+
+    #[test]
+    fn capitalize_apostrophe_keeps_word() {
+        // UAX#29 WB6/WB7：撇号（MidNumLet/Single_Quote）两侧不断词，
+        // "can't" 整体一个词段 → 仅 c 大写。css-text 可证修正：旧近似
+        // （词界=字母数字）遇标点重置词界，产出 "Can'T"。
+        let cap = style_of("c");
+        let segs = segments("can't", &cap, &[]);
+        let t = transform("can't", &segs);
+        assert_eq!(t.text, "Can't");
+    }
+
+    #[test]
+    fn capitalize_punctuation_prefix() {
+        // css-text-4 capitalize：词前标点不阻塞——"(" 与 ")" 为无字母
+        // 词段原样保留，"hello" 词段首字母大写。
+        let cap = style_of("c");
+        let segs = segments("(hello)", &cap, &[]);
+        let t = transform("(hello)", &segs);
+        assert_eq!(t.text, "(Hello)");
+    }
+
+    #[test]
+    fn capitalize_han_latin_word_break() {
+        // UAX#29：Han 表意文字未列入 WordBreakProperty.txt（WB=Any，U15 与
+        // U18 UCD 一致）→ WB999 两侧断词：每个汉字自成一词段（首排印字母
+        // 为 Han，大写无操作），"english" 自成词段 → e 大写。css-text 可证
+        // 修正：旧近似（is_alphanumeric 连续词界）产出 "中文english"。
+        let cap = style_of("c");
+        let segs = segments("中文english", &cap, &[]);
+        let t = transform("中文english", &segs);
+        assert_eq!(t.text, "中文English");
+    }
+
+    #[test]
+    fn capitalize_expands_sharp_s() {
+        // css-text-4：capitalize 首字母经完整大写映射（多字符展开），
+        // ß→SS；扩缩安全映射：ß 新占 0..2，后续字符起点经映射重写。
+        let cap = style_of("c");
+        let segs = segments("ßeta", &cap, &[]);
+        let t = transform("ßeta", &segs);
+        assert_eq!(t.text, "SSeta");
+        assert_eq!(t.map(0), 0); // ß 起点 → 首个 S
+        assert_eq!(t.map(1), 2); // ß 内部（非字符边界）→ Err 回退：下一字符新起点 = SS 之后
+        assert_eq!(t.map(2), 2); // e 起点
+        assert_eq!(t.map(5), 5); // 末尾
     }
 
     #[test]

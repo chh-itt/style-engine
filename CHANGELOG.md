@@ -23,6 +23,9 @@
   尺寸）/space（首尾贴边、余隙均匀分布）两轴语义；border-image repeat
   round/space 对九宫格边缘做逐边重标定（round/space 交叉取积）+ 端部
   裁剪。新增锁定测试 `tests/repeat_round_space.rs` 九件。
+- **text-transform: capitalize 对齐 css-text-4（feat）**：按 UAX#29 词界
+  分词（引入 unicode-segmentation 1.x，纯 Rust 零传递依赖）逐词首字符
+  大写化，替代旧空白分词；新增锁定测试五件。
 
 ### 阶段7 — A 批：语义补全
 
