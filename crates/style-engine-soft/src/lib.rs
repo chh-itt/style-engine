@@ -15,14 +15,14 @@
 //! | Gradient | ✓ | linear（CSS 角度）+ radial（RadialGeom 椭圆）+ conic（ConicGeom 扫角，C3）；停点色仅 Absolute（其余视作全透明），位置仅 Px/Percent（其余/None 自动均布） |
 //! | Shadow | ✓ blur 路径 | blur=0：外扩/内缩平移矩形（原路径）；blur>0：真形状遮罩（圆角矩形 out/inset）+ 3×盒模糊≈高斯（σ=blur/2、pad=⌈3σ⌉、整数滑动窗确定性）——仅纯平移矩阵，旋转/缩放回退平移矩形（记录偏差） |
 //! | Image | ✓ | 最近邻采样（缩放无滤波） |
-//! | Border | 近似 | 直边带（Solid；Dashed/Dotted 近似为实线；圆角未斜切） |
+//! | Border | ✓ P8 | 圆角弧逐像素（css-backgrounds §5.5 缩放 + 内缩内半径孔洞）+ 角域外角→内角对角线二分（方角=vello fill_tri 同法同含界）+ 角域实线（vello 虚线相位穿弧近似，记录）+ 直段 Dashed=3w/3w、Dotted=点径 w 间距 2w（vello 同参）|
 //! | PushClip/PopClip | ✓ | 矩形+圆角裁剪栈（裁剪矩节点随所在变换层） |
 //! | PushClipPath/PopClip | ✓ | 多边形裁剪（nonzero/evenodd 射线法，F3c） |
 //! | PushOpacity/PopOpacity | ✓ | 有界组 alpha（快照回混，ADR-0008；bbox 随变换层） |
 //! | PushBlend/PopBlend | ✓ | 混合组全 18 种模式（快照底 + 清区累积，pop 按模式合成；P1-2，css-compositing-1；plus-lighter/darker=预乘加法惯例） |
 //! | PushScroll/PopScroll | ✓ | 平移折叠进变换矩阵（嵌套累加） |
 //! | PushTransform/PopTransform | ✓ | 逆映射逐像素反解 + 4×4 子采样覆盖；无旋转缩放时走中心采样快路径（与整数盒逐位一致）；斜向边缘为锯齿（无 AA，记录） |
-//! | Text | ✓ 近似 | 最小 TrueType（cmap4/glyf 简单+复合字形）折线扫描线 16 级覆盖；基线 = Chromium 同法（hhea 取整 + 半行距）；无 kerning/GSUB、无合成粗斜体、span 覆盖忽略、仅 Start 对齐、max_advance 不折行（记录）；text-shadow blur>0=字形遮罩真模糊（装饰线不投影，Chromium 同语义）、blur=0=平移重发 |
+//! | Text | ✓ 近似 | 最小 TrueType（cmap4/glyf 简单+复合字形）折线扫描线 16 级覆盖；基线 = Chromium 同法（hhea 取整 + 半行距）；无 kerning/GSUB、无合成粗斜体、max_advance 不折行（记录）；span 覆盖消费（P7）；对齐 Center/Right/End 单行偏移消费（P8，parley 同语义：溢出钳起始、无约束宽=不偏移；尾随空白不悬挂记偏差）；text-shadow blur>0=字形+装饰线+span 形状全遮罩真模糊（P8）、blur=0=平移重发 |
 //!
 //! 字节零副作用：字体由宿主经 [`FontBank`] 提供（族名 → TTF 字节）；
 //! `render` 不带字体库时跳过 Text（v0 行为）。
@@ -34,7 +34,8 @@ pub mod filter;
 mod ttf;
 
 use style_engine::css::property::{
-    BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind, TextDecoStyleKind,
+    BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind, TextAlign,
+    TextDecoStyleKind,
 };
 use style_engine::css::value::{ColorValue, LengthPercentage};
 use style_engine::paint::{ConicGeom, FilterEffect, RadialGeom};
@@ -721,31 +722,162 @@ fn apply_op(
             radius,
             sides,
         } => {
-            // 直边带（Solid）；Dashed/Dotted 近似实线；圆角未斜切（记录）。
-            let bands = [
-                (*x, *y, *width, sides[0].width),                            // top
-                (*x + *width - sides[1].width, *y, sides[1].width, *height), // right
-                (*x, *y + *height - sides[3].width, *width, sides[3].width), // bottom
-                (*x, *y, sides[2].width, *height),                           // left
+            // P8（边框完备）：逐像素重建 vello draw_border 语义。外轮廓 =
+            // §5.5 缩放圆角（fill_rect radius 消费）；内轮廓 = 内缩盒 +
+            // 内半径（外半径 − 相邻边宽钳 0）孔洞；角域（相邻边宽 ∪ 外半
+            // 径方块）按外角→内角对角线二分（方角 = vello fill_tri 同法
+            // 同含界平分——owner 三角含对角边）；圆角弧与整个角域统一实
+            // 线（vello 虚线相位连续穿过弧段——B 级近似，记录）；直段
+            // Dashed = dash 3w/gap 3w、Dotted = 点径 w 圆心距 2w（vello
+            // with_dashes / round-cap 零长 dash 同参），相位自路径起点
+            // （方角 = 角方块内缘 / 圆角 = 弧端）起算。角域失主边由邻角
+            // 边接管（vello 方角 (false,true)→邻边整块同语义；圆角 vello
+            // 留缺、软填满，记录偏差）。旧实现底/左边宽互换 bug 一并消除。
+            let (x, y, w, h) = (*x, *y, *width, *height);
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            // 半径钳非负（CSS 解析层已禁负值，此处防御）后 §5.5 缩放。
+            let r = [
+                radius[0].max(0.0),
+                radius[1].max(0.0),
+                radius[2].max(0.0),
+                radius[3].max(0.0),
+                radius[4].max(0.0),
+                radius[5].max(0.0),
+                radius[6].max(0.0),
+                radius[7].max(0.0),
             ];
-            let _ = radius;
+            let fs = border_radius_scale(w, h, &r);
+            let ro = [
+                r[0] * fs,
+                r[1] * fs,
+                r[2] * fs,
+                r[3] * fs,
+                r[4] * fs,
+                r[5] * fs,
+                r[6] * fs,
+                r[7] * fs,
+            ];
+            let (wt, wr, wb, wl) = (
+                sides[0].width,
+                sides[1].width,
+                sides[2].width,
+                sides[3].width,
+            );
+            // 内半径：内弧与内缩边相切 → 分量按自身轴减相邻边宽，钳 0。
+            let ri = [
+                (ro[0] - wl).max(0.0),
+                (ro[1] - wt).max(0.0),
+                (ro[2] - wr).max(0.0),
+                (ro[3] - wt).max(0.0),
+                (ro[4] - wr).max(0.0),
+                (ro[5] - wb).max(0.0),
+                (ro[6] - wl).max(0.0),
+                (ro[7] - wb).max(0.0),
+            ];
+            // 角域方块（TL/TR/BR/BL 序）= max(相邻边宽, 外半径分量)。
+            let zones = [
+                (wl.max(ro[0]), wt.max(ro[1])),
+                (wr.max(ro[2]), wt.max(ro[3])),
+                (wr.max(ro[4]), wb.max(ro[5])),
+                (wl.max(ro[6]), wb.max(ro[7])),
+            ];
+            // 直段行程（vello 路径端点约定）：圆角 = 弧端，方角 = 角方块内缘。
+            let runs = [
+                (
+                    x + if ro[0] > 0.0 { ro[0] } else { wl },
+                    x + w - if ro[2] > 0.0 { ro[2] } else { wr },
+                ), // top
+                (
+                    y + if ro[3] > 0.0 { ro[3] } else { wt },
+                    y + h - if ro[5] > 0.0 { ro[5] } else { wb },
+                ), // right
+                (
+                    x + if ro[6] > 0.0 { ro[6] } else { wl },
+                    x + w - if ro[4] > 0.0 { ro[4] } else { wr },
+                ), // bottom
+                (
+                    y + if ro[1] > 0.0 { ro[1] } else { wt },
+                    y + h - if ro[7] > 0.0 { ro[7] } else { wb },
+                ), // left
+            ];
+            let side_on = |k: usize| sides[k].width > 0.0 && sides[k].style != BorderStyle::None;
             for (i, side) in sides.iter().enumerate() {
-                if side.width <= 0.0 || side.style == BorderStyle::None {
+                if !side_on(i) {
                     continue;
                 }
                 let comp = components_of_color(side.color.components);
-                let (bx, by, bw, bh) = bands[i];
-                fill_rect(
-                    canvas,
-                    clips,
-                    *mat,
-                    bx,
-                    by,
-                    bw,
-                    bh,
-                    &[0.0; 8],
-                    move |_, _| comp,
-                );
+                let (style, wid) = (side.style, side.width);
+                fill_rect(canvas, clips, *mat, x, y, w, h, &ro, move |sx, sy| {
+                    // 内轮廓孔洞 → 透明（vello 内缩盒同形；负内宽 = 全环）。
+                    if src_inside(sx, sy, x + wl, y + wt, w - wl - wr, h - wt - wb, &ri) {
+                        return [0.0; 4];
+                    }
+                    let (mut s, corner) =
+                        border_classify(sx, sy, x, y, w, h, wt, wr, wb, wl, &zones);
+                    // 角域失主边 → 邻角边接管；直段失主边无接管（相邻直
+                    // 段各自起于角域缘，不越过角域）。
+                    if !side_on(s) {
+                        match corner {
+                            Some(c) => {
+                                s = match c {
+                                    0 => 3, // TL：top 失主 → left
+                                    1 => 0, // TR：right 失主 → top
+                                    2 => 1, // BR：bottom 失主 → right
+                                    _ => 2, // BL：left 失主 → bottom
+                                };
+                            }
+                            None => return [0.0; 4],
+                        }
+                        if !side_on(s) {
+                            return [0.0; 4];
+                        }
+                    }
+                    if s != i {
+                        return [0.0; 4];
+                    }
+                    if corner.is_some() {
+                        // 角域统一实线（弧段与方角方块均为实形，不分样式）。
+                        return comp;
+                    }
+                    let (s0, s1) = runs[i];
+                    let along = if i == 0 || i == 2 { sx } else { sy };
+                    match style {
+                        BorderStyle::Solid => comp,
+                        BorderStyle::Dashed => {
+                            // 相位自 run 起点起算：首 dash [0, 3w)，周期 6w。
+                            let phase = (along - s0).max(0.0) % (6.0 * wid);
+                            if phase < 3.0 * wid { comp } else { [0.0; 4] }
+                        }
+                        BorderStyle::Dotted => {
+                            // 圆点：径 = w，圆心距 = 2w，沿 run 起点铺开
+                            // （vello round-cap 零长 dash 同参——首点在路
+                            // 径起点，圆心 ≤ run 终点入画）；环向以边中线
+                            // 圆盘判定。
+                            let (perp, half) = match i {
+                                0 => (sy - (y + wt * 0.5), wt * 0.5),
+                                1 => (sx - (x + w - wr * 0.5), wr * 0.5),
+                                2 => (sy - (y + h - wb * 0.5), wb * 0.5),
+                                _ => (sx - (x + wl * 0.5), wl * 0.5),
+                            };
+                            let rad2 = half * half;
+                            let k0 = ((along - s0) / (2.0 * wid)).floor().max(0.0);
+                            for k in [k0, k0 + 1.0] {
+                                let c = s0 + 2.0 * wid * k;
+                                if c > s1 + 1e-4 {
+                                    continue;
+                                }
+                                let d = along - c;
+                                if d * d + perp * perp <= rad2 {
+                                    return comp;
+                                }
+                            }
+                            [0.0; 4]
+                        }
+                        _ => [0.0; 4],
+                    }
+                });
             }
         }
         PaintOp::PushClip {
@@ -1065,29 +1197,66 @@ fn apply_op(
             letter_spacing,
             line_height,
             text_align,
+            max_advance,
             decorations,
             shadows,
             font_stretch,
             word_spacing,
             ..
         } => {
-            // v1 仅 Start 对齐（非 Start 按 Start 绘制——记录偏差）；
-            // P7：span 覆盖已消费（color/font_size/family 逐字符感知）；
-            // 合成粗斜体/max_advance 折行同属记录边界。
+            // P7：span 覆盖已消费（color/font_size/family 逐字符感知）。
+            // P8：对齐消费——仅 Center/Right/End 单行偏移（vello 同：仅
+            // 非 Start 走 layout.align）；Start/Left/Justify（单行 = 末
+            // 行）起始对齐不偏移（parley 0.11 末行不 justify）。对齐宽 =
+            // max_advance（CSS 内容盒语义）；None = 无约束 → parley 以
+            // 实测行宽为对齐宽（free_space = 0）→ 同样不偏移（同语义，
+            // 非 deviation）。行宽经 text_device_polys 步进测量（span 字
+            // 号覆盖感知，与绘制同源）；尾随空白不悬挂（parley 悬挂——
+            // 偏移差 = 尾随空白宽，记录偏差）。负偏移（行宽 > 对齐宽）
+            // 钳 0（parley 默认 align_when_overflowing=false——溢出行起
+            // 始对齐）。偏移作用于阴影与主体（同一 x0——CSS text-shadow
+            // 跟随已对齐文本）。
             // F3d：features/variations 无消费点（FontBank 无 GSUB/gvar，
             // 记录偏差）；stretch/word-spacing 伪合成消费（见 draw_text）。
-            let _ = text_align;
-            // F2（ADR-0022 D5）：影字先绘。P1c：blur>0 → 字形遮罩真模糊
-            // （装饰线不投影——Chromium 同语义；span 形状覆盖不投影——
-            // 基样式形状记偏差）；blur=0 → 原平移重发（含装饰线与 span
-            // 字形覆盖，影色单色）。
+            let mut x0 = *x;
+            if matches!(
+                text_align,
+                TextAlign::Center | TextAlign::Right | TextAlign::End
+            ) && let Some(avail) = *max_advance
+            {
+                let (_, _, line_w) = text_device_polys(
+                    *mat,
+                    *x,
+                    *y,
+                    text,
+                    color.components,
+                    *font_size,
+                    font_family,
+                    *letter_spacing,
+                    *line_height,
+                    *font_stretch,
+                    *word_spacing,
+                    bank,
+                    decorations,
+                    spans,
+                );
+                let dx = if matches!(text_align, TextAlign::Center) {
+                    (avail - line_w) * 0.5
+                } else {
+                    avail - line_w
+                };
+                x0 = *x + dx.max(0.0);
+            }
+            // F2（ADR-0022 D5）：影字先绘。P1c：blur>0 → 字形+装饰线+
+            // span 形状全遮罩真模糊（P8：装饰线与 span 形状覆盖均投影）；
+            // blur=0 → 原平移重发（含装饰线与 span 字形覆盖，影色单色）。
             for s in shadows.iter() {
                 if s.blur > 0.0 {
                     draw_text_shadow_blur(
                         canvas,
                         clips,
                         *mat,
-                        *x + s.dx,
+                        x0 + s.dx,
                         *y + s.dy,
                         text,
                         s.color.components,
@@ -1099,13 +1268,15 @@ fn apply_op(
                         *word_spacing,
                         bank,
                         s.blur,
+                        decorations,
+                        spans,
                     );
                 } else {
                     draw_text(
                         canvas,
                         clips,
                         *mat,
-                        *x + s.dx,
+                        x0 + s.dx,
                         *y + s.dy,
                         text,
                         s.color.components,
@@ -1125,7 +1296,7 @@ fn apply_op(
                 canvas,
                 clips,
                 *mat,
-                *x,
+                x0,
                 *y,
                 text,
                 color.components,
@@ -1196,6 +1367,75 @@ fn corner_ok(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> 
 /// 源空间矩形内含测试（含圆角）。
 fn src_inside(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> bool {
     px >= x && px < x + w && py >= y && py < y + h && corner_ok(px, py, x, y, w, h, r)
+}
+
+/// P8 边框：css-backgrounds §5.5 角半径缩放系数——相邻角半径之和超出
+/// 边长时全角缩放 f = min(Li/Si)（仅 Si > Li 参与；f ∈ (0,1]，和为零或
+/// 不超边则不缩放）。
+fn border_radius_scale(w: f32, h: f32, r: &[f32; 8]) -> f32 {
+    let mut f = 1.0f32;
+    for (len, sum) in [
+        (w, r[0] + r[2]), // top：tl + tr（x 分量）
+        (w, r[6] + r[4]), // bottom：bl + br（x 分量）
+        (h, r[1] + r[7]), // left：tl + bl（y 分量）
+        (h, r[3] + r[5]), // right：tr + br（y 分量）
+    ] {
+        if sum > len && sum > 0.0 {
+            f = f.min(len / sum);
+        }
+    }
+    f
+}
+
+/// P8 边框：角域/直段分类。角域（TL→TR→BR/BL 先者优先——盒小于角方的
+/// 退化重叠按序单归属，vello 同形叠绘不同）内按外角→内角对角线二分，
+/// 含界归 owner（vello fill_tri owner 三角含对角边同法）；角域外为四直
+/// 段互补划分（上下先行仅可达于角域未覆盖处）。返回 (边序, 角序)：
+/// top/right/bottom/left = 0..3，角 TL/TR/BR/BL = 0..3。
+#[allow(clippy::too_many_arguments)]
+fn border_classify(
+    sx: f32,
+    sy: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    wt: f32,
+    wr: f32,
+    wb: f32,
+    wl: f32,
+    zones: &[(f32, f32); 4],
+) -> (usize, Option<usize>) {
+    // TL：owner=top(0)，other=left(3)。对角线 (x,y)→(x+wl,y+wt)。
+    if sx < x + zones[0].0 && sy < y + zones[0].1 {
+        let d = (sx - x) * wt - (sy - y) * wl;
+        return (if d >= 0.0 { 0 } else { 3 }, Some(0));
+    }
+    // TR：owner=right(1)，other=top(0)。对角线 (x+w,y)→(x+w−wr,y+wt)。
+    if sx >= x + w - zones[1].0 && sy < y + zones[1].1 {
+        let d = (sx - x - w) * wt + (sy - y) * wr;
+        return (if d < 0.0 { 0 } else { 1 }, Some(1));
+    }
+    // BR：owner=bottom(2)，other=right(1)。对角线 (x+w,y+h)→(x+w−wr,y+h−wb)。
+    if sx >= x + w - zones[2].0 && sy >= y + h - zones[2].1 {
+        let d = -(sx - x - w) * wb + (sy - y - h) * wr;
+        return (if d < 0.0 { 1 } else { 2 }, Some(2));
+    }
+    // BL：owner=left(3)，other=bottom(2)。对角线 (x,y+h)→(x+wl,y+h−wb)。
+    if sx < x + zones[3].0 && sy >= y + h - zones[3].1 {
+        let d = -(sx - x) * wb - (sy - y - h) * wl;
+        return (if d < 0.0 { 2 } else { 3 }, Some(3));
+    }
+    // 直段带（互补划分）。
+    if sy < y + wt {
+        (0, None)
+    } else if sx >= x + w - wr {
+        (1, None)
+    } else if sy >= y + h - wb {
+        (2, None)
+    } else {
+        (3, None)
+    }
 }
 
 /// 源空间多边形内含测试（F3c ADR-0025；nonzero = 环数 ≠ 0，evenodd =
@@ -1787,9 +2027,10 @@ fn draw_blurred_shadow(
     composite_mask(canvas, clips, &mask, mw as i64, mx0, my0, color, bound);
 }
 
-/// text-shadow blur>0：字形折线 → 遮罩（[`fill_polygons_mask`]）→
-/// [`blur_alpha_u8`]（σ=blur/2）→ 着色合成。装饰线不投影（Chromium
-/// 同语义）；offset 已由调用方计入 x/y。
+/// text-shadow blur>0：字形+装饰线+span 形状覆盖折线 → 遮罩
+/// （[`fill_polygons_mask`]）→ [`blur_alpha_u8`]（σ=blur/2）→ 着色合成。
+/// P8：装饰线与 span 形状覆盖均投影（原「装饰线不投影」改为全形状投
+/// 影——与 blur=0 平移重发路径一致）；offset 已由调用方计入 x/y。
 #[allow(clippy::too_many_arguments)]
 fn draw_text_shadow_blur(
     canvas: &mut SoftCanvas,
@@ -1807,8 +2048,10 @@ fn draw_text_shadow_blur(
     word_spacing: Option<f32>,
     bank: &FontBank,
     blur: f32,
+    decorations: &[style_engine::paint::TextDecorationPaint],
+    spans: &[style_engine::paint::TextSpanPaint],
 ) {
-    let (glyphs, _) = text_device_polys(
+    let (glyphs, decos, _) = text_device_polys(
         mat,
         x,
         y,
@@ -1821,14 +2064,17 @@ fn draw_text_shadow_blur(
         font_stretch,
         word_spacing,
         bank,
-        &[],
-        // span 形状覆盖不投影（基样式形状记偏差——P7）。
-        &[],
+        decorations,
+        spans,
     );
-    let flat: Vec<Vec<(f32, f32)>> = glyphs
+    let mut flat: Vec<Vec<(f32, f32)>> = glyphs
         .into_iter()
         .flat_map(|(_, contours)| contours)
         .collect();
+    // P8：装饰线形状并入模糊遮罩（bbox 随之覆盖装饰线）。
+    for (_, poly) in decos {
+        flat.push(poly);
+    }
     if flat.is_empty() {
         return;
     }
@@ -1864,6 +2110,8 @@ fn draw_text_shadow_blur(
 /// fill_polygons 粒度，重叠字形逐次 src-over）+ 装饰线矩形（附色，
 /// 填充序与原实现一致）。字体未命中 → 空组。供 [`draw_text`] 与
 /// [`draw_text_shadow_blur`] 共用（P1c 重构，光栅输出逐位不变）。
+/// 第三返回值 = 行宽（末 pen − x；span 字号/字距覆盖感知——P8 对齐
+/// 测量与绘制同源，避免重复步进逻辑）。
 #[allow(clippy::too_many_arguments)]
 fn text_device_polys(
     mat: Mat,
@@ -1880,7 +2128,7 @@ fn text_device_polys(
     bank: &FontBank,
     decorations: &[style_engine::paint::TextDecorationPaint],
     spans: &[style_engine::paint::TextSpanPaint],
-) -> (GlyphGroups, DecoGroups) {
+) -> (GlyphGroups, DecoGroups, f32) {
     let mut glyph_groups: GlyphGroups = Vec::new();
     let mut deco_groups: DecoGroups = Vec::new();
     // P7（T5c soft 补齐）：逐字符 span 感知——字节偏移归属 span 取
@@ -1895,7 +2143,7 @@ fn text_device_polys(
         ttf::SoftFont::parse(data)
     };
     let Some(mut font) = resolve_family(family) else {
-        return (glyph_groups, deco_groups); // 未命中字体 → 跳过该 Text（记录偏差）
+        return (glyph_groups, deco_groups, 0.0); // 未命中字体 → 跳过该 Text（记录偏差）
     };
     let base_scale = font.scale_for(font_size);
     let asc = font.ascender as f32 * base_scale;
@@ -2050,7 +2298,7 @@ fn text_device_polys(
             }
         }
     }
-    (glyph_groups, deco_groups)
+    (glyph_groups, deco_groups, pen - x)
 }
 
 /// Text op 光栅化：家族命中 [`FontBank`] → 最小 TrueType → 折线 → 扫描线。
@@ -2078,7 +2326,7 @@ fn draw_text(
     decorations: &[style_engine::paint::TextDecorationPaint],
     spans: &[style_engine::paint::TextSpanPaint],
 ) {
-    let (glyph_groups, deco_groups) = text_device_polys(
+    let (glyph_groups, deco_groups, _) = text_device_polys(
         mat,
         x,
         y,
@@ -2620,35 +2868,35 @@ mod tests {
                 }),
                 stops: vec![
                     ColorStop {
-                        color: red.clone(),
+                        color: red,
                         position: p(0.0),
                     },
                     ColorStop {
-                        color: red.clone(),
+                        color: red,
                         position: p(0.25),
                     },
                     ColorStop {
-                        color: blue.clone(),
+                        color: blue,
                         position: p(0.25),
                     },
                     ColorStop {
-                        color: blue.clone(),
+                        color: blue,
                         position: p(0.5),
                     },
                     ColorStop {
-                        color: red.clone(),
+                        color: red,
                         position: p(0.5),
                     },
                     ColorStop {
-                        color: red.clone(),
+                        color: red,
                         position: p(0.75),
                     },
                     ColorStop {
-                        color: blue.clone(),
+                        color: blue,
                         position: p(0.75),
                     },
                     ColorStop {
-                        color: blue.clone(),
+                        color: blue,
                         position: p(1.0),
                     },
                 ],
@@ -3304,7 +3552,7 @@ mod tests {
         p.copy_from_slice(&c.pixels[0..4]);
         assert_eq!(p, [0, 0, 0, 255], "brightness(0) 红→黑");
         // 空内容区采样点 (6,1)：索引 = (y*8+x)*4
-        p.copy_from_slice(&c.pixels[(1 * 8 + 6) * 4..(1 * 8 + 6) * 4 + 4]);
+        p.copy_from_slice(&c.pixels[(8 + 6) * 4..(8 + 6) * 4 + 4]);
         assert_eq!(p, [255, 255, 255, 255], "空内容区保留快照白");
     }
 
@@ -3380,5 +3628,358 @@ mod tests {
         let h_span = ink_bbox(&cs).map(|(_, y0, _, y1)| y1 - y0);
         let (hb, hs) = (h_base.unwrap(), h_span.unwrap());
         assert!(hs > hb, "span 32px 字形应更高: {hs} vs {hb}");
+    }
+
+    // ===== P8：边框完备（圆角 / Dashed / Dotted / 失主接管） =====
+
+    use style_engine::css::property::BorderStyle;
+    use style_engine::paint::BorderSide;
+
+    /// 边框边速构（P8 测试用）。
+    fn bside(width: f32, style: BorderStyle, color: [f32; 4]) -> BorderSide {
+        BorderSide {
+            width,
+            style,
+            color: rgba(color),
+        }
+    }
+
+    fn op_border(
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: [f32; 8],
+        sides: [BorderSide; 4],
+    ) -> PaintOp {
+        PaintOp::Border {
+            x,
+            y,
+            width: w,
+            height: h,
+            radius,
+            sides,
+        }
+    }
+
+    /// 红边墨迹判定（g 通道：红边 g≈0，白底 g=255）。
+    fn border_ink(c: &SoftCanvas, x: u32, y: u32) -> bool {
+        pixel(c, x, y)[1] < 128
+    }
+
+    fn count_ink_window(c: &SoftCanvas, x0: u32, x1: u32, y0: u32, y1: u32) -> usize {
+        let mut n = 0;
+        for y in y0..=y1 {
+            for x in x0..x1 {
+                if pixel(c, x, y)[1] < 200 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn rounded_border_corner_diagonal_ownership() {
+        // P8：圆角环带 + 对角线二分。盒 (4,4,24,24)、r=8、w=2：外侧弧内
+        // 为环带；TL 角域对角线上侧=top、下侧=left（(8,6) 墨=上、(6,8)
+        // 墨=左）；弧外角点 (4,4) 留白；内孔 (12,12) 留白。
+        let sides = [
+            bside(2.0, BorderStyle::Solid, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Solid, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Solid, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Solid, [1.0, 0.0, 0.0, 1.0]),
+        ];
+        let mut list = DisplayList::default();
+        list.ops
+            .push(op_border(4.0, 4.0, 24.0, 24.0, [8.0; 8], sides));
+        let c = render_with_fonts(&list, 32, 32, [255, 255, 255, 255], &font_bank());
+        assert!(border_ink(&c, 8, 6), "TL 弧上侧应为 top 墨");
+        assert!(border_ink(&c, 6, 8), "TL 弧下侧应为 left 墨");
+        assert!(!border_ink(&c, 4, 4), "外弧外角点应留白");
+        assert!(!border_ink(&c, 12, 12), "内孔中心应留白");
+    }
+
+    #[test]
+    fn border_radius_scale_clamps_overlapping_radii() {
+        // §5.5：相邻半径和超边长时按 f=min(边长/和) 缩放；不超则 1.0。
+        let f_full = border_radius_scale(100.0, 50.0, &[60.0; 8]);
+        assert!(
+            (f_full - 50.0 / 120.0).abs() < 1e-6,
+            "全部维度超限 → 取最小比值: {f_full}"
+        );
+        let f_h = border_radius_scale(100.0, 50.0, &[30.0; 8]);
+        assert!((f_h - 50.0 / 60.0).abs() < 1e-6, "仅纵向超限: {f_h}");
+        assert_eq!(border_radius_scale(100.0, 50.0, &[20.0; 8]), 1.0);
+    }
+
+    #[test]
+    fn dashed_border_run_phases_and_corner_solid() {
+        // P8：Dashed = dash 3w / gap 3w，相位自直段起点起算（w=2 →
+        // dash 6 / 周期 12）。顶 run [2,28]：dash [2,8) gap [8,14)
+        // dash [14,20)…；角域（[0,2)²）恒实线（不分样式）；左右 run
+        // [2,8] 全 dash 段内。
+        let sides = [
+            bside(2.0, BorderStyle::Dashed, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Dashed, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Dashed, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Dashed, [1.0, 0.0, 0.0, 1.0]),
+        ];
+        let mut list = DisplayList::default();
+        list.ops
+            .push(op_border(0.0, 0.0, 30.0, 10.0, [0.0; 8], sides));
+        let c = render_with_fonts(&list, 32, 12, [255, 255, 255, 255], &font_bank());
+        assert!(border_ink(&c, 3, 1), "首 dash 段 [2,8) 应有墨");
+        assert!(border_ink(&c, 6, 1), "首 dash 尾应有墨");
+        assert!(!border_ink(&c, 8, 1), "gap [8,14) 应留白");
+        assert!(!border_ink(&c, 12, 1), "gap 尾应留白");
+        assert!(border_ink(&c, 14, 1), "第二 dash [14,20) 应有墨");
+        assert!(border_ink(&c, 1, 0), "TL 角域恒实线（不分虚线相位）");
+        assert!(border_ink(&c, 29, 3), "右边 run [2,8] 全在首 dash 内");
+        assert!(border_ink(&c, 1, 6), "左边 run 下段仍在首 dash 内");
+        assert!(border_ink(&c, 3, 8), "底边首 dash 应有墨");
+        assert!(!border_ink(&c, 8, 8), "底边 gap 应留白");
+    }
+
+    #[test]
+    fn dotted_border_dot_centers_and_holes() {
+        // P8：Dotted = 点径 w（半径 1，w=2）、圆心距 2w=4、圆心自 run
+        // 起点铺开、圆心 ≤ run 终点入画。顶 run [2,30]：圆心 2+4k；
+        // 中点 (4,1) 处于两圆外 → 留白；径向超出半径 → 留白；角域恒
+        // 实线；右边 run [2,8] 圆心 {2,6}。
+        let sides = [
+            bside(2.0, BorderStyle::Dotted, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Dotted, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Dotted, [1.0, 0.0, 0.0, 1.0]),
+            bside(2.0, BorderStyle::Dotted, [1.0, 0.0, 0.0, 1.0]),
+        ];
+        let mut list = DisplayList::default();
+        list.ops
+            .push(op_border(0.0, 0.0, 32.0, 10.0, [0.0; 8], sides));
+        let c = render_with_fonts(&list, 34, 12, [255, 255, 255, 255], &font_bank());
+        assert!(border_ink(&c, 2, 1), "首圆心 (2,1) 应有墨");
+        assert!(!border_ink(&c, 4, 1), "两圆之间 (4,1) 应留白");
+        assert!(border_ink(&c, 6, 1), "第二圆心 (6,1) 应有墨");
+        assert!(border_ink(&c, 2, 0), "首圆顶部应有墨");
+        assert!(!border_ink(&c, 2, 2), "首圆下方（孔内）应留白");
+        assert!(border_ink(&c, 0, 1), "TL 角域恒实线");
+        assert!(border_ink(&c, 31, 2), "右边首圆 (y=2) 应有墨");
+        assert!(!border_ink(&c, 31, 4), "右边两圆之间应留白");
+    }
+
+    #[test]
+    fn border_missing_side_corner_takes_neighbor() {
+        // P8：角域失主边由邻角边接管。top=None、其余实线 w=4：TL 角域
+        // 对角线上侧（原 top）改由 left 全域接管（含弧段）；内孔在
+        // ri=(4,6) 内弧外留白。old 底/左宽互换 bug 无回归。
+        let sides = [
+            bside(2.0, BorderStyle::None, [1.0, 0.0, 0.0, 1.0]),
+            bside(4.0, BorderStyle::Solid, [1.0, 0.0, 0.0, 1.0]),
+            bside(4.0, BorderStyle::Solid, [1.0, 0.0, 0.0, 1.0]),
+            bside(4.0, BorderStyle::Solid, [1.0, 0.0, 0.0, 1.0]),
+        ];
+        let mut list = DisplayList::default();
+        list.ops
+            .push(op_border(4.0, 4.0, 24.0, 24.0, [8.0; 8], sides));
+        let c = render_with_fonts(&list, 32, 32, [255, 255, 255, 255], &font_bank());
+        assert!(border_ink(&c, 7, 5), "TL 对角上侧应经接管得 left 墨");
+        assert!(border_ink(&c, 7, 6), "TL 对角下侧本为 left 墨");
+        assert!(border_ink(&c, 6, 7), "TL 弧下侧 left 墨");
+        assert!(
+            border_ink(&c, 9, 6),
+            "内弧（rx=4/ry=6 不对称）外缘仍属 left 环带"
+        );
+        assert!(
+            !border_ink(&c, 8, 9),
+            "内弧（ry=6 高于 rx=4）内应留白（孔）"
+        );
+        assert!(border_ink(&c, 12, 25), "底边实线应有墨");
+        assert!(!border_ink(&c, 12, 3), "top=None 直段应无墨");
+    }
+
+    // ===== P8：文本对齐 =====
+
+    /// 文本 op 变体：指定对齐与对齐宽（P8 测试用）。
+    fn op_text_align(
+        x: f32,
+        y: f32,
+        text: &str,
+        align: style_engine::css::property::TextAlign,
+        max_advance: Option<f32>,
+    ) -> PaintOp {
+        let mut op = op_text(x, y, text);
+        if let PaintOp::Text {
+            text_align: a,
+            max_advance: ma,
+            ..
+        } = &mut op
+        {
+            *a = align;
+            *ma = max_advance;
+        }
+        op
+    }
+
+    fn render_one(op: PaintOp, w: u32, h: u32) -> SoftCanvas {
+        let mut list = DisplayList::default();
+        list.ops.push(op);
+        render_with_fonts(&list, w, h, [255, 255, 255, 255], &font_bank())
+    }
+
+    #[test]
+    fn text_align_center_right_end_offset() {
+        // P8：仅 Center/Right/End 单行偏移（avail=max_advance=60）；
+        // 偏移只动 x；Center ≈ Right 之半（±1px 栅格）；End ≡ Right
+        // （LTR 末端）；Justify（单行=末行）/Left ≡ Start。
+        use style_engine::css::property::TextAlign;
+        let start = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Start, Some(60.0)),
+            80,
+            32,
+        );
+        let center = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Center, Some(60.0)),
+            80,
+            32,
+        );
+        let right = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Right, Some(60.0)),
+            80,
+            32,
+        );
+        let end = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::End, Some(60.0)),
+            80,
+            32,
+        );
+        let justify = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Justify, Some(60.0)),
+            80,
+            32,
+        );
+        let left = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Left, Some(60.0)),
+            80,
+            32,
+        );
+        let (sx0, sy0, _, _) = ink_bbox(&start).expect("start 有墨");
+        let (cx0, cy0, _, _) = ink_bbox(&center).expect("center 有墨");
+        let (rx0, _, _, _) = ink_bbox(&right).expect("right 有墨");
+        assert!(cx0 > sx0 + 10, "center 应右移: {cx0} vs {sx0}");
+        assert!(rx0 > cx0 + 10, "right 应比 center 更右: {rx0} vs {cx0}");
+        let d_c = (cx0 - sx0) as i32;
+        let d_r = (rx0 - sx0) as i32;
+        assert!(
+            (d_r - 2 * d_c).abs() <= 1,
+            "center 偏移应≈right 之半: {d_c} vs {d_r}"
+        );
+        assert_eq!(cy0, sy0, "对齐不动 y");
+        assert_eq!(end.pixels, right.pixels, "End ≡ Right（LTR 单行）");
+        assert_eq!(justify.pixels, start.pixels, "Justify 单行=末行 → 不偏移");
+        assert_eq!(left.pixels, start.pixels, "Left ≡ Start");
+    }
+
+    #[test]
+    fn text_align_overflow_clamps_to_start() {
+        // P8：行宽 > 对齐宽 → 负偏移钳 0（parley 默认
+        // align_when_overflowing=false 同语义）→ Right ≡ Start 逐字节。
+        use style_engine::css::property::TextAlign;
+        // "Hello World" 16px 实测 ≈ 90px，远超 40px 对齐宽。
+        let start = render_one(
+            op_text_align(10.0, 12.0, "Hello World", TextAlign::Start, Some(40.0)),
+            128,
+            32,
+        );
+        let right = render_one(
+            op_text_align(10.0, 12.0, "Hello World", TextAlign::Right, Some(40.0)),
+            128,
+            32,
+        );
+        assert_eq!(right.pixels, start.pixels, "溢出钳 0 → Right ≡ Start");
+    }
+
+    #[test]
+    fn text_align_without_avail_keeps_start() {
+        // P8：max_advance None = 无约束 → parley 以实测行宽为对齐宽
+        // （free_space=0）→ 不偏移（同语义，非 deviation）。
+        use style_engine::css::property::TextAlign;
+        let start = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Start, None),
+            80,
+            32,
+        );
+        let right = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Right, None),
+            80,
+            32,
+        );
+        let center = render_one(
+            op_text_align(10.0, 12.0, "Hi", TextAlign::Center, None),
+            80,
+            32,
+        );
+        assert_eq!(right.pixels, start.pixels, "无 avail → Right 不偏移");
+        assert_eq!(center.pixels, start.pixels, "无 avail → Center 不偏移");
+    }
+
+    #[test]
+    fn text_shadow_blur_projects_deco_and_span_shapes() {
+        // P8：blur>0 阴影投影装饰线与 span 字号覆盖形状（原「装饰线不投
+        // 影」改为全形状投影——与 blur=0 平移重发一致）。
+        // A = 6px 下划线 + 'b' 32px span + 红影（dx=48, blur=4, σ=2）；
+        // B = 同位纯 16px 文本 + 同影。判定窗口避开 B 的字形模糊尾：
+        // 下划线影子带（行 30-31、x ≥ 44）仅 A 有墨（16px 字形底 27，
+        // 3.5px 外尾亮 <5%）；32px 'b' 顶冠（行 4-8、x 68-84）仅 A 有
+        // 墨（16px 字形顶 ≈14.7，6px 模糊支撑外）；整幅 A 墨数 > B。
+        use style_engine::paint::TextShadowPaint;
+        let shadow = || TextShadowPaint {
+            dx: 48.0,
+            dy: 0.0,
+            blur: 4.0,
+            color: rgba([1.0, 0.0, 0.0, 1.0]),
+        };
+        let mut full = op_text(10.0, 12.0, "ab");
+        if let PaintOp::Text {
+            shadows,
+            decorations,
+            ..
+        } = &mut full
+        {
+            *shadows = vec![shadow()];
+            decorations.push(style_engine::paint::TextDecorationPaint {
+                line: 1,
+                style: style_engine::css::property::TextDecoStyleKind::Solid,
+                color: rgba([0.0, 0.0, 0.0, 1.0]),
+                thickness_px: 6.0,
+            });
+        }
+        if let PaintOp::Text { spans, .. } = &mut full {
+            spans.push(style_engine::paint::TextSpanPaint {
+                start: 1,
+                end: 2,
+                color: rgba([0.0, 0.0, 0.0, 1.0]),
+                font_size: 32.0,
+                font_weight: 400.0,
+                italic: false,
+                font_family: FontFamilyList(smallvec![FamilyName::Named("DejaVu Sans".into())]),
+            });
+        }
+        let mut plain = op_text(10.0, 12.0, "ab");
+        if let PaintOp::Text { shadows, .. } = &mut plain {
+            *shadows = vec![shadow()];
+        }
+        let ca = render_one(full, 96, 48);
+        let cb = render_one(plain, 96, 48);
+        let deco_a = count_ink_window(&ca, 44, 92, 30, 31);
+        let deco_b = count_ink_window(&cb, 44, 92, 30, 31);
+        assert!(deco_a > 10, "A 应见下划线影子带（{deco_a}）");
+        assert_eq!(deco_b, 0, "B 无装饰线影子（{deco_b}）");
+        let span_a = count_ink_window(&ca, 68, 84, 4, 8);
+        let span_b = count_ink_window(&cb, 68, 84, 4, 8);
+        assert!(span_a > 5, "A 应见 32px 'b' 影顶冠（{span_a}）");
+        assert_eq!(span_b, 0, "B 16px 字形顶不在窗口（{span_b}）");
+        let total_a = count_ink_window(&ca, 0, 96, 0, 47);
+        let total_b = count_ink_window(&cb, 0, 96, 0, 47);
+        assert!(total_a > total_b, "A 形状更多：{total_a} vs {total_b}");
     }
 }

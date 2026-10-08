@@ -26,6 +26,12 @@
 - **text-transform: capitalize 对齐 css-text-4（feat）**：按 UAX#29 词界
   分词（引入 unicode-segmentation 1.x，纯 Rust 零传递依赖）逐词首字符
   大写化，替代旧空白分词；新增锁定测试五件。
+- **soft sink P8 补全（feat）**：PaintOp::Border 逐像素重建 vello 语义——
+  §5.5 半径缩放、不对称内半径孔洞、角域对角线归属、Dashed（3w/3w 相位自
+  run 起点）与 Dotted（径 w 距 2w）、失主边邻角接管；PaintOp::Text 补
+  Center/Right/End 对齐（max_advance 源空间偏移、溢出钳回起点，parley
+  0.11 语义）；模糊 text-shadow 投影扩至装饰线与多 span 形状。soft 53 项
+  测试全绿。
 
 ### 阶段7 — A 批：语义补全
 
