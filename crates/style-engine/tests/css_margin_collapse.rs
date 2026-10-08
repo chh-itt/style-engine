@@ -34,11 +34,10 @@ fn parent_child_top_margin_collapses_through() {
     // 父无 border/padding/行内内容 → 首子 margin-top 塌出父外：父子
     // border-box 同位（y=30），父高不含子 margin。
     let mut e: StyleEngine<u64> = StyleEngine::new();
-    assert!(e
-        .set_stylesheet(
-            "div.p { width: 200px; } div.c { height: 40px; margin-top: 30px; }"
-        )
-        .is_clean());
+    assert!(
+        e.set_stylesheet("div.p { width: 200px; } div.c { height: 40px; margin-top: 30px; }")
+            .is_clean()
+    );
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "c")).is_ok());
     let (px, py, pw, ph) = box_of(&mut e, 1);
@@ -53,13 +52,14 @@ fn empty_block_self_collapses_between_siblings() {
     // 空块（无高/边框/内边距）自塌穿：a(mb 20) e(mt 20/mb 30) b(mt 30)
     // → 三者并为一个塌缩集 max(20,20,30,30)=30。
     let mut e: StyleEngine<u64> = StyleEngine::new();
-    assert!(e
-        .set_stylesheet(
+    assert!(
+        e.set_stylesheet(
             "div.p { width: 200px; } div.a { height: 40px; margin-bottom: 20px; } \
              div.e { margin-top: 20px; margin-bottom: 30px; } \
              div.b { height: 40px; margin-top: 30px; }"
         )
-        .is_clean());
+        .is_clean()
+    );
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "a")).is_ok());
     assert!(e.insert(Some(1), 3, node("div", "e")).is_ok());
@@ -78,12 +78,13 @@ fn empty_block_self_collapses_between_siblings() {
 fn negative_margins_collapse_max_positive_plus_min_negative() {
     // 塌缩集 = 正 max + 负 min：mb 20 与 mt −10 → 间距 10。
     let mut e: StyleEngine<u64> = StyleEngine::new();
-    assert!(e
-        .set_stylesheet(
+    assert!(
+        e.set_stylesheet(
             "div.p { width: 200px; } div.a { height: 40px; margin-bottom: 20px; } \
              div.b { height: 40px; margin-top: -10px; }"
         )
-        .is_clean());
+        .is_clean()
+    );
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "a")).is_ok());
     assert!(e.insert(Some(1), 3, node("div", "b")).is_ok());
@@ -96,12 +97,13 @@ fn negative_margins_collapse_max_positive_plus_min_negative() {
 fn float_child_margin_not_collapsed_with_parent() {
     // 浮动脱离常规流，不与父塌缩：f.y = margin-top 30。
     let mut e: StyleEngine<u64> = StyleEngine::new();
-    assert!(e
-        .set_stylesheet(
+    assert!(
+        e.set_stylesheet(
             "div.p { width: 200px; height: 120px; } \
              div.f { float: left; width: 60px; height: 40px; margin-top: 30px; }"
         )
-        .is_clean());
+        .is_clean()
+    );
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "f")).is_ok());
     let (fx, fy, _fw, _fh) = box_of(&mut e, 2);
@@ -114,14 +116,15 @@ fn sibling_collapse_survives_settle_passes() {
     // 塌缩间距 + 下游结算 pass（floats/lines）共存不扰动：兄弟折叠 30、
     // 右浮盒落右上、后续块正常排布。
     let mut e: StyleEngine<u64> = StyleEngine::new();
-    assert!(e
-        .set_stylesheet(
+    assert!(
+        e.set_stylesheet(
             "div.p { width: 200px; } div.a { height: 40px; margin-bottom: 20px; } \
              div.b { height: 40px; margin-top: 30px; } \
              div.fl { float: right; width: 30px; height: 30px; } \
              div.c { height: 20px; }"
         )
-        .is_clean());
+        .is_clean()
+    );
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "a")).is_ok());
     assert!(e.insert(Some(1), 3, node("div", "b")).is_ok());
@@ -141,12 +144,13 @@ fn padding_longhand_applied_and_blocks_collapse() {
     // padding-top 长手生效（修复路由 bug）：子 y = padding 10 + margin 30
     // = 40；margin 不再穿透父（§8.4 阻隔条件：padding 非零）。
     let mut e: StyleEngine<u64> = StyleEngine::new();
-    assert!(e
-        .set_stylesheet(
+    assert!(
+        e.set_stylesheet(
             "div.p { width: 200px; padding-top: 10px; } \
              div.c { height: 40px; margin-top: 30px; }"
         )
-        .is_clean());
+        .is_clean()
+    );
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "c")).is_ok());
     let (_px, py, _pw, ph) = box_of(&mut e, 1);
@@ -161,14 +165,15 @@ fn padding_longhand_calc_and_logical_inline() {
     // 长手 calc 直通结算（正值腿——原测试仅负值钳位腿）：calc(0% + 10px)
     // → 内容左缩 10；逻辑长手 padding-inline-start（ltr → left）同效。
     let mut e: StyleEngine<u64> = StyleEngine::new();
-    assert!(e
-        .set_stylesheet(
+    assert!(
+        e.set_stylesheet(
             "div.p { width: 120px; padding-left: calc(0% + 10px); } \
              div.c { width: 100px; height: 10px; } \
              div.q { width: 120px; padding-inline-start: 15px; } \
              div.d { width: 100px; height: 10px; }"
         )
-        .is_clean());
+        .is_clean()
+    );
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "c")).is_ok());
     assert!(e.insert(Some(1), 3, node("div", "q")).is_ok());

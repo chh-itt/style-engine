@@ -307,12 +307,7 @@ fn content_counters_joins_scope_frames() {
     );
     let texts = text_ops(&mut e);
     assert!(
-        texts
-            == vec![
-                "1.1".to_string(),
-                "1.1".to_string(),
-                "1.1".to_string()
-            ],
+        texts == vec!["1.1".to_string(), "1.1".to_string(), "1.1".to_string()],
         "counters() join 应为 1.1/1.1/1.1，实得 {texts:?}"
     );
 }
