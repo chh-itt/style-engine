@@ -12,11 +12,15 @@ use style_engine::tree::StyleNode;
 fn engine_grid(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("g".to_string());
+    let root = StyleNode {
+        id: Some("g".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut c = StyleNode::default();
-    c.id = Some("c".to_string());
+    let c = StyleNode {
+        id: Some("c".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, c).unwrap();
     engine
 }

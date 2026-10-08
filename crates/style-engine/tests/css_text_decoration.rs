@@ -23,12 +23,16 @@ fn engine_deco(sheet: &str, text: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.add_font(FONT.to_vec());
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut n = StyleNode::default();
-    n.id = Some("t".to_string());
-    n.text = Some(text.to_string());
+    let n = StyleNode {
+        id: Some("t".to_string()),
+        text: Some(text.to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, n).unwrap();
     engine
 }

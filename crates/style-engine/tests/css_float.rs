@@ -12,14 +12,20 @@ use style_engine::tree::StyleNode;
 fn engine_float(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut f = StyleNode::default();
-    f.id = Some("f".to_string());
+    let f = StyleNode {
+        id: Some("f".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, f).unwrap();
-    let mut s = StyleNode::default();
-    s.id = Some("s".to_string());
+    let s = StyleNode {
+        id: Some("s".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 3, s).unwrap();
     engine
 }
@@ -74,14 +80,20 @@ fn float_stacks_along_band() {
     e.set_stylesheet(
         "#a { float: left; width: 50px; height: 30px; } #b { float: left; width: 60px; height: 30px; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(None, 1, root).unwrap();
-    let mut a = StyleNode::default();
-    a.id = Some("a".to_string());
+    let a = StyleNode {
+        id: Some("a".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, a).unwrap();
-    let mut b = StyleNode::default();
-    b.id = Some("b".to_string());
+    let b = StyleNode {
+        id: Some("b".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 3, b).unwrap();
     let (ax, ay, _aw, _ah) = box_of(&mut e, 2);
     let (bx, by, _bw, _bh) = box_of(&mut e, 3);

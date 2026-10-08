@@ -14,8 +14,10 @@ use style_engine::tree::StyleNode;
 fn root_with_sheet(id: &str, sheet: &str) -> (StyleEngine<u64>, u64) {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut node = StyleNode::default();
-    node.id = Some(id.to_string());
+    let node = StyleNode {
+        id: Some(id.to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, node).unwrap();
     (engine, 1)
 }
@@ -28,10 +30,9 @@ fn multi_root_overlays_anchor_at_origin() {
          #pop1 { width: 50px; height: 40px; } \
          #pop2 { width: 30px; height: 20px; }",
     );
-    let mk = |id: &str| {
-        let mut n = StyleNode::default();
-        n.id = Some(id.to_string());
-        n
+    let mk = |id: &str| StyleNode {
+        id: Some(id.to_string()),
+        ..StyleNode::default()
     };
     engine.insert(None, 1, mk("doc")).unwrap();
     engine.insert(None, 2, mk("pop1")).unwrap();
@@ -59,10 +60,9 @@ fn overlay_root_explicit_position_honored() {
         "#doc { width: 100px; height: 100px; } \
          #pop { position: absolute; top: 10px; left: 20px; width: 30px; height: 30px; }",
     );
-    let mk = |id: &str| {
-        let mut n = StyleNode::default();
-        n.id = Some(id.to_string());
-        n
+    let mk = |id: &str| StyleNode {
+        id: Some(id.to_string()),
+        ..StyleNode::default()
     };
     engine.insert(None, 1, mk("doc")).unwrap();
     engine.insert(None, 2, mk("pop")).unwrap();
@@ -81,10 +81,9 @@ fn top_layer_paint_order() {
          #a { width: 30px; height: 30px; background-color: #0f0; } \
          #b { width: 30px; height: 30px; background-color: #00f; }",
     );
-    let mk = |id: &str| {
-        let mut n = StyleNode::default();
-        n.id = Some(id.to_string());
-        n
+    let mk = |id: &str| StyleNode {
+        id: Some(id.to_string()),
+        ..StyleNode::default()
     };
     engine.insert(None, 1, mk("doc")).unwrap();
     engine.insert(None, 2, mk("a")).unwrap();
@@ -155,10 +154,9 @@ fn overlay_roots_are_cascade_roots() {
     engine.set_stylesheet(
         "#doc { cursor: text; caret-color: #0891b2; width: 100px; height: 100px; }",
     );
-    let mk = |id: &str| {
-        let mut n = StyleNode::default();
-        n.id = Some(id.to_string());
-        n
+    let mk = |id: &str| StyleNode {
+        id: Some(id.to_string()),
+        ..StyleNode::default()
     };
     engine.insert(None, 1, mk("doc")).unwrap();
     engine.insert(None, 2, mk("pop")).unwrap();
@@ -178,10 +176,9 @@ fn remove_semantics_overlay_vs_document() {
         "#doc { width: 100px; height: 100px; } \
          #pop { width: 30px; height: 30px; }",
     );
-    let mk = |id: &str| {
-        let mut n = StyleNode::default();
-        n.id = Some(id.to_string());
-        n
+    let mk = |id: &str| StyleNode {
+        id: Some(id.to_string()),
+        ..StyleNode::default()
     };
     engine.insert(None, 1, mk("doc")).unwrap();
     engine.insert(None, 2, mk("pop")).unwrap();
@@ -214,8 +211,10 @@ fn set_top_layer_contract() {
         engine.set_top_layer(99, true),
         Err(ContractError::UnknownNode)
     );
-    let mut pop = StyleNode::default();
-    pop.id = Some("pop".to_string());
+    let pop = StyleNode {
+        id: Some("pop".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 2, pop).unwrap();
     assert!(engine.set_top_layer(2, true).is_ok());
     // 重复移入幂等

@@ -29,11 +29,15 @@ const FONT: &[u8] = include_bytes!(concat!(
 fn engine_with(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     engine
 }
@@ -458,11 +462,15 @@ fn text_color_transition_with_font() {
         "#t { color: #000; font-size: 16px; font-family: \"DejaVu Sans\"; \
          transition: color 1s linear; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let mut t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     t.text = Some("hello".to_string());
     e.insert(Some(1), 2, t).unwrap();
     let f = e.frame((800.0, 600.0), 1.0, 0.0);

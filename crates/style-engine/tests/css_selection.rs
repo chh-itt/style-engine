@@ -13,11 +13,15 @@ use style_engine::tree::StyleNode;
 fn engine_two(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut leaf = StyleNode::default();
-    leaf.id = Some("t".to_string());
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, leaf).unwrap();
     engine
 }
@@ -87,12 +91,16 @@ fn selection_specificity_ordering() {
     // (1,0,1) > (0,1,1)：#t::selection 胜 .c::selection。
     let mut e: StyleEngine<u64> = StyleEngine::new();
     e.set_stylesheet("#t::selection { color: red; } .c::selection { color: blue; }");
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(None, 1, root).unwrap();
-    let mut leaf = StyleNode::default();
-    leaf.id = Some("t".to_string());
-    leaf.classes = vec!["c".to_string()].into();
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        classes: vec!["c".to_string()].into(),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, leaf).unwrap();
     let sel = channel_rgb(&mut e, 2, true);
     approx(sel[0], RED[0]);
@@ -204,12 +212,16 @@ fn class_prefix_channel_match() {
     //（winners 双空契约）。
     let mut e: StyleEngine<u64> = StyleEngine::new();
     e.set_stylesheet(".sel::selection { color: red; }");
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(None, 1, root).unwrap();
-    let mut leaf = StyleNode::default();
-    leaf.id = Some("t".to_string());
-    leaf.classes = vec!["sel".to_string()].into();
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        classes: vec!["sel".to_string()].into(),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, leaf).unwrap();
     let _ = e.frame((800.0, 600.0), 1.0, 0.0);
     assert!(e.selection_style(1).is_none(), "无类节点无命中 → 通道缺席");

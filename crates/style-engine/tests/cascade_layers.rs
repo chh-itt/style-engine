@@ -15,11 +15,15 @@ use style_engine::tree::StyleNode;
 fn engine_with(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     let f = engine.frame((800.0, 600.0), 1.0, 0.0);
     assert!(!f.boxes.is_empty());
@@ -117,12 +121,16 @@ fn revert_inline_rolls_to_user_past_author() {
     let mut e: StyleEngine<u64> = StyleEngine::new();
     e.set_user_stylesheet("#t { color: lime }");
     e.set_stylesheet("#t { color: red }");
-    let mut r = StyleNode::default();
-    r.id = Some("root".to_string());
+    let r = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(None, 1, r).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
-    t.declarations = style_engine::css::decl::parse_inline_declarations("color: revert").0;
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        declarations: style_engine::css::decl::parse_inline_declarations("color: revert").0,
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, t).unwrap();
     let _ = e.frame((800.0, 600.0), 1.0, 0.0);
     assert_rgb(color_of(&e), 0.0, 1.0, 0.0);
@@ -148,11 +156,15 @@ fn revert_layer_no_earlier_falls_to_revert() {
     let mut e: StyleEngine<u64> = StyleEngine::new();
     e.set_user_stylesheet("#t { color: lime }");
     e.set_stylesheet("@layer b { #t { color: revert-layer } }");
-    let mut r = StyleNode::default();
-    r.id = Some("root".to_string());
+    let r = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(None, 1, r).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, t).unwrap();
     let _ = e.frame((800.0, 600.0), 1.0, 0.0);
     assert_rgb(color_of(&e), 0.0, 1.0, 0.0);
@@ -164,11 +176,15 @@ fn custom_property_revert_rolls_to_user() {
     let mut e: StyleEngine<u64> = StyleEngine::new();
     e.set_user_stylesheet("#t { --x: lime }");
     e.set_stylesheet("#t { --x: red; --x: revert; color: var(--x) }");
-    let mut r = StyleNode::default();
-    r.id = Some("root".to_string());
+    let r = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(None, 1, r).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, t).unwrap();
     let _ = e.frame((800.0, 600.0), 1.0, 0.0);
     assert_rgb(color_of(&e), 0.0, 1.0, 0.0);
@@ -181,14 +197,20 @@ fn wide_initial_resets_inherited_property() {
     // 父 color red；子 initial → 黑（若按旧"丢弃"行为会继承 red）
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet("#wrap { color: red } #t { color: initial }");
-    let mut r = StyleNode::default();
-    r.id = Some("root".to_string());
+    let r = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, r).unwrap();
-    let mut w = StyleNode::default();
-    w.id = Some("wrap".to_string());
+    let w = StyleNode {
+        id: Some("wrap".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, w).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(2), 3, t).unwrap();
     let f = engine.frame((800.0, 600.0), 1.0, 0.0);
     assert!(!f.boxes.is_empty());
@@ -205,14 +227,20 @@ fn wide_inherit_forces_non_inherited_property() {
     // 盒几何被父 padding 位移污染不可判别）
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet("#wrap { padding-left: 40px } #t { padding-left: inherit }");
-    let mut r = StyleNode::default();
-    r.id = Some("root".to_string());
+    let r = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, r).unwrap();
-    let mut w = StyleNode::default();
-    w.id = Some("wrap".to_string());
+    let w = StyleNode {
+        id: Some("wrap".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, w).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(2), 3, t).unwrap();
     let f = engine.frame((800.0, 600.0), 1.0, 0.0);
     assert!(!f.boxes.is_empty());

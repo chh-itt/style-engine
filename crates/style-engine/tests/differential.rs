@@ -221,19 +221,20 @@ enum Applied {
 }
 
 fn node_from(class: usize, text: usize, key: u64, is_root: bool) -> StyleNode {
-    let mut n = StyleNode::default();
-    n.name = Some(["div", "span", "button"][key as usize % 3].to_string());
-    n.id = Some(if is_root {
-        "root".to_string()
-    } else {
-        format!("n{key}")
-    });
-    n.classes = CLASSES[class % CLASSES.len()]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    n.text = TEXTS[text % TEXTS.len()].map(|s| s.to_string());
-    n
+    StyleNode {
+        name: Some(["div", "span", "button"][key as usize % 3].to_string()),
+        id: Some(if is_root {
+            "root".to_string()
+        } else {
+            format!("n{key}")
+        }),
+        classes: CLASSES[class % CLASSES.len()]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        text: TEXTS[text % TEXTS.len()].map(|s| s.to_string()),
+        ..StyleNode::default()
+    }
 }
 
 struct Driver {
@@ -320,10 +321,10 @@ impl Driver {
                     self.shadow.children.clear();
                     self.shadow.alive.clear();
                     self.shadow.parent.clear();
-                } else if let Some(Some(pk)) = self.shadow.parent.get(&key).copied() {
-                    if let Some(list) = self.shadow.children.get_mut(&pk) {
-                        list.retain(|c| *c != key);
-                    }
+                } else if let Some(Some(pk)) = self.shadow.parent.get(&key).copied()
+                    && let Some(list) = self.shadow.children.get_mut(&pk)
+                {
+                    list.retain(|c| *c != key);
                 }
                 self.applied.push(Applied::Remove(key));
                 true

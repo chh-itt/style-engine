@@ -16,11 +16,15 @@ fn box_of(sheet_t: &str, doc_w: f32, viewport: (f32, f32)) -> (f32, f32, f32, f3
         w = doc_w as u32,
         t = sheet_t
     ));
-    let mut doc = StyleNode::default();
-    doc.id = Some("doc".to_string());
+    let doc = StyleNode {
+        id: Some("doc".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, doc).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     let f = engine.frame(viewport, 1.0, 0.0);
     let b = f.boxes.iter().find(|b| b.key == 2).unwrap();

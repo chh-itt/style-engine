@@ -203,8 +203,10 @@ fn shorthand_trbl_expansion_semantics() {
     for &(name, value, [top, right, bottom, left]) in cases {
         let mut engine: StyleEngine<u64> = StyleEngine::new();
         engine.set_stylesheet("#root { width: 100px; height: 100px; }");
-        let mut root_node = StyleNode::default();
-        root_node.id = Some("root".to_string());
+        let root_node = StyleNode {
+            id: Some("root".to_string()),
+            ..StyleNode::default()
+        };
         engine.insert(None, 1, root_node).unwrap();
         engine
             .set_declarations(1, &format!("{name}: {value}"))
@@ -239,8 +241,7 @@ proptest! {
     fn fuzz_shorthand_roundtrip_never_panics(text in decl_text()) {
         let mut engine: StyleEngine<u64> = StyleEngine::new();
         engine.set_stylesheet("#root { width: 200px; height: 120px; }");
-        let mut root_node = StyleNode::default();
-        root_node.id = Some("root".to_string());
+        let root_node = StyleNode { id: Some("root".to_string()), ..StyleNode::default() };
         engine.insert(None, 1, root_node).unwrap();
         let _ = engine.set_declarations(1, &text);
         let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
@@ -266,8 +267,10 @@ fn var_cycle_falls_back_and_deep_chain_terminates() {
 
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(&src);
-    let mut root_node = StyleNode::default();
-    root_node.id = Some("root".to_string());
+    let root_node = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root_node).unwrap();
     let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
     let root = frame.find(1).expect("根盒");
@@ -310,8 +313,7 @@ proptest! {
         text.push_str(&format!("; background-color: {usage}"));
         let mut engine: StyleEngine<u64> = StyleEngine::new();
         engine.set_stylesheet("#root { width: 200px; height: 120px; }");
-        let mut root_node = StyleNode::default();
-        root_node.id = Some("root".to_string());
+        let root_node = StyleNode { id: Some("root".to_string()), ..StyleNode::default() };
         engine.insert(None, 1, root_node).unwrap();
         let _ = engine.set_declarations(1, &text);
         let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
@@ -527,11 +529,9 @@ proptest! {
     fn fuzz_paint_grammar_never_panics(decls in paint_decl_text()) {
         let mut engine: StyleEngine<u64> = StyleEngine::new();
         engine.set_stylesheet("#root { width: 200px; height: 120px; overflow: hidden; }");
-        let mut root_node = StyleNode::default();
-        root_node.id = Some("root".to_string());
+        let root_node = StyleNode { id: Some("root".to_string()), ..StyleNode::default() };
         engine.insert(None, 1, root_node).unwrap();
-        let mut child = StyleNode::default();
-        child.id = Some("q".to_string());
+        let child = StyleNode { id: Some("q".to_string()), ..StyleNode::default() };
         engine.insert(Some(1), 2, child).unwrap();
         let _ = engine.set_declarations(2, &decls);
         let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
@@ -566,13 +566,11 @@ proptest! {
     ) {
         let mut engine: StyleEngine<u64> = StyleEngine::new();
         engine.set_stylesheet("#root { width: 200px; height: 200px; }");
-        let mut root_node = StyleNode::default();
-        root_node.id = Some("root".to_string());
+        let root_node = StyleNode { id: Some("root".to_string()), ..StyleNode::default() };
         engine.insert(None, 1, root_node).unwrap();
         for (i, &(ml, mt, w, h, clip)) in kids.iter().enumerate() {
             let key = i as u64 + 2;
-            let mut n = StyleNode::default();
-            n.id = Some(format!("k{i}"));
+            let n = StyleNode { id: Some(format!("k{i}")), ..StyleNode::default() };
             engine.insert(Some(1), key, n).unwrap();
             let mut decls = format!(
                 "margin-top: {mt}px; margin-left: {ml}px; width: {w}px; height: {h}px;"

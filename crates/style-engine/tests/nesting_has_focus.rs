@@ -14,11 +14,12 @@ use style_engine::css::value::ColorValue;
 use style_engine::tree::{NodeState, StyleNode};
 
 fn node(id: &str, classes: &[&str], name: Option<&str>) -> StyleNode {
-    let mut n = StyleNode::default();
-    n.id = Some(id.to_string());
-    n.classes = classes.iter().map(|s| s.to_string()).collect();
-    n.name = name.map(|s| s.to_string());
-    n
+    StyleNode {
+        id: Some(id.to_string()),
+        classes: classes.iter().map(|s| s.to_string()).collect(),
+        name: name.map(|s| s.to_string()),
+        ..StyleNode::default()
+    }
 }
 
 /// 结构：根(#root,id=1) → 目标(#t,id=2)；返回引擎。

@@ -134,11 +134,15 @@ fn behavior_hint_inheritance_semantics() {
         "#root { cursor: text; user-select: none; caret-color: #0891b2; \
          pointer-events: none; accent-color: red; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut child = StyleNode::default();
-    child.id = Some("child".to_string());
+    let child = StyleNode {
+        id: Some("child".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, child).unwrap();
     let _ = engine.frame((400.0, 300.0), 1.0, 0.0);
 
@@ -185,8 +189,10 @@ fn behavior_hint_inheritance_semantics() {
 fn behavior_hint_no_paint_ops() {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet("#root { cursor: grab; user-select: none; caret-color: red; }");
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
     let plain = engine.frame((400.0, 300.0), 1.0, 0.0);
     engine.set_declarations(1, "cursor: grab; user-select: none; caret-color: red; accent-color: blue; pointer-events: none").unwrap();

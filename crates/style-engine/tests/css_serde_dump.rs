@@ -27,9 +27,11 @@ fn display_list_dump_round_trip() {
          text-decoration: underline wavy red 2px; \
          text-shadow: 1px 2px 3px black; overflow: hidden; }",
     );
-    let mut n = StyleNode::default();
-    n.id = Some("t".to_string());
-    n.text = Some("hello".to_string());
+    let n = StyleNode {
+        id: Some("t".to_string()),
+        text: Some("hello".to_string()),
+        ..Default::default()
+    };
     engine.insert(None, 1, n).unwrap();
     let fr = engine.frame((300.0, 300.0), 1.0, 0.0);
     assert!(!fr.paint.ops.is_empty(), "富样式叶产生绘制清单");
@@ -58,11 +60,15 @@ fn clip_path_dump_round_trip() {
          #p { width: 100px; height: 100px; \
               clip-path: polygon(evenodd, 0% 0%, 100% 0%, 50% 100%); }",
     );
-    let mut n = StyleNode::default();
-    n.id = Some("t".to_string());
+    let n = StyleNode {
+        id: Some("t".to_string()),
+        ..Default::default()
+    };
     engine.insert(None, 1, n).unwrap();
-    let mut m = StyleNode::default();
-    m.id = Some("p".to_string());
+    let m = StyleNode {
+        id: Some("p".to_string()),
+        ..Default::default()
+    };
     engine.insert(None, 2, m).unwrap();
     let fr = engine.frame((300.0, 300.0), 1.0, 0.0);
     assert!(!fr.paint.ops.is_empty(), "clip-path 节点产生裁剪 op");
@@ -98,11 +104,15 @@ fn filter_dump_round_trip() {
          #p { width: 100px; height: 100px; background-color: blue; \
              backdrop-filter: invert(1) brightness(0.8); }",
     );
-    let mut n = StyleNode::default();
-    n.id = Some("t".to_string());
+    let n = StyleNode {
+        id: Some("t".to_string()),
+        ..Default::default()
+    };
     engine.insert(None, 1, n).unwrap();
-    let mut m = StyleNode::default();
-    m.id = Some("p".to_string());
+    let m = StyleNode {
+        id: Some("p".to_string()),
+        ..Default::default()
+    };
     engine.insert(None, 2, m).unwrap();
     let fr = engine.frame((300.0, 300.0), 1.0, 0.0);
     assert!(

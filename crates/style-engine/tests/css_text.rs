@@ -25,12 +25,16 @@ fn engine_text(sheet: &str, text: &str) -> StyleEngine<u64> {
     engine.add_font(FONT.to_vec());
     engine.add_font(FONT_SC.to_vec());
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut leaf = StyleNode::default();
-    leaf.id = Some("t".to_string());
-    leaf.text = Some(text.to_string());
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        text: Some(text.to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, leaf).unwrap();
     engine
 }

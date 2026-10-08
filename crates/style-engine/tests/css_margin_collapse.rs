@@ -41,7 +41,7 @@ fn parent_child_top_margin_collapses_through() {
     assert!(e.insert(None, 1, node("div", "p")).is_ok());
     assert!(e.insert(Some(1), 2, node("div", "c")).is_ok());
     let (px, py, pw, ph) = box_of(&mut e, 1);
-    let (cx, cy, cw, ch) = box_of(&mut e, 2);
+    let (cx, cy, cw, _ch) = box_of(&mut e, 2);
     assert_eq!((py, cy), (30.0, 30.0), "塌出父外：父子同位 30");
     assert_eq!((px, pw), (cx, cw), "横向对齐");
     assert_eq!(ph, 40.0, "父高=子高（margin 不入父）");
@@ -64,9 +64,9 @@ fn empty_block_self_collapses_between_siblings() {
     assert!(e.insert(Some(1), 2, node("div", "a")).is_ok());
     assert!(e.insert(Some(1), 3, node("div", "e")).is_ok());
     assert!(e.insert(Some(1), 4, node("div", "b")).is_ok());
-    let (ax, ay, _aw, ah) = box_of(&mut e, 2);
+    let (_ax, ay, _aw, ah) = box_of(&mut e, 2);
     let (_ex, ey, _ew, eh) = box_of(&mut e, 3);
-    let (_bx, by, _bw, bh) = box_of(&mut e, 4);
+    let (_bx, by, _bw, _bh) = box_of(&mut e, 4);
     assert_eq!(by - (ay + ah), 30.0, "a→b 间距 = 塌缩集 30");
     assert_eq!(eh, 0.0, "空块高 0");
     // 空块 border-box 落点非规范可观察量（引擎差异在案）：位于 a 的

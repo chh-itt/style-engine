@@ -14,8 +14,10 @@ fn build(sheet: &str, nodes: &[(&str, Option<u64>, u64)]) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
     for &(id, parent, key) in nodes {
-        let mut n = StyleNode::default();
-        n.id = Some(id.to_string());
+        let n = StyleNode {
+            id: Some(id.to_string()),
+            ..StyleNode::default()
+        };
         engine.insert(parent, key, n).unwrap();
     }
     engine

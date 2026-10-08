@@ -15,14 +15,20 @@ const DEJAVU: &[u8] = include_bytes!(concat!(
 fn box_in_container(sheet: &str, viewport: (f32, f32)) -> (f32, f32, f32, f32) {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut c = StyleNode::default();
-    c.id = Some("c".to_string());
+    let c = StyleNode {
+        id: Some("c".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, c).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(2), 3, t).unwrap();
     let f = engine.frame(viewport, 1.0, 0.0);
     let b = f.boxes.iter().find(|b| b.key == 3).unwrap();
@@ -33,11 +39,15 @@ fn box_in_container(sheet: &str, viewport: (f32, f32)) -> (f32, f32, f32, f32) {
 fn box_flat(sheet: &str, viewport: (f32, f32)) -> (f32, f32, f32, f32) {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     let f = engine.frame(viewport, 1.0, 0.0);
     let b = f.boxes.iter().find(|b| b.key == 2).unwrap();
@@ -124,11 +134,15 @@ fn ch_uses_registered_font_metrics() {
     engine.set_stylesheet(
         "#t { width: 10ch; height: 20px; font-size: 20px; font-family: \"DejaVu Sans\"; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     let f = engine.frame((800.0, 600.0), 1.0, 0.0);
     let w = f.boxes.iter().find(|b| b.key == 2).unwrap().width;
@@ -154,11 +168,15 @@ fn ex_uses_x_height_metrics() {
     engine.set_stylesheet(
         "#t { width: 10ex; height: 20px; font-size: 20px; font-family: \"DejaVu Sans\"; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     let f = engine.frame((800.0, 600.0), 1.0, 0.0);
     let w = f.boxes.iter().find(|b| b.key == 2).unwrap().width;
@@ -176,11 +194,15 @@ fn ic_falls_back_to_1em_when_glyph_missing() {
     engine.set_stylesheet(
         "#t { width: 5ic; height: 20px; font-size: 20px; font-family: \"DejaVu Sans\"; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     let f = engine.frame((800.0, 600.0), 1.0, 0.0);
     let w = f.boxes.iter().find(|b| b.key == 2).unwrap().width;

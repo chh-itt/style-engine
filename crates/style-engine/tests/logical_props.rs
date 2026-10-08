@@ -33,11 +33,15 @@ fn parsed(text: &str) -> Vec<(PropertyId, DeclValue)> {
 fn tree_with(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut node = StyleNode::default();
-    node.id = Some("t".to_string());
+    let node = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, node).unwrap();
     engine
 }

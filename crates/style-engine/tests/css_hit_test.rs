@@ -14,8 +14,10 @@ use style_engine::tree::StyleNode;
 fn engine_hit(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
     engine
 }
@@ -27,11 +29,15 @@ fn hit_test_topmost_wins() {
          #a { width: 100px; height: 100px; background: red; }
          #b { position: absolute; left: 50px; top: 0; width: 100px; height: 100px; background: blue; }",
     );
-    let mut a = StyleNode::default();
-    a.id = Some("a".to_string());
+    let a = StyleNode {
+        id: Some("a".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, a).unwrap();
-    let mut b = StyleNode::default();
-    b.id = Some("b".to_string());
+    let b = StyleNode {
+        id: Some("b".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 3, b).unwrap();
     let _ = e.frame((400.0, 400.0), 1.0, 0.0);
     let (na, nb) = (e.node_id(&2).unwrap(), e.node_id(&3).unwrap());
@@ -47,11 +53,14 @@ fn hit_test_respects_overflow_clip() {
         "#root { overflow: hidden; width: 100px; height: 100px; background: white; }
          #child { position: absolute; left: 80px; top: 0; width: 100px; height: 50px; background: red; }",
     );
-    e.insert(Some(1), 2, {
-        let mut n = StyleNode::default();
-        n.id = Some("child".to_string());
-        n
-    })
+    e.insert(
+        Some(1),
+        2,
+        StyleNode {
+            id: Some("child".to_string()),
+            ..StyleNode::default()
+        },
+    )
     .unwrap();
     let _ = e.frame((400.0, 400.0), 1.0, 0.0);
     // (120, 25)：child 盒内 [80..180] 但出 root clip [0..100] → 不命中。
@@ -75,11 +84,14 @@ fn hit_test_clip_path_circle_precise() {
          #c { position: absolute; left: 0; top: 0; width: 100px; height: 100px;
               background: red; clip-path: circle(50px at 50% 50%); }",
     );
-    e.insert(Some(1), 2, {
-        let mut n = StyleNode::default();
-        n.id = Some("c".to_string());
-        n
-    })
+    e.insert(
+        Some(1),
+        2,
+        StyleNode {
+            id: Some("c".to_string()),
+            ..StyleNode::default()
+        },
+    )
     .unwrap();
     let _ = e.frame((400.0, 400.0), 1.0, 0.0);
     // 圆心：命中 #c。
@@ -106,11 +118,14 @@ fn hit_test_transformed_node() {
          #t { position: absolute; left: 100px; top: 0; width: 50px; height: 100px;
               background: red; transform: rotate(90deg); }",
     );
-    e.insert(Some(1), 2, {
-        let mut n = StyleNode::default();
-        n.id = Some("t".to_string());
-        n
-    })
+    e.insert(
+        Some(1),
+        2,
+        StyleNode {
+            id: Some("t".to_string()),
+            ..StyleNode::default()
+        },
+    )
     .unwrap();
     let _ = e.frame((400.0, 400.0), 1.0, 0.0);
     let nt = e.node_id(&2).unwrap();
@@ -138,14 +153,19 @@ fn hit_test_skips_pointer_events_none() {
          #pe { position: absolute; left: 0; top: 0; width: 100px; height: 100px;
                background: blue; pointer-events: none; }",
     );
-    let mut a = StyleNode::default();
-    a.id = Some("a".to_string());
+    let a = StyleNode {
+        id: Some("a".to_string()),
+        ..StyleNode::default()
+    };
     e.insert(Some(1), 2, a).unwrap();
-    e.insert(Some(1), 3, {
-        let mut n = StyleNode::default();
-        n.id = Some("pe".to_string());
-        n
-    })
+    e.insert(
+        Some(1),
+        3,
+        StyleNode {
+            id: Some("pe".to_string()),
+            ..StyleNode::default()
+        },
+    )
     .unwrap();
     let _ = e.frame((400.0, 400.0), 1.0, 0.0);
     let na = e.node_id(&2).unwrap();

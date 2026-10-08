@@ -84,8 +84,10 @@ fn outline_op_geometry_expanded_rect() {
         "#root { width: 100px; height: 100px; background: #fff; \
          outline: solid 2px red; outline-offset: 4px; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
     let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
     let borders: Vec<&PaintOp> = frame
@@ -134,8 +136,10 @@ fn outline_rounded_grows_radius() {
         "#root { width: 100px; height: 100px; border-radius: 10px; \
          outline: solid 2px red; outline-offset: 4px; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
     let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
     let Some(PaintOp::Border { radius, .. }) = frame
@@ -163,8 +167,10 @@ fn outline_none_or_zero_width_emits_nothing() {
         engine.set_stylesheet(&format!(
             "#root {{ width: 100px; height: 100px; background: #fff; {extra} }}"
         ));
-        let mut root = StyleNode::default();
-        root.id = Some("root".to_string());
+        let root = StyleNode {
+            id: Some("root".to_string()),
+            ..StyleNode::default()
+        };
         engine.insert(None, 1, root).unwrap();
         let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
         assert!(
@@ -185,8 +191,10 @@ fn outline_no_layout_or_scroll_range_impact() {
     let frame_for = |sheet: &str| {
         let mut engine: StyleEngine<u64> = StyleEngine::new();
         engine.set_stylesheet(sheet);
-        let mut root = StyleNode::default();
-        root.id = Some("root".to_string());
+        let root = StyleNode {
+            id: Some("root".to_string()),
+            ..StyleNode::default()
+        };
         engine.insert(None, 1, root).unwrap();
         engine.frame((400.0, 300.0), 1.0, 0.0)
     };
@@ -205,8 +213,10 @@ fn outline_no_layout_or_scroll_range_impact() {
 fn outline_auto_draws_solid_approximation() {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet("#root { width: 100px; height: 100px; outline: auto; }");
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
     let frame = engine.frame((400.0, 300.0), 1.0, 0.0);
     let outline = frame.paint.ops.iter().find_map(|op| match op {

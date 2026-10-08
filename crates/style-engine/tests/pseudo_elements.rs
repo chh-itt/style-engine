@@ -22,11 +22,15 @@ fn engine_pseudo(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.add_font(FONT.to_vec());
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut leaf = StyleNode::default();
-    leaf.id = Some("t".to_string());
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, leaf).unwrap();
     engine
 }
@@ -237,15 +241,21 @@ fn engine_list(sheet: &str) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.add_font(FONT.to_vec());
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, t).unwrap();
     for k in [10u64, 11, 12] {
-        let mut li = StyleNode::default();
-        li.name = Some("li".into());
+        let li = StyleNode {
+            name: Some("li".into()),
+            ..StyleNode::default()
+        };
         engine.insert(Some(2), k, li).unwrap();
     }
     engine
@@ -321,8 +331,10 @@ fn content_attr_reads_host_attribute() {
             "#t { font-size: 16px; font-family: \"DejaVu Sans\"; } #t::before { content: attr(title); }",
         );
         e.remove(2).unwrap();
-        let mut leaf = StyleNode::default();
-        leaf.id = Some("t".to_string());
+        let mut leaf = StyleNode {
+            id: Some("t".to_string()),
+            ..StyleNode::default()
+        };
         if let Some(v) = title {
             leaf.attrs.insert("title".to_string(), v.to_string());
         }

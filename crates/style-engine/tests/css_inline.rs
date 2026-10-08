@@ -21,15 +21,17 @@ fn engine_inline(sheet: &str, kids: &[(&str, Option<&str>)]) -> StyleEngine<u64>
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.add_font(FONT.to_vec());
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
     for (i, (sel, text)) in kids.iter().enumerate() {
-        let mut n = StyleNode::default();
-        n.id = Some((*sel).to_string());
-        if let Some(t) = text {
-            n.text = Some((*t).to_string());
-        }
+        let n = StyleNode {
+            id: Some((*sel).to_string()),
+            text: text.map(|t| (*t).to_string()),
+            ..StyleNode::default()
+        };
         engine.insert(Some(1), (i + 2) as u64, n).unwrap();
     }
     engine
@@ -115,19 +117,27 @@ fn inline_group_box_participates() {
     engine.set_stylesheet(
         "#root { width: 300px; } #s { display: inline; } #st, #t { font-size: 16px; font-family: \"DejaVu Sans\"; }",
     );
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut s = StyleNode::default();
-    s.id = Some("s".to_string());
+    let s = StyleNode {
+        id: Some("s".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, s).unwrap();
-    let mut st = StyleNode::default();
-    st.id = Some("st".to_string());
-    st.text = Some("span".to_string());
+    let st = StyleNode {
+        id: Some("st".to_string()),
+        text: Some("span".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(2), 3, st).unwrap();
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
-    t.text = Some(" after".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        text: Some(" after".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 4, t).unwrap();
     let (sx, sy, sw, sh) = box_of(&mut engine, 2);
     let (tx, ty, _tw, _th) = box_of(&mut engine, 4);

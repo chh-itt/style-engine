@@ -25,12 +25,16 @@ fn frame_text_height(
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.add_font(FONT.to_vec());
     engine.set_stylesheet(sheet);
-    let mut doc = StyleNode::default();
-    doc.id = Some("doc".to_string());
+    let doc = StyleNode {
+        id: Some("doc".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, doc).unwrap();
-    let mut leaf = StyleNode::default();
-    leaf.id = Some("t".to_string());
-    leaf.text = Some(text.to_string());
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        text: Some(text.to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, leaf).unwrap();
     let f = engine.frame((width, 600.0), 1.0, 0.0);
     let b = f.boxes.iter().find(|b| b.key == 2).unwrap();

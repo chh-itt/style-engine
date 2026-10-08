@@ -13,8 +13,10 @@ fn t_width(media_block: &str, viewport: (f32, f32), media: Option<MediaEnv>) -> 
     if let Some(env) = media {
         engine.set_environment(env);
     }
-    let mut t = StyleNode::default();
-    t.id = Some("t".to_string());
+    let t = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, t).unwrap();
     let f = engine.frame(viewport, 1.0, 0.0);
     f.boxes.iter().find(|b| b.key == 1).unwrap().width

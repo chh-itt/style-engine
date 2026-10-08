@@ -22,12 +22,16 @@ const SRC_H: u32 = 20;
 fn engine_img(sheet: &str, image: Option<&str>, register: bool) -> StyleEngine<u64> {
     let mut engine: StyleEngine<u64> = StyleEngine::new();
     engine.set_stylesheet(sheet);
-    let mut root = StyleNode::default();
-    root.id = Some("root".to_string());
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(None, 1, root).unwrap();
-    let mut leaf = StyleNode::default();
-    leaf.id = Some("t".to_string());
-    leaf.image = image.map(|s| s.to_string());
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        image: image.map(|s| s.to_string()),
+        ..StyleNode::default()
+    };
     engine.insert(Some(1), 2, leaf).unwrap();
     if register {
         engine.add_image("k", SRC_W, SRC_H, vec![255; (SRC_W * SRC_H * 4) as usize]);
