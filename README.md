@@ -6,7 +6,7 @@
 - **L2 布局**（feature = `layout`）：taffy（flex/grid/block/absolute）+ 自研结算层（calc 15 槽位、表格两阶段列宽、多列二分平衡）+ 内置文本栈 parley（测量/断行/bidi）。
 - **L3 绘制**：中立 `DisplayList`（`PaintOp` 指令序列）——渲染由宿主接入任意后端；参考实现 `style-engine-vello`（GPU），确定性参照 `style-engine-soft`（零依赖纯软光栅）。
 
-**定位**：桌面 GUI 的 CSS 语义层（面向 egui/iced/bevy 类宿主）；以浏览器为**度量衡**而非目标——正确性由 conformance harness 对比 Chromium golden（Numeric 0.5px 容差 + Pixel 错误分类双通道，当前 29 用例零 xfail）证明。子集边界由 [docs/FEATURES.md](docs/FEATURES.md) 权威定义：每行特性要么有金标准证据，要么有显式排除理由与重估条件。
+**定位**：桌面 GUI 的 CSS 语义层（面向 egui/iced/bevy 类宿主）；以浏览器为**度量衡**而非目标——正确性由 conformance harness 对比 Chromium golden（Numeric 0.5px 容差 + Pixel 错误分类双通道，当前 35 用例零 xfail）证明。子集边界由 [docs/FEATURES.md](docs/FEATURES.md) 权威定义：每行特性要么有金标准证据，要么有显式排除理由与重估条件。
 
 ## 快速上手
 
@@ -54,6 +54,7 @@ let scene = style_engine_vello::render(&frame.paint);
 ## 文档索引
 
 - [CONTEXT.md](CONTEXT.md) — 领域语言（术语表）
+- [docs/V1-SCOPE.md](docs/V1-SCOPE.md) — v1.0 行为验收基准（承诺面/偏差面/排除面）
 - [docs/adr/](docs/adr/) — 架构决策记录（DisplayList 中立契约、渲染栈、conformance、推送式同步、滚动、层叠、transform、…）
 - [docs/FEATURES.md](docs/FEATURES.md) — 特性注册表（子集边界权威 + 偏差分级 A/B/C）
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — 性能预算与门禁推导

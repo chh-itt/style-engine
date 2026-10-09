@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — v1.0 验收基准文档化（P9-6）
+
+- **docs/V1-SCOPE.md（新增）**：v1.0 行为验收基准——v1.0 定义（框架无关 CSS 语义层的行为可信点，桌面尺度、非浏览器对齐）、四层验收维度与达标证据（L1 级联/L2 结算/L3 双 sink+文本/验证体系）、接受的偏差面（B/C 分级台账为准）、显式排除项（T2）、上游等待面（DEPENDENCIES）与定版后变更纪律。
+- **BREAKING-POLICY.md**：逻辑属性 T-扩展条补充槽位编号政策——0.x 阶段 slot 编号非公有契约、公有面=PropertyId 枚举+ALL 序列；1.0 冻结后新槽位只允许尾追加（插入式中间编号=T-扩展破坏）。
+
 ### 1.0 对齐 — span 级行高与字距（P9-5）
 
 - **span 覆盖行高/字距生效（feat，ADR-0042）**：span 覆盖样式经 parley ranged push 进测量与 vello 绘制——行高仅 span 计算值 ≠ normal 时推 ranged Absolute（行盒行高 = 各 run running max，覆盖 span 抬升整行）；字距恒推 ranged，显式 `0` 覆盖继承非零基值（精确语义）。测量与绘制同规则，折行一致。
