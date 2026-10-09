@@ -1442,10 +1442,12 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
         // B3：嵌套项出现 = 声明组到此前源位置截止——先 flush 隐式 & 规则
         //（css-nesting-1 嵌套声明按源位置分裂；尾 flush 只兜最后一组）。
         self.flush_pending_decls();
-        // E css-nesting-1：顶层裸声明容错（隐式最外层样式规则）。仅主样式
-        // 表顶层启用（implicit_outer_decls）；条件组/嵌套体子解析器不设
-        //（其经 RuleBodyParser 恢复语义 prelude 吞至首个 '{'——在案限制，
-        // 见测试 bare_declaration_inside_media_stays_invalid）。判别：探测
+        // P9-4 css-nesting-1 / css-syntax 裸声明容错（隐式最外层样式规则 +
+        // 规则表级失败声明恢复）。主样式表顶层与条件组体（implicit_outer_
+        // decls）启用；嵌套体（parse_block 子解析器）同启——其嵌套语境
+        // （parse_declarations()=true）下 cssparser「Ident→声明，失败重试
+        // 限定规则」的失败声明会并入后续规则 prelude 视图，容错探测把该
+        // 失败声明从视图剥除（浏览器按 decl 跳过恢复语义）。判别：探测
         // Ident+':' 命中后扫描 post-colon 顶层是否存在 ';'——存在 → 声明
         // 提交（合法选择器 prelude 从不含顶层 ';'）；不存在 → 回退常规
         // 选择器路径（保护 h1:hover / a:is() 等伪类写法）。缺 ';' 的裸
@@ -1580,9 +1582,10 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for StylesheetParser {
             pending_effective: String::new(),
             enclosing_prelude: Some(prelude.clone()),
             pending_decls: crate::css::decl::DeclarationBlock::default(),
-            // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style 登记
-            // 容器（容错语义如 @font-face——条件组/嵌套体内照常登记）。
-            implicit_outer_decls: false,
+            // P9-4：裸声明容错随嵌套体启用——嵌套语境声明经 parse_value
+            // 照常累积（css-nesting 合法）；失败声明（非法值/未知名）经
+            // prelude 视图探测剥除，后续嵌套规则存活（浏览器恢复语义）。
+            implicit_outer_decls: true,
             counter_styles: Vec::new(),
         };
         {
@@ -1965,9 +1968,10 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
-                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
-                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
-                    implicit_outer_decls: false,
+                    // P9-4：条件组体规则表级裸声明容错（声明在条件组顶
+                    // 层非法——剥除 + 告警，后续规则存活，浏览器恢复语义）；
+                    // @counter-style 登记容器（条件组内照常登记）。
+                    implicit_outer_decls: true,
                     counter_styles: Vec::new(),
                 };
                 {
@@ -2015,9 +2019,9 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
-                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
-                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
-                    implicit_outer_decls: false,
+                    // P9-4：条件组体规则表级裸声明容错（声明在条件组顶
+                    // 层非法——剥除 + 告警，后续规则存活，浏览器恢复语义）。
+                    implicit_outer_decls: true,
                     counter_styles: Vec::new(),
                 };
                 {
@@ -2071,9 +2075,9 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
-                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
-                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
-                    implicit_outer_decls: false,
+                    // P9-4：条件组体规则表级裸声明容错（声明在条件组顶
+                    // 层非法——剥除 + 告警，后续规则存活，浏览器恢复语义）。
+                    implicit_outer_decls: true,
                     counter_styles: Vec::new(),
                 };
                 {
@@ -2134,9 +2138,9 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
                     pending_effective: String::new(),
                     enclosing_prelude: self.enclosing_prelude.clone(),
                     pending_decls: crate::css::decl::DeclarationBlock::default(),
-                    // E 任务1/2：子解析器非顶层（裸声明容错关）；@counter-style
-                    // 登记容器（条件组内照常登记，容错语义如 @font-face）。
-                    implicit_outer_decls: false,
+                    // P9-4：条件组体规则表级裸声明容错（声明在条件组顶
+                    // 层非法——剥除 + 告警，后续规则存活，浏览器恢复语义）。
+                    implicit_outer_decls: true,
                     counter_styles: Vec::new(),
                 };
                 {
@@ -3554,15 +3558,59 @@ mod tests {
     }
 
     #[test]
-    fn bare_declaration_inside_media_stays_invalid() {
-        // 条件组内裸声明维持无效语义（子解析器 implicit_outer_decls=false，
-        // 顶层容错不外溢）。现状基线：媒体臂 parse_declarations()=false →
-        // RuleBodyParser 走 nested=false 限定规则路径（cssparser
-        // rules_and_declarations.rs:563-566 前导码视图横跨至首个 '{'）——
-        // 坏 prelude 连带吞掉后续规则块（既有恢复语义，非本切片目标）。
+    fn bare_declaration_inside_media_recovers_next_rule() {
+        // P9-4：条件组体裸声明容错（规则表级）——`color: blue;` 剥除 +
+        // 告警，后续 `p` 规则存活（浏览器按 decl 跳过恢复语义；旧行为=
+        // prelude 视图吞至 '{'，p 连带丢失）。
         let sheet = parse_stylesheet("@media screen { color: blue; p { color: green } }");
         assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
-        assert!(sheet.rules.is_empty(), "{:?}", sheet.rules);
+        assert_eq!(sheet.rules.len(), 1, "{:?}", sheet.rules);
+        assert_eq!(sheet.rules[0].declarations.decls.len(), 1);
+        assert!(
+            sheet
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("bare declaration")),
+            "{:?}",
+            sheet.report
+        );
+    }
+
+    #[test]
+    fn bare_declaration_inside_condition_groups_recover() {
+        // @supports / @container / @layer 块体同语义；尾随裸声明（无后续
+        // 规则）= 剥除 + 告警，不产虚警规则。
+        let s1 = parse_stylesheet("@supports (display: flex) { width: 9px; p { color: red } }");
+        assert_eq!(s1.rules.len(), 1, "{:?}", s1.rules);
+        assert!(!s1.report.is_clean());
+        let s2 =
+            parse_stylesheet("@container card (width > 100px) { gap: 4px; .a { color: red } }");
+        assert_eq!(s2.rules.len(), 1, "{:?}", s2.rules);
+        assert!(!s2.report.is_clean());
+        let s3 = parse_stylesheet("@layer base { color: red; h1 { color: green } }");
+        assert_eq!(s3.rules.len(), 1, "{:?}", s3.rules);
+        assert!(!s3.report.is_clean());
+        let s4 = parse_stylesheet("@media print { p { color: red } color: blue; }");
+        assert_eq!(s4.rules.len(), 1, "{:?}", s4.rules);
+        assert!(!s4.report.is_clean());
+        // 容错不外溢伪类选择器：@media 内 `a:hover` 值域无顶层 ';'。
+        let s5 = parse_stylesheet("@media screen { width: 3px; a:hover { color: red } }");
+        assert_eq!(s5.rules.len(), 1, "{:?}", s5.rules);
+        assert_eq!(s5.rules[0].declarations.decls.len(), 1);
+    }
+
+    #[test]
+    fn invalid_nested_declaration_recovers_next_nested_rule() {
+        // 嵌套体失败声明恢复：cssparser「Ident→声明，失败重试限定规则」
+        // 会把失败声明并入后续嵌套规则 prelude 视图——容错探测剥除后
+        // `.c` 存活（旧行为=连带丢失）。合法声明语义不受影响。
+        let sheet = parse_stylesheet("p { bogus-prop: 1; .c { color: green } }");
+        assert!(!sheet.report.is_clean(), "{:?}", sheet.report);
+        // 隐式 & 规则（空 decls 不产出）+ .c 规则——合计 1 条规则。
+        assert_eq!(sheet.rules.len(), 1, "{:?}", sheet.rules);
+        let sel = format!("{:?}", sheet.rules[0].selectors);
+        assert!(sel.contains(".c"), "{sel}");
     }
 
     #[test]

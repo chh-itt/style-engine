@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 裸声明容错扩展与容器失效收窄（P9-4）
+
+- **裸声明容错扩展（fix，css-syntax 恢复语义对齐）**：规则表级裸声明剥除恢复从样式表顶层扩展到条件组体（@media/@supports/@container/@layer 块）与嵌套体失败声明——`@media screen { color: blue; p { color: green } }` 中 `p` 规则不再连带丢失（旧行为=cssparser prelude 视图吞至下一 `{`），`p { bogus-prop: 1; .c { … } }` 中 `.c` 存活。css-nesting 合法嵌套声明语义不变；已知限制：缺 `;` 的裸声明仍吞至下一 `{`（解析器视图边界，在案）。锁测试：条件组体恢复 ×2 + 嵌套体失败声明恢复 + 既有顶层五件回归。
+- **容器失效收窄（perf，行为等价）**：增量重样式门由「有 @container 规则即全量 restyle」收窄为「有规则**且**容器快照表非空」——快照表每帧全量重建，表空即无 container-type 元素、容器规则必然不命中，增量子树重算安全；新容器出现经 record_container_sizes→changed→收敛环全量 pass 重匹配（与容器尺寸变化同一收敛通道）。锁测试：tests/css_container_invalidation.rs 4 件（无容器增量路径/容器后出现收敛/容器移除失配/容器尺寸变化同帧重匹配）；differential 两表随机覆盖（快照空→增量、容器在场→全量两路径均与 cold 重放逐位相等）。
+
 ### 1.0 对齐 — 列表闭环：display:list-item、::marker 与 list-style（P9-3）
 
 - **值面（feat，css-lists-3 §3.3–§3.6，ADR-0041）**：新增 `list-style-type`（`<counter-style>` 名或 `<string>` 字面；未知名使用期回退 decimal，css-counter-styles-3 §2；`none` 抑制）、`list-style-position`（inside|outside）、`list-style-image`（复用背景图像值文法）三物理槽（slot 173/174/175，SLOT_COUNT 180→183，均继承；初始 disc/outside/none）与 `Display::ListItem`（map_style→taffy Block）。`list-style` 简写（第 37 项）：三长手 `||`，none 二义消解按 §3.6（none 归未设分量——`none disc`→image=none+type=disc、裸 `none`→双双 none、`none disc url(b)` 语法错误）；var() 挂起路径经三表同步自动走通。

@@ -2263,8 +2263,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 // 有容器规则 → 保守全量（容器快照收敛环自会处理）。P6
                 // （ADR-0035 D2）：`:has` 在场不再无脑全量——脏根祖先链
                 // 过 host 快筛，全否决才走增量（保守正确，见
-                // has_invalidation_needs_full）。
-                if self.any_container_rules() || self.has_invalidation_needs_full() {
+                // has_invalidation_needs_full）。P9-4：容器收窄——快照表
+                // 空时（上帧无 container-type 元素）容器规则不可能命中，
+                // 走增量；新容器经 record_container_sizes→changed→全量
+                // pass 收敛（下一 pass 带新鲜快照，与容器尺寸变化同路）。
+                let container_full = self.any_container_rules() && !self.container_sizes.is_empty();
+                if container_full || self.has_invalidation_needs_full() {
                     self.restyle();
                 } else {
                     let roots = std::mem::take(&mut self.style_dirty_roots);

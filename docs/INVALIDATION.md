@@ -59,3 +59,21 @@ DisplayList 每帧全量重建，tier 区分只在「增量重样式」与「滚
   var() 代换结果）→ 复用 `dirty_style`；注册表本身随 Epoch 失效。
 - 任何新失效源**不得**绕过本表的标注义务：改哪个 setter、清哪个缓存、进哪个收敛
   环，三处都要写。
+
+## 5. P9-4 增量门评估结论（容器收窄落地 / restyle 缓存清空 defer F2）
+
+- **容器收窄（已落地，P9-4）**：增量门由「有 @container 规则即全量 restyle」收窄为
+  「有规则 **且** `container_sizes` 快照表非空」。依据：快照表每帧由
+  `record_container_sizes` 全量重建，表空 = 上帧无任何 container-type 元素 =
+  容器规则必然不命中（无资格容器 → 查询 unknown → 规则不适用）→ 增量子树
+  重算安全。新容器出现路径：脏根增量重算（规则暂不命中）→ 布局 →
+  `record_container_sizes` 记录新容器 → `changed=true` → 收敛环全量 pass 以
+  新鲜快照重匹配——与容器尺寸变化同一收敛通道，无新增失效标。锁测试
+  `tests/css_container_invalidation.rs`（四场景）+ differential 随机覆盖两路径。
+- **restyle() 结算缓存清空（评估后 defer）**：`restyle()` 全量路径清
+  `span_styles / wrap_widths / calc_deferred / tables / table_cols / table_cells /
+  multicols / multicol_state / min_measures`——每次全量重样式重建全部结算缓存
+  （settle pass 开销随布局回补，differential 已锁增量 ≡ 全量逐位等价）。收窄此
+  清空面需要按脏区细分的缓存失效粒度（哪些表缓存受哪些子树影响），属于
+  **F2（增量布局 + DisplayList 补丁）的缓存版**——收益真实但正确性风险与工程
+  量同量级，不在 v1.0 行为对齐范围。保留为 F2 准入基线的附加条款。

@@ -7,7 +7,8 @@
 //! 增量捷径若漏失效/错失效，此处即暴露。
 //!
 //! 双样式表跑两轮：无 @container（命中 `restyle_subtrees` 增量路径）与
-//! 有 @container（`has_container_rules` 退全量 restyle + 容器快照收敛）。
+//! 有 @container（快照表空 → 增量（P9-4 收窄：无容器则规则不可命中）；
+//! `.ct` 容器在场 → 全量 restyle + 容器快照收敛——两路径均被随机覆盖）。
 //! 附带锁定 frame() 幂等不变量（SETTLEMENT-PIPELINE：无变更再帧逐位
 //! 一致，generation 除外）。
 //!
