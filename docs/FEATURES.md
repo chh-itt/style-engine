@@ -698,7 +698,7 @@
   font_shorthand_via_var_suspension / font_shorthand_direct_and_resets。
 - 列表闭环【P9-3（ADR-0041）已落地】：值面三物理槽 ListStyleType/
   ListStylePosition/ListStyleImage（slot 173/174/175，SLOT_COUNT 183）+
-  Display::ListItem + `list-style` 简写第 37 项（none 二义消解
+  Display::ListItem + `list-style` 简写第 40 项（none 二义消解
   css-lists-3 §3.6：none 归未设分量、`none disc url(b)` 语法错误）；
   ::marker 伪节点（key=(host,2)、首子位、::before 之前，§3.1）无条件
   创建（any_list_item keep-alive 门控），作者 `li::marker{color/font-size}`

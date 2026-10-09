@@ -18,7 +18,7 @@
 
 | 缓存 | 内容 | 写入者 | 失效域 |
 |---|---|---|---|
-| `styles` | NodeId → ComputedStyle（94 槽位全集） | restyle / restyle_subtrees | 全量重写；增量=脏根子树 |
+| `styles` | NodeId → ComputedStyle（183 槽位全集） | restyle / restyle_subtrees | 全量重写；增量=脏根子树 |
 | `measures` | 文本叶测量 (w,h) | restyle 期 auto_text 叶；文本重排 pass | remove 清；全量重算；增量按子树；宿主 set_leaf_measure 接管后退出 auto_text |
 | `min_measures` | 行高探针 min-content | restyle 期 | 全量 clear；增量按子树清（与样式失效域同界） |
 | `wrap_widths` | 折行约束宽 | 文本重排 pass | 随 measures |

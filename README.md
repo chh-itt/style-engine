@@ -2,13 +2,19 @@
 
 **为 Rust 原生 GUI 提供的框架无关 CSS 语义层**：承包「样式声明 → 级联计算 → 布局 → 绘制指令」整条链，窗口/事件/时钟/资源等副作用全部留给宿主。
 
-- **L1 样式代数**：真实 CSS 文本解析（cssparser）+ 选择器匹配（selectors）+ 自研属性文法，产出 `ComputedStyle`（94 属性槽位 + custom properties）。
-- **L2 布局**（feature = `layout`）：taffy（flex/grid/block/absolute）+ 自研结算层（calc 15 槽位、表格两阶段列宽、多列二分平衡）+ 内置文本栈 parley（测量/断行/bidi）。
+- **L1 样式代数**：真实 CSS 文本解析（cssparser）+ 选择器匹配（selectors）+ 自研属性文法，产出 `ComputedStyle`（183 属性槽位 + custom properties）。
+- **L2 布局**（feature = `layout`）：taffy（flex/grid/block/absolute）+ 自研结算层（calc 17 轴结算式、表格两阶段列宽、多列二分平衡）+ 内置文本栈 parley（测量/断行/bidi）。
 - **L3 绘制**：中立 `DisplayList`（`PaintOp` 指令序列）——渲染由宿主接入任意后端；参考实现 `style-engine-vello`（GPU），确定性参照 `style-engine-soft`（零依赖纯软光栅）。
 
 **定位**：桌面 GUI 的 CSS 语义层（面向 egui/iced/bevy 类宿主）；以浏览器为**度量衡**而非目标——正确性由 conformance harness 对比 Chromium golden（Numeric 0.5px 容差 + Pixel 错误分类双通道，当前 35 用例零 xfail）证明。子集边界由 [docs/FEATURES.md](docs/FEATURES.md) 权威定义：每行特性要么有金标准证据，要么有显式排除理由与重估条件。
 
 ## 快速上手
+
+安装（crates.io）：
+
+```powershell
+cargo add style-engine style-engine-vello
+```
 
 ```rust
 use style_engine::{StyleEngine, StyleNode};
@@ -68,4 +74,4 @@ let scene = style_engine_vello::render(&frame.paint);
 cargo test -p style-engine --all-features   # 仅核心测试
 ```
 
-MSRV **1.90**（edition 2024；依赖地板链见 DEPENDENCIES.md）。许可 MIT OR Apache-2.0；不发布 crates.io。
+MSRV **1.90**（edition 2024；依赖地板链见 DEPENDENCIES.md）。许可 MIT OR Apache-2.0；发布 crates.io（2026-10 决策，废止早期「不发布」约定）。

@@ -8,7 +8,7 @@
   counter-style 格式化层（P8，marker_text/format_counter_with）已就绪，本批
   补齐列表语义闭环：值面、伪节点、标记渲染、隐式计数器、UA 表。
 
-## D1：值面——三物理槽 + Display::ListItem + 第 37 简写
+## D1：值面——三物理槽 + Display::ListItem + 第 40 简写
 
 - `PropertyId` 增 `ListStyleType/ListStylePosition/ListStyleImage`（slot
   173/174/175，ALL 尾追加，动画描述符整体后移 176..182，SLOT_COUNT 180→183；
@@ -21,7 +21,7 @@
   `ListStyleImage(Option<BackgroundImage>)`（复用背景图像值文法单源）。
 - `Display` 增 `ListItem`（parse "list-item"；map_style → taffy Block——列表项
   是块级盒，marker 与隐式计数由引擎管线承担）。
-- `list-style` 简写（第 37 项）：三长手 `||`；**none 二义消解**按 css-lists-3
+- `list-style` 简写（第 40 项）：三长手 `||`；**none 二义消解**按 css-lists-3
   §3.6——none 依序应用于未设置的分量（`none disc`→image=none+type=disc；
   `none`→双双 none；`none disc url(b)`→语法错误）。实现上 none 词面在分量
   try_parse 前拦截计数，循环后消解。锁测试 7 代表值。
@@ -112,7 +112,7 @@ TableCaption/TableRowGroup 虽 map_style 同 Block，同样无歧义块级，一
 
 ## 影响
 
-- 值面：+3 物理槽（SLOT_COUNT 183）、Display::ListItem、第 37 简写、
+- 值面：+3 物理槽（SLOT_COUNT 183）、Display::ListItem、第 40 简写、
   三 parse 三访问器；反序列化面无变化（DeclValue 不出 serde 边界）。
 - 行为变化：li 由普通块变列表项（marker + 隐式计数）；`list-style` 系
   声明由 IACVT 变为生效；相邻块级 li 堆叠（D7 修复）。

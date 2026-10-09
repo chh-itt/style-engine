@@ -1,12 +1,17 @@
 # 更新日志（CHANGELOG）
 
-本 crate 不发布 crates.io（契约 C4/C7），版本号仅作 API 演进坐标。格式遵循
+本 crate 发布 crates.io（2026-10 决策，废止早期「不发布」约定 C4/C7）。格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；语义化版本：
-**MInor 位 = 特性新增，Patch 位 = 修复，Major 位 = 破坏性变更（未发生）**。
+**Minor 位 = 特性新增，Patch 位 = 修复，Major 位 = 破坏性变更（未发生）**。
 
 所有已发布提交见 https://github.com/chh-itt/style-engine/commits/main 。
 
 ## [Unreleased]
+
+### 发布准备 — 文档核查与 crates.io 发布决策
+
+- **发布决策（docs）**：废止早期「不发布 crates.io」约定（契约 C4/C7）——README/BREAKING-POLICY/CHANGELOG 头注同步改写；本 crate 即将发布 crates.io（版本号维持 0.1.0，0.x 语义不变）。
+- **文档数字修正**：README 属性槽位 94→183、calc 槽位 15→17（CalcAxis 实测 17 轴）；INVALIDATION.md styles 缓存槽位 94→183；V1-SCOPE 槽位 180→183（ALL 176 + 7 动画描述符）、简写 36→40；list-style 简写序数「第 37」→「第 40」（FEATURES/CHANGELOG/ADR-0041，ADR-0040 时期口径漏加 font/grid/grid-template 三项所致）。
 
 ### 1.0 对齐 — 渲染栈升级 vello 0.11 / wgpu 30（P9-8）
 
@@ -33,7 +38,7 @@
 
 ### 1.0 对齐 — 列表闭环：display:list-item、::marker 与 list-style（P9-3）
 
-- **值面（feat，css-lists-3 §3.3–§3.6，ADR-0041）**：新增 `list-style-type`（`<counter-style>` 名或 `<string>` 字面；未知名使用期回退 decimal，css-counter-styles-3 §2；`none` 抑制）、`list-style-position`（inside|outside）、`list-style-image`（复用背景图像值文法）三物理槽（slot 173/174/175，SLOT_COUNT 180→183，均继承；初始 disc/outside/none）与 `Display::ListItem`（map_style→taffy Block）。`list-style` 简写（第 37 项）：三长手 `||`，none 二义消解按 §3.6（none 归未设分量——`none disc`→image=none+type=disc、裸 `none`→双双 none、`none disc url(b)` 语法错误）；var() 挂起路径经三表同步自动走通。
+- **值面（feat，css-lists-3 §3.3–§3.6，ADR-0041）**：新增 `list-style-type`（`<counter-style>` 名或 `<string>` 字面；未知名使用期回退 decimal，css-counter-styles-3 §2；`none` 抑制）、`list-style-position`（inside|outside）、`list-style-image`（复用背景图像值文法）三物理槽（slot 173/174/175，SLOT_COUNT 180→183，均继承；初始 disc/outside/none）与 `Display::ListItem`（map_style→taffy Block）。`list-style` 简写（第 40 项）：三长手 `||`，none 二义消解按 §3.6（none 归未设分量——`none disc`→image=none+type=disc、裸 `none`→双双 none、`none disc url(b)` 语法错误）；var() 挂起路径经三表同步自动走通。
 - **::marker 伪节点（feat，css-lists-3 §3.1/§3.2，ADR-0041）**：`PseudoWhich::Marker`（key=(host,2)、首子位、::before 之前）；列表项宿主无条件创建（UA 表 li{display:list-item} 无伪元素规则场景 keep-alive 门控）；作者 `li::marker { color/font-size/… }` 经 originating_element 既有通路生效。标记内容算法按 §3.2 首个真条件：作者 content > list-style-image > list-style-type（计数表示+prefix+suffix，复用 P8 counter-format 单源 `marker_text`）> none（非列表项宿主恒 none 抑制成盒）。
 - **标记渲染 = 绘制层合成（fix，D3 redesign）**：marker 伪节点 taffy 恒隐藏、不参与布局；paint 层在宿主首行内容左缘合成 Text op（样式取 marker 自身 computed style），宿主文本 x 偏移 marker 前进宽、折行宽度让位——inside 语义天然成立；outside 按 inside 渲染（B 级豁免：css-lists-3 自认 outside 布局 handwavey；重估条件=IFC 重构）。SINK 面零改动（marker=普通 Text op）。
 - **隐式 list-item 计数器（feat，css-lists-3 §4.6）**：`display:list-item` 元素自动累加隐式 list-item 计数器（显式 counter-increment:list-item 不叠加；counter-reset: list-item N 照常）——`<ol>` 数字标记开箱即用。

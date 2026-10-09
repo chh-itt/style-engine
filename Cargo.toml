@@ -16,6 +16,7 @@ edition = "2024"
 # 实测 2026-10；MSRV 以依赖最高者为准，见 docs/DEPENDENCIES.md）。
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/chh-itt/style-engine"
 
 [workspace.lints.rust]
 # 阶段3：forbid → deny——唯一豁免点 = style-engine SendSyncTaffy（taffy

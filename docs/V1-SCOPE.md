@@ -18,7 +18,7 @@ v1.0 = **框架无关 CSS 语义层的行为可信点**：在桌面 GUI 尺度�
 ## 2. 验收维度与达标证据（P9 后现状）
 
 ### L1 样式代数（级联内核）
-- 声明解析：180 属性槽（ALL 176 位 + 动画描述符）、36 简写（含 font/
+- 声明解析：183 属性槽（ALL 176 位 + 7 动画描述符）、40 简写（含 font/
   grid/grid-template/list-style 全链展开）、var() 挂起代换、宽关键字、
   calc() 结算式（三期槽位化）、@media/@supports/@container/@layer/
   @keyframes/@font-face/@import/@counter-style/@property 全臂。
