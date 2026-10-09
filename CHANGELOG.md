@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 相对字重 bolder/lighter（P9-1b）
+
+- **相对字重关键字（feat，css-fonts-4 §2.2.1，ADR-0039）**：`font-weight: bolder|lighter` 入文法（旧仅 normal/bold/number，相对关键字整条 IACVT）。`DeclValue::RelativeFontWeight(bool)` 存活至级联物化期，按父计算权重经核心单源 `relative_font_weight` 按规范图表（w<100→400/不变 … 900≤w→不变/700）终结为绝对 `Number`——计算值恒绝对，访问器/过渡/Text 通道零感知；根节点以 400 为基；继承链每层重复解析（子代继承父已解析绝对值）。锁定测试 +4：图表逐行边界、bolder/lighter 链式物化、垃圾值拒绝、UA 语义与 author 覆盖。
+- **UA 表语义修正（fix，行为变化）**：`b, strong { font-weight: bold }` 改为 `bolder`（400 父下等值；h1 内 b 700→900、100 父下 700→400 = 规范正确）。ADR-0033 登记的该 B 级偏差消除。
+
 ### 1.0 对齐 — 渐变停点文法补齐与双 sink 均布统一（P9-1a）
 
 - **停点文法（feat，css-images-3/4，ADR-0038）**：色彩提示（`linear-gradient(red, 50%, blue)`）与任意序位置（`25% red`）入文法（旧文法强制色前位置，此类声明整条 IACVT）；css-images-4 双位置（`red 10% 90%`）按同色两停点 desugar。`Gradient` 增 `hints: Vec<GradientHint>`（`after_stop`/`position`），ComputedStyle→PaintOp::Gradient→serde dump/load 全链透传（旧 dump 缺字段经 `#[serde(default)]` 兼容）。解析拒绝：首停点前提示、尾随提示、双位置缺色、单停点。新增锁定测试 9 件（css_images.rs）。

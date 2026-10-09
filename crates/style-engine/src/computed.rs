@@ -1555,6 +1555,18 @@ pub fn compute_node_from_cascade(
         }
     }
 
+    // 5) 相对字重物化（css-fonts-4 §2.2.1）：bolder/lighter 按父计算权重
+    // 查表终结为 Number（父槽自顶向下先算完，恒为已解析的绝对权重；
+    // 根节点无父 = 以初始权重 400 为基，与浏览器一致）。
+    if let Some(DeclValue::RelativeFontWeight(bolder)) =
+        style.values[PropertyId::FontWeight.slot()].clone()
+    {
+        let w = parent.map_or(400.0, |p| p.font_weight());
+        style.values[PropertyId::FontWeight.slot()] = Some(DeclValue::Number(
+            crate::css::property::relative_font_weight(w, bolder),
+        ));
+    }
+
     style
 }
 
@@ -1926,5 +1938,87 @@ mod tests {
         assert_eq!(p_style.font_size_px(), 20.0);
         let c_style = compute_node(&tree, c, &s, &MediaEnv::default(), Some(&p_style));
         assert_eq!(c_style.font_size_px(), 10.0);
+    }
+
+    #[test]
+    fn relative_font_weight_table_edges() {
+        // css-fonts-4 §2.2.1 图表逐行边界。
+        use crate::css::property::relative_font_weight as rfw;
+        // bolder
+        assert_eq!(rfw(1.0, true), 400.0); // w<100 → 400
+        assert_eq!(rfw(99.9, true), 400.0);
+        assert_eq!(rfw(100.0, true), 400.0);
+        assert_eq!(rfw(349.0, true), 400.0);
+        assert_eq!(rfw(350.0, true), 700.0);
+        assert_eq!(rfw(400.0, true), 700.0);
+        assert_eq!(rfw(549.0, true), 700.0);
+        assert_eq!(rfw(550.0, true), 900.0);
+        assert_eq!(rfw(750.0, true), 900.0);
+        assert_eq!(rfw(899.0, true), 900.0);
+        assert_eq!(rfw(900.0, true), 900.0); // 不变（900 即 900）
+        assert_eq!(rfw(1000.0, true), 1000.0); // 不变（>900 保原值）
+        // lighter
+        assert_eq!(rfw(50.0, false), 50.0); // w<100 不变
+        assert_eq!(rfw(100.0, false), 100.0);
+        assert_eq!(rfw(349.0, false), 100.0);
+        assert_eq!(rfw(350.0, false), 100.0);
+        assert_eq!(rfw(549.0, false), 100.0);
+        assert_eq!(rfw(550.0, false), 400.0);
+        assert_eq!(rfw(749.0, false), 400.0);
+        assert_eq!(rfw(750.0, false), 700.0);
+        assert_eq!(rfw(899.0, false), 700.0);
+        assert_eq!(rfw(900.0, false), 700.0);
+        assert_eq!(rfw(1000.0, false), 700.0);
+    }
+
+    #[test]
+    fn bolder_lighter_parse_and_materialize_chain() {
+        let s = sheet(
+            ".a { font-weight: bolder } .b { font-weight: lighter } \
+             .p { font-weight: 100 } .q { font-weight: lighter }",
+        );
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        // 根（无父）bolder → 基 400 → 700。
+        let a = tree.insert_child(root, node("div", &["a"], ""));
+        let a_style = compute_node(&tree, a, &s, &MediaEnv::default(), None);
+        assert_eq!(a_style.font_weight(), 700.0, "根级 bolder = 700");
+        // 700 → bolder → 900 → bolder → 900（不变）。
+        let b = tree.insert_child(a, node("div", &["a"], ""));
+        let b_style = compute_node(&tree, b, &s, &MediaEnv::default(), Some(&a_style));
+        assert_eq!(b_style.font_weight(), 900.0);
+        let c = tree.insert_child(b, node("div", &["a"], ""));
+        let c_style = compute_node(&tree, c, &s, &MediaEnv::default(), Some(&b_style));
+        assert_eq!(c_style.font_weight(), 900.0, "900 bolder 不变");
+        // lighter 链：550 → 400 → 100 → 100。
+        let mut w550 = a_style.clone();
+        w550.values[PropertyId::FontWeight.slot()] = Some(DeclValue::Number(550.0));
+        let l1 = tree.insert_child(root, node("div", &["b"], ""));
+        let l1_style = compute_node(&tree, l1, &s, &MediaEnv::default(), Some(&w550));
+        assert_eq!(l1_style.font_weight(), 400.0);
+        let l2 = tree.insert_child(l1, node("div", &["b"], ""));
+        let l2_style = compute_node(&tree, l2, &s, &MediaEnv::default(), Some(&l1_style));
+        assert_eq!(l2_style.font_weight(), 100.0);
+        // 父 100 → lighter → 100（100..350 档 → 100，不变）。
+        let p = tree.insert_child(root, node("div", &["p"], ""));
+        let p_style = compute_node(&tree, p, &s, &MediaEnv::default(), None);
+        assert_eq!(p_style.font_weight(), 100.0);
+        let q = tree.insert_child(p, node("div", &["q"], ""));
+        let q_style = compute_node(&tree, q, &s, &MediaEnv::default(), Some(&p_style));
+        assert_eq!(q_style.font_weight(), 100.0);
+    }
+
+    #[test]
+    fn font_weight_number_still_absolute_and_rejects_garbage() {
+        // 尾随多余组件 → 声明非法（裸声明毒化后续规则为已知 StyleSheetParser
+        // 行为，故单独解析该条）。
+        let bad = crate::css::stylesheet::parse_stylesheet("b { font-weight: bolder lighter }");
+        assert!(!bad.report.is_clean(), "bolder lighter 应为非法声明");
+        let s = sheet("a { font-weight: 550 }");
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let n = tree.insert_child(root, node("a", &[], ""));
+        let style = compute_node(&tree, n, &s, &MediaEnv::default(), None);
+        assert_eq!(style.font_weight(), 550.0, "数字权重保持绝对语义");
     }
 }

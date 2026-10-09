@@ -1419,6 +1419,11 @@ pub enum DeclValue {
     LenAuto(Option<LengthPercentage>),
     /// opacity/flex-grow/flex-shrink/z-index/font-weight。
     Number(f32),
+    /// font-weight 相对关键字（css-fonts-4 §2.2.1）：bolder → true、
+    /// lighter → false。级联物化期按父计算权重经 [`relative_font_weight`]
+    /// 查表终结为 [`DeclValue::Number`]（计算值恒为绝对权重，消费者与
+    /// 过渡层只见 Number）。
+    RelativeFontWeight(bool),
     /// color/background-color/border-*-color。
     Color(ColorValue),
     /// display 值族。
@@ -3892,6 +3897,43 @@ pub fn parse_line_height(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
+/// css-fonts-4 §2.2.1 相对字重表：按继承权重 w 与方向（bolder/lighter）
+/// 给出计算权重。等价于规范图表——「仅含 thin(100)/normal(400)/bold(700)/
+/// heavy(900) 四档的字体族中取相邻更粗/更细档位」：
+///
+/// | w            | bolder | lighter |
+/// |--------------|--------|---------|
+/// | w < 100      | 400    | 不变    |
+/// | 100 ≤ w < 350| 400    | 100     |
+/// | 350 ≤ w < 550| 700    | 100     |
+/// | 550 ≤ w < 750| 900    | 400     |
+/// | 750 ≤ w < 900| 900    | 700     |
+/// | 900 ≤ w      | 不变   | 700     |
+pub fn relative_font_weight(inherited: f32, bolder: bool) -> f32 {
+    if bolder {
+        if inherited < 350.0 {
+            400.0
+        } else if inherited < 550.0 {
+            700.0
+        } else if inherited < 900.0 {
+            900.0
+        } else {
+            inherited // 900.. 不变
+        }
+    } else {
+        // lighter
+        if inherited < 100.0 {
+            inherited // 不变
+        } else if inherited < 550.0 {
+            100.0
+        } else if inherited < 750.0 {
+            400.0
+        } else {
+            700.0
+        }
+    }
+}
+
 /// font-size：<length-percentage> 或 CSS 绝对字号关键字（物化为 px 表）。
 pub fn parse_font_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let kw = p.try_parse(|p| -> ValResult<LengthPercentage> {
@@ -3919,12 +3961,19 @@ pub fn parse_font_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
-/// font-weight：normal→400、bold→700 或 1–1000 的 <number>。
+/// font-weight：normal→400、bold→700、1–1000 的 <number> 或相对关键字
+/// bolder/lighter（css-fonts-4 §2.2.1，物化规则见 [`relative_font_weight`]）。
 pub fn parse_font_weight(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
     match &t {
         Token::Ident(name) if name.eq_ignore_ascii_case("normal") => Ok(DeclValue::Number(400.0)),
         Token::Ident(name) if name.eq_ignore_ascii_case("bold") => Ok(DeclValue::Number(700.0)),
+        Token::Ident(name) if name.eq_ignore_ascii_case("bolder") => {
+            Ok(DeclValue::RelativeFontWeight(true))
+        }
+        Token::Ident(name) if name.eq_ignore_ascii_case("lighter") => {
+            Ok(DeclValue::RelativeFontWeight(false))
+        }
         Token::Number { value, .. } => {
             // CSS 允许 1–1000；越界按容错拒绝
             if (1.0..=1000.0).contains(value) {
@@ -5346,11 +5395,15 @@ fn parse_gradient_stops(p: &mut Parser<'_>) -> ValResult<(Vec<ColorStop>, Vec<Gr
         let mut lps: SmallVec<[LengthPercentage; 2]> = SmallVec::new();
         let mut color: Option<ColorValue> = None;
         loop {
-            if lps.len() < 2 && let Ok(lp) = p.try_parse(parse_length_percentage) {
+            if lps.len() < 2
+                && let Ok(lp) = p.try_parse(parse_length_percentage)
+            {
                 lps.push(lp);
                 continue;
             }
-            if color.is_none() && let Ok(c) = p.try_parse(parse_color_value) {
+            if color.is_none()
+                && let Ok(c) = p.try_parse(parse_color_value)
+            {
                 color = Some(c);
                 continue;
             }

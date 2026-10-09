@@ -38,9 +38,8 @@ p, blockquote, figure, ul, ol, dl, menu { margin: 1em 0; }
 /* li 不发 display: list-item——引擎 Display 尚无该变体（ADR-0033 D4
    breaking 不做）；未声明 = 初始 Block，与块渲染一致，无 marker。 */
 
-/* -- 短语语义：权重 -- */
-/* bolder 语义（比父级更粗）未实现——物化为 bold（偏差【B】） */
-b, strong { font-weight: bold; }
+/* -- 短语语义：权重（bolder = 比父级更粗，css-fonts-4 §2.2.1） -- */
+b, strong { font-weight: bolder; }
 
 /* -- 短语语义：倾斜 -- */
 i, em, cite, var, dfn { font-style: italic; }

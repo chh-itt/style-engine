@@ -10645,6 +10645,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ua_bolder_semantics_and_author_override() {
+        // P9-1b：UA 表 b/strong → bolder（css-fonts-4 §2.2.1 相对字重）。
+        // div(400) > strong > b 链：400 → 700 → 900；h1(700) 内 b → 900；
+        // author 绝对权重压过 UA origin bolder（css-cascade origin 序）。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.set_ua_stylesheet(crate::builtins::DEFAULT_UA_SHEET);
+        assert!(engine.insert(None, Key(1), StyleNode::default()).is_ok());
+        assert!(
+            engine
+                .insert(
+                    Some(Key(1)),
+                    Key(2),
+                    StyleNode {
+                        name: Some("strong".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(
+                    Some(Key(2)),
+                    Key(3),
+                    StyleNode {
+                        name: Some("b".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        assert_eq!(engine.computed_style(Key(2)).unwrap().font_weight(), 700.0);
+        assert_eq!(
+            engine.computed_style(Key(3)).unwrap().font_weight(),
+            900.0,
+            "strong(700) 内 b bolder → 900"
+        );
+
+        let mut engine2: StyleEngine<Key> = StyleEngine::new();
+        engine2.set_ua_stylesheet(crate::builtins::DEFAULT_UA_SHEET);
+        engine2.set_stylesheet("b { font-weight: 500 }");
+        assert!(
+            engine2
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("h1".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        assert!(
+            engine2
+                .insert(
+                    Some(Key(1)),
+                    Key(2),
+                    StyleNode {
+                        name: Some("b".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        let frame = engine2.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        assert_eq!(engine2.computed_style(Key(1)).unwrap().font_weight(), 700.0);
+        assert_eq!(
+            engine2.computed_style(Key(2)).unwrap().font_weight(),
+            500.0,
+            "author 500 压 UA bolder"
+        );
+    }
+
     /// P6（ADR-0035 D1）：host 快筛键提取矩阵——类/类型/通配/前缀组合器
     /// 哨兵/id 键，且表装载路径重建索引。
     #[test]
