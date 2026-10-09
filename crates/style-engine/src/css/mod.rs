@@ -11,6 +11,12 @@ pub mod property_rule;
 pub mod stylesheet;
 pub mod value;
 
+/// CSS 宽关键字全集（css-cascade）：描述符/注册属性值含之 = 无效。
+/// counter_style.rs 与 property_rule.rs 共用单源（消除双处重声明的
+/// 漂移面）。
+pub(crate) const CSS_WIDE_KEYWORDS: [&str; 5] =
+    ["initial", "inherit", "unset", "revert", "revert-layer"];
+
 pub use decl::{DeclSource, Declaration, DeclarationBlock};
 pub use property::{
     Align, BackgroundImage, BorderStyle, BoxShadow, BoxShadowList, ColorStop, DeclValue, Display,

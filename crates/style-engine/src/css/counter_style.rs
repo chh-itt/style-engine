@@ -94,9 +94,9 @@ impl Default for CounterStyleRule {
     }
 }
 
-/// CSS 全局关键字（css-cascade：描述符值含之 = 该描述符无效）。与
-/// property_rule.rs:82 私有常量同表——此处本地重声明（跨模块私有不可见）。
-const CSS_WIDE_KEYWORDS: [&str; 5] = ["initial", "inherit", "unset", "revert", "revert-layer"];
+/// CSS 全局关键字（css-cascade）：描述符值含之 = 该描述符无效。
+/// 单源见 css/mod.rs `CSS_WIDE_KEYWORDS`。
+use crate::css::CSS_WIDE_KEYWORDS;
 
 /// @counter-style 规则解析：name（prelude 已验证 custom-ident）+ 块体
 /// 描述符循环（模板 = parse_font_face_block + report 线程）。None =

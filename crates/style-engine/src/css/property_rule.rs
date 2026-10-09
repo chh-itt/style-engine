@@ -79,7 +79,9 @@ pub struct PropertyRule {
     pub initial_value: Option<TokenBuf>,
 }
 
-const CSS_WIDE_KEYWORDS: [&str; 5] = ["initial", "inherit", "unset", "revert", "revert-layer"];
+/// CSS 全局关键字（css-cascade）：注册属性值含之 = 无效。
+/// 单源见 css/mod.rs `CSS_WIDE_KEYWORDS`。
+use super::CSS_WIDE_KEYWORDS;
 
 const LENGTH_UNITS: [&str; 24] = [
     "px", "cm", "mm", "q", "in", "pt", "pc", "em", "rem", "ex", "ch", "vw", "vh", "vmin", "vmax",

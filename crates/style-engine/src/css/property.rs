@@ -1009,24 +1009,46 @@ impl PropertyId {
     /// CSS 属性名 → PropertyId（大小写不敏感）。简写名返回 None（由简写
     /// 展开器处理）。动画描述符长手（96..103 槽位）不在 ALL（全集物化
     /// 排除——仅声明时落槽），但长手声明必须可路由（css-animations-1：
-    /// animation-* 长手是一等属性），故 ALL 查找未中后走补表。
+    /// animation-* 长手是一等属性），故补表并入排序索引。查找走
+    /// OnceLock 惰性排序索引 + 二分（O(log n)，单源仍为 ALL/补表）。
     pub fn from_css_name(name: &str) -> Option<Self> {
         let lower = name.to_ascii_lowercase();
-        if let Some(id) = Self::ALL.iter().copied().find(|id| id.css_name() == lower) {
-            return Some(id);
-        }
-        match lower.as_str() {
-            "animation-name" => Some(Self::AnimationName),
-            "animation-duration" => Some(Self::AnimationDuration),
-            "animation-delay" => Some(Self::AnimationDelay),
-            "animation-iteration-count" => Some(Self::AnimationIterationCount),
-            "animation-timing-function" => Some(Self::AnimationTimingFunction),
-            "animation-direction" => Some(Self::AnimationDirection),
-            "animation-fill-mode" => Some(Self::AnimationFillMode),
-            // C2：overflow-wrap 的 legacy 别名（css-text-3）
-            "word-wrap" => Some(Self::OverflowWrap),
-            _ => None,
-        }
+        let index = Self::sorted_name_index();
+        let idx = index
+            .binary_search_by_key(&lower.as_str(), |(n, _)| *n)
+            .ok()?;
+        Some(index[idx].1)
+    }
+
+    /// 排序名称索引（ALL ∪ 动画描述符长手 ∪ word-wrap 别名），惰性构建
+    /// 一次。键均为 ASCII 小写字面量，与查询键 `to_ascii_lowercase` 同序。
+    fn sorted_name_index() -> &'static [(&'static str, PropertyId)] {
+        static INDEX: std::sync::OnceLock<Vec<(&'static str, PropertyId)>> =
+            std::sync::OnceLock::new();
+        INDEX.get_or_init(|| {
+            let mut v: Vec<(&'static str, PropertyId)> =
+                Self::ALL.iter().map(|id| (id.css_name(), *id)).collect();
+            // 动画描述符长手（不在 ALL）+ overflow-wrap 的 legacy 别名
+            //（css-text-3）。
+            v.extend([
+                ("animation-name", PropertyId::AnimationName),
+                ("animation-duration", PropertyId::AnimationDuration),
+                ("animation-delay", PropertyId::AnimationDelay),
+                (
+                    "animation-iteration-count",
+                    PropertyId::AnimationIterationCount,
+                ),
+                (
+                    "animation-timing-function",
+                    PropertyId::AnimationTimingFunction,
+                ),
+                ("animation-direction", PropertyId::AnimationDirection),
+                ("animation-fill-mode", PropertyId::AnimationFillMode),
+                ("word-wrap", PropertyId::OverflowWrap),
+            ]);
+            v.sort_unstable_by_key(|(n, _)| *n);
+            v
+        })
     }
 }
 
@@ -6517,13 +6539,10 @@ pub fn parse_quotes(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         Token::Ident(ref id) if id.eq_ignore_ascii_case("none") => {
             Ok(DeclValue::Quotes(QuotesValue::None))
         }
-        Token::QuotedString(_) => {
+        Token::QuotedString(ref s) => {
             // css-content-3：[ <string> <string> ]+ ——空格分隔对，无逗号。
             let mut pairs: Vec<(String, String)> = Vec::new();
-            let mut open: Option<String> = match t {
-                Token::QuotedString(s) => Some(s.to_string()),
-                _ => unreachable!(),
-            };
+            let mut open: Option<String> = Some(s.to_string());
             loop {
                 p.skip_whitespace();
                 // 对内第二串（必需）。
@@ -6979,5 +6998,45 @@ mod tests {
             );
         }
         assert_eq!(PropertyId::ALL.len() + anim.len(), PropertyId::SLOT_COUNT);
+    }
+
+    /// from_css_name 排序索引锁：ALL 全集往返（css_name → id → css_name
+    /// 恒等）、动画描述符长手可路由、word-wrap 别名、大小写不敏感、
+    /// 简写名不路由（None）。
+    #[test]
+    fn from_css_name_index_roundtrip() {
+        for pid in PropertyId::ALL {
+            assert_eq!(
+                PropertyId::from_css_name(pid.css_name()),
+                Some(*pid),
+                "{} 往返失败",
+                pid.css_name()
+            );
+        }
+        // 动画描述符长手（不在 ALL）仍可路由。
+        assert_eq!(
+            PropertyId::from_css_name("animation-iteration-count"),
+            Some(PropertyId::AnimationIterationCount)
+        );
+        // legacy 别名。
+        assert_eq!(
+            PropertyId::from_css_name("word-wrap"),
+            Some(PropertyId::OverflowWrap)
+        );
+        // 大小写不敏感。
+        assert_eq!(
+            PropertyId::from_css_name("FONT-WEIGHT"),
+            Some(PropertyId::FontWeight)
+        );
+        // 简写名不路由（由简写展开器处理）。
+        for shorthand in ["margin", "padding", "border", "background", "font", "flex"] {
+            assert_eq!(
+                PropertyId::from_css_name(shorthand),
+                None,
+                "{shorthand} 不应经长手路由"
+            );
+        }
+        // 未知名。
+        assert_eq!(PropertyId::from_css_name("not-a-real-property"), None);
     }
 }
