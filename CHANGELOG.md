@@ -15,6 +15,7 @@
 - **发布前文档审计修正**：V1-SCOPE「21 PaintOp 变体」→20（paint.rs 实测）；DEPENDENCIES.md P9-8 日期与「适配 5 处」→7 处；CHANGELOG wgpu 30 差分「5 项 API 变化」→「4 项变化 + 1 项沿用确认」、css_images.rs 锁定测试 9 件→10 件（FEATURES 同步）；README 快速上手 `set_stylesheet` 去错误 `?`（返回 ParseReport 非 Result）；补记 P9-1d 工程小修节；Cargo.toml 注释 vello 依赖链 rust-version 1.88→1.89。
 - **rustdoc 告警清零（126→0）**：全仓文档注释清理——CSS 文法 token 包反引号（`<length-percentage>` 等）、区间/下标方括号转义（`\[0,1\]`/`line_names[i]`）、不可解析链接去链接化（私有项、泛型直名）、悬空 code span 修复；`cargo doc --workspace --all-features` 零告警。
 - **CI 修复**：golden-drift job 平台一致性钉定——golden 重生成协议固定为本地 Windows（文本度量 subpixel 步进与 linux fontconfig 整数量化差最大 1.125px 超容差），job `runs-on` 改 `windows-latest`、playwright 去 `--with-deps`、加 `core.autocrlf true` 行尾钉定步。
+- **发布面补齐**：三发布 crate（style-engine/soft/vello）`[package]` 补 `readme = "../../README.md"`——工作树根 README 随包上传，crates.io 页面渲染项目说明；`repository` 字段已在位（crate 页跳转仓库）。
 - **feature-powerset 修复**：表格 auto 列文本测量依赖 `feature = "text"`——layout-only 组合下退化为仅内缩宽度（`cargo hack --feature-powerset` 曾在 P7 批引入的潜伏破坏，首次推送 CI 暴露）。
 
 ### 1.0 对齐 — 渲染栈升级 vello 0.11 / wgpu 30（P9-8）
