@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 相对字号 larger/smaller（P9-1c）
+
+- **相对字号关键字（feat，css-fonts-4 `<<relative-size>>`，ADR-0039 附）**：`font-size: larger|smaller` 入文法（旧仅绝对关键字/长度百分比，相对关键字整条 IACVT）。`DeclValue::RelativeFontSize(bool)` 存活至级联物化期（步骤 4b），按父计算字号经核心单源 `relative_font_size` 终结为绝对 `Len(Px)`——父字号恰为绝对字号表值时步进一格（端点钳制）、非表值按 1.2 比例缩放（规范 may 语气允许的两实现，表步进优先与 Chromium 对齐）；根节点以初始 16px 为基；继承链每层重复解析。绝对字号 px 表升公共单源 `ABSOLUTE_FONT_SIZES_PX`/`ABSOLUTE_FONT_SIZE_NAMES`（解析与步进共用）。锁定测试 +4：表步进与比例回退、larger/smaller 链式物化、绝对关键字物化不漂移+垃圾值拒绝、UA 语义与 author 覆盖。
+- **UA 表语义修正（fix，行为变化）**：`small { font-size: small }`/`big { font-size: large }` 改为 `smaller`/`larger`——16px（medium）父下结果不变（13/18），其余父值按表步进或 1.2 比例随父缩放（旧绝对关键字在任何父下恒 13/18）。ADR-0033 登记的该 B 级偏差消除。
+
 ### 1.0 对齐 — 相对字重 bolder/lighter（P9-1b）
 
 - **相对字重关键字（feat，css-fonts-4 §2.2.1，ADR-0039）**：`font-weight: bolder|lighter` 入文法（旧仅 normal/bold/number，相对关键字整条 IACVT）。`DeclValue::RelativeFontWeight(bool)` 存活至级联物化期，按父计算权重经核心单源 `relative_font_weight` 按规范图表（w<100→400/不变 … 900≤w→不变/700）终结为绝对 `Number`——计算值恒绝对，访问器/过渡/Text 通道零感知；根节点以 400 为基；继承链每层重复解析（子代继承父已解析绝对值）。锁定测试 +4：图表逐行边界、bolder/lighter 链式物化、垃圾值拒绝、UA 语义与 author 覆盖。

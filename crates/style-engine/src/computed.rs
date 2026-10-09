@@ -1555,6 +1555,18 @@ pub fn compute_node_from_cascade(
         }
     }
 
+    // 4b) 相对字号物化（css-fonts-4 `<<relative-size>>`）：larger/smaller
+    // 按父计算字号终结为 px（父槽自顶向下先算完，恒为已解析绝对值；
+    // 根节点无父 = 以初始 16px 为基）。
+    if let Some(DeclValue::RelativeFontSize(larger)) =
+        style.values[PropertyId::FontSize.slot()].clone()
+    {
+        let px = parent.map_or(16.0, |p| p.font_size_px());
+        style.values[PropertyId::FontSize.slot()] = Some(DeclValue::Len(LengthPercentage::Px(
+            crate::css::property::relative_font_size(px, larger),
+        )));
+    }
+
     // 5) 相对字重物化（css-fonts-4 §2.2.1）：bolder/lighter 按父计算权重
     // 查表终结为 Number（父槽自顶向下先算完，恒为已解析的绝对权重；
     // 根节点无父 = 以初始权重 400 为基，与浏览器一致）。
@@ -2020,5 +2032,82 @@ mod tests {
         let n = tree.insert_child(root, node("a", &[], ""));
         let style = compute_node(&tree, n, &s, &MediaEnv::default(), None);
         assert_eq!(style.font_weight(), 550.0, "数字权重保持绝对语义");
+    }
+
+    #[test]
+    fn relative_font_size_table_steps_and_ratio_fallback() {
+        use crate::css::property::{ABSOLUTE_FONT_SIZES_PX, relative_font_size as rfs};
+        // 表命中：步进一格。
+        assert_eq!(rfs(16.0, true), 18.0); // medium larger → large
+        assert_eq!(rfs(18.0, true), 24.0);
+        assert_eq!(rfs(16.0, false), 13.0); // medium smaller → small
+        assert_eq!(rfs(13.0, false), 10.0);
+        // 端点钳制。
+        assert_eq!(rfs(9.0, false), 9.0, "xx-small smaller 不变");
+        assert_eq!(rfs(48.0, true), 48.0, "xxx-large larger 不变");
+        // 非表值：1.2 比例。
+        assert!((rfs(20.0, true) - 24.0).abs() < 1e-4);
+        assert!((rfs(20.0, false) - 20.0 / 1.2).abs() < 1e-4);
+        // 表值完整性（与 parse_font_size 物化同源）。
+        assert_eq!(ABSOLUTE_FONT_SIZES_PX.len(), 8);
+    }
+
+    #[test]
+    fn larger_smaller_parse_and_materialize_chain() {
+        let s = sheet(
+            ".a { font-size: larger } .b { font-size: smaller } \
+             .p { font-size: 100px } .q { font-size: larger }",
+        );
+        let fs = |st: &ComputedStyle| match st.values[PropertyId::FontSize.slot()].clone() {
+            Some(DeclValue::Len(LengthPercentage::Px(px))) => px,
+            other => panic!("font-size 应为绝对 px，实得 {:?}", other.map(|_| ())),
+        };
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        // 根（无父）larger → 基 16（表命中）→ 18。
+        let a = tree.insert_child(root, node("div", &["a"], ""));
+        let a_style = compute_node(&tree, a, &s, &MediaEnv::default(), None);
+        assert_eq!(fs(&a_style), 18.0, "根级 larger = large(18)");
+        // 18 → larger → 24 → larger → 32。
+        let b = tree.insert_child(a, node("div", &["a"], ""));
+        let b_style = compute_node(&tree, b, &s, &MediaEnv::default(), Some(&a_style));
+        assert_eq!(fs(&b_style), 24.0);
+        let c = tree.insert_child(b, node("div", &["a"], ""));
+        let c_style = compute_node(&tree, c, &s, &MediaEnv::default(), Some(&b_style));
+        assert_eq!(fs(&c_style), 32.0);
+        // smaller 链：16 → 13 → 10。
+        let r = tree.insert_child(root, node("div", &["b"], ""));
+        let r_style = compute_node(&tree, r, &s, &MediaEnv::default(), None);
+        assert_eq!(fs(&r_style), 13.0);
+        let r2 = tree.insert_child(r, node("div", &["b"], ""));
+        let r2_style = compute_node(&tree, r2, &s, &MediaEnv::default(), Some(&r_style));
+        assert_eq!(fs(&r2_style), 10.0);
+        // 非表值父（100px）：larger → 1.2 比例 → 120。
+        let p = tree.insert_child(root, node("div", &["p"], ""));
+        let p_style = compute_node(&tree, p, &s, &MediaEnv::default(), None);
+        assert_eq!(fs(&p_style), 100.0);
+        let q = tree.insert_child(p, node("div", &["q"], ""));
+        let q_style = compute_node(&tree, q, &s, &MediaEnv::default(), Some(&p_style));
+        assert!(
+            (fs(&q_style) - 120.0).abs() < 1e-4,
+            "100px larger = 1.2 比例"
+        );
+    }
+
+    #[test]
+    fn font_size_number_and_keyword_still_absolute() {
+        // 绝对关键字物化与旧值一致（表重构后不漂移）+ 尾随垃圾仍非法。
+        let s = sheet("a { font-size: xx-small } b { font-size: xxx-large }");
+        let mut tree = StyleTree::new();
+        let root = tree.root();
+        let n = tree.insert_child(root, node("a", &[], ""));
+        let style = compute_node(&tree, n, &s, &MediaEnv::default(), None);
+        let px = match style.values[PropertyId::FontSize.slot()].clone() {
+            Some(DeclValue::Len(LengthPercentage::Px(v))) => v,
+            _ => panic!(),
+        };
+        assert_eq!(px, 9.0);
+        let bad = crate::css::stylesheet::parse_stylesheet("a { font-size: larger smaller }");
+        assert!(!bad.report.is_clean(), "larger smaller 应为非法声明");
     }
 }

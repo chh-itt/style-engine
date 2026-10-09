@@ -182,10 +182,13 @@
   center/pre monospace+white-space:pre）；默认不装载（中立契约——表是
   数据不是行为，宿主显式装载）。P9-1b（ADR-0039）：b/strong UA 声明由
   bold 改为 bolder（css-fonts-4 §2.2.1 相对字重——400 父下两者等值，
-  h1 内 b 等非 400 父场景 bolder 语义才正确）。偏差【B】残余：
-  small/big=绝对关键字（larger/smaller 见 P9-1c）、无 list marker/
-  hr 3D/表 UA 细节。锁定：engine.rs ua_origin_ladder_and_important_inversion +
-  ua_builtin_sheet_applies_and_clears + ua_bolder_semantics_and_author_override。
+  h1 内 b 等非 400 父场景 bolder 语义才正确）；P9-1c（ADR-0039 附）：
+  small/big UA 声明由绝对字号改为 smaller/larger（css-fonts-4
+  `<<relative-size>>`——16px/medium 父下与旧绝对关键字同值 13/18，
+  其余父值按表步进或 1.2 比例随父缩放）。偏差【B】残余：无 list
+  marker/hr 3D/表 UA 细节。锁定：engine.rs ua_origin_ladder_and_important_inversion +
+  ua_builtin_sheet_applies_and_clears + ua_bolder_semantics_and_author_override +
+  ua_small_big_relative_font_size。
 - 文本变换与断行控制（C2，css-text-3 / ADR-0016）：text-transform
   none/uppercase/lowercase/capitalize/full-width（full-size-kana 接受
   no-op=T2）——自实现分段变换：span 边界切段、逐字符 old→new 字节映射
@@ -646,6 +649,22 @@
   bolder_lighter_parse_and_materialize_chain（根/700→900 链/lighter
   链）+ font_weight_number_still_absolute_and_rejects_garbage +
   engine.rs ua_bolder_semantics_and_author_override。
+- 相对字号【P9-1c（ADR-0039 附）已落地】：`font-size: larger|smaller`
+  入文法（`DeclValue::RelativeFontSize(bool)`），级联物化期
+  （compute_node_from_cascade 步骤 4b，em→px 之后、字重之前）按父
+  计算字号经核心单源 `relative_font_size` 终结为 `Len(Px)`——父字号
+  恰为绝对字号表值时步进一格（端点钳制 xx-small/xxx-large 不变）、
+  非表值按 1.2 比例缩放（css-fonts-4 `<<relative-size>>` 的 may 语气
+  允许两实现，表步进优先与 Chromium 对齐）；根节点无父以初始 16px
+  为基；继承链每层重复解析。绝对字号 px 表（9/10/13/16/18/24/32/48）
+  升公共单源 `ABSOLUTE_FONT_SIZES_PX` + `ABSOLUTE_FONT_SIZE_NAMES`
+  （parse_font_size 与步进共用，物化漂移面消除）。UA 表 small/big=
+  绝对关键字同步改 smaller/larger（16px medium 父下同值 13/18，
+  其余父值随父缩放）。锁定：computed.rs
+  relative_font_size_table_steps_and_ratio_fallback +
+  larger_smaller_parse_and_materialize_chain +
+  font_size_number_and_keyword_still_absolute +
+  engine.rs ua_small_big_relative_font_size。
 - 文本【line-height/letter-spacing 消费=已修复（第四批①）；text-align=已消费（第五批⑳：PaintOp::Text 携带声明值、sink 折行后 `Layout::align`——start/end/center/left/right/justify 全语义消费，对齐宽=max_advance 与 CSS 内容盒语义一致、justify 末行起始对齐、测量不变宽故盒几何零变化；像素目验归 Pixel 批）；span 级行高/字距=B·豁免；自定义禁则=B·豁免（上游）】：`PaintOp::Text` 经 sink `VelloTextSystem`（parley 0.11 排版 + DrawGlyphs）落字形（零副作用——系统字体禁用、字体字节由宿主双推 engine 测量/sink 绘制）；文本测量亦内置（text.rs），未推送测量的文本叶自动测量。富文本 spans（T5c-1）：`StyleNode.spans` 字节区间声明以节点基样式为 parent 复用 `compute_node` 级联求解，`PaintOp::Text.spans` 携带绘制期终结样式，sink 按 run 文本区间选色/推样式；测量按字节区间吸收 span 度量。换行（T5c-2）：white-space: normal 的自动测量文本叶在 pass1 布局后按包含块内容宽重测量并按需二次布局（包含块内容宽 = 父 border-box − 父左右 padding − 已生效 border，border-style 为 none 时宽归零、初始 medium 不计入；shrink-to-fit 父宽受无界文本影响的场景仍为近似）；宿主 `set_leaf_measure` 不参与自动重测。span 区间契约：`insert` 校验 UTF-8 字节边界/有序/不越界（无文本节点的 span 一律非法），违规返回 `ContractError::InvalidSpan`。未注册字体对应的泛族（缺省 sans-serif）测量为 0 尺寸——宿主应显式指定已注册族名或注册匹配泛族的字体。绘制侧 `PaintOp::Text.max_advance` 与测量共用同一约束保证折行一致（sink 用 `positioned_glyphs`，已含 run 偏移与基线）。**soft 端 span 消费已收口（P7）**：`text_device_polys`/`draw_text` 携带基色+spans，逐字符按字节偏移归属 span（后 span 胜同 vello rev-find），span 感知颜色/字号/族（族切换重解析、字号≠基重算 scale）；影字平移路径传真实 spans、blur>0 影子取基样式形状（B 级）；装饰线仍基样式单行近似（B 级）。属性→通路盘点（第四批）：line-height 与 letter-spacing 此前已解析入库但**无任何消费者**（无效声明）——已接入测量与绘制双通路（ComputedStyle 解析为 px，PaintOp::Text 携带 `line_height/letter_spacing`，sink 与测量同源推 StyleProperty，保证折行一致；span 级行高/字距为已知近似、仅基样式生效）；letter-spacing 的 initial 类型与解析产物不一致（Len(Px(0)) vs LenAuto(None)）已修同型；text-align 解析入库无消费者（start-only），列入 T1。离屏目验通路：`cargo run -p style-engine-demo --example snapshot`（vello `render_to_texture` → 纹理回读 → PNG；存储纹理路径要求 Rgba8Unorm，快照色彩较窗口路径偏亮属已知伪影）。字体资产：demo 内嵌 DejaVu Sans Regular/Bold（许可证见 `crates/style-engine-demo/assets/fonts/LICENSE-DejaVu.txt`）与 CJK 第二波 Noto Sans SC 可变字体（默认实例 Regular，OFL 见 `crates/style-engine-demo/assets/fonts/LICENSE-NotoSansSC.txt`）。CJK 行断行走 UAX #14 类规则（快照目验通过：混排行在表意文字边界折行；icu_segmenter 2.x 行分段器有意不加载 CJ 词典——设计取舍，调研见 DEPENDENCIES）。parley 已开 `complex-scripts`（上游 #621）：词分段获得 CJ 词典（`No segmentation model` 警告消除，≈+2MiB baked 数据），SEA 文字获词典级行断；禁则处理（kinsoku）仍不可达——parley `LineBreakOverrideFn` 仅 ASCII（上游限制，详见 DEPENDENCIES）。
 - opacity / 背景图片【opacity=已实现（勘误：旧文「Opacity 未映射」系文档失同步，与下条 z-index、L12 绘制清单及快照目验矛盾）；背景图片=已落地（第五批⑨；repeat/size/position/多层=F3b 语义精化取代 MVP 拉伸）】：opacity 经 `PaintOp::PushOpacity{alpha}/PopOpacity` 层对落地；背景图契约：background-image: url() 引用（解析已支持 UnquotedUrl 与 url() 函数两形）→ 宿主 `add_image(reference, w, h, rgba)` 注册表解析（零副作用——引擎不取 URL、不解码位图格式；rgba=宿主预解码 ARGB8 直排，peniko Blob 同型 `Arc<dyn AsRef<[u8]>>` 承载）；未注册引用=tracing 告警跳过（无 op）；**渲染（F3b）=固有尺寸+repeat 平铺（tile 双循环 ceil 对齐；space/round→重复=B 级）、size cover/contain/显式 LP 消费、多层反序发射（首层最上）、origin/clip PushClip 裁剪盒、圆角非零时 clip=BorderBox 用元素圆角**；`PaintOp::Image{source_w, source_h, pixels: ImageRes}` 自足携带（DisplayList 中立载体）；锁定测试 background_image_op（首 tile 几何+tile 计数 1250+未注册跳过）（vello `push_layer` alpha，SC 触发 opacity<1 已并入带序判定，见下条）。
 - z-index / 层叠【flex/grid 子项显式 z-index（无 position）=已落地（第五批㉑：显式 z ≠ auto 的 flex/grid item 与定位元素同等参与 ADR-0008 三带——负 z 进 Neg、其余进 Pos 带排序，锁定测试 flex_grid_item_z_index_orders；CSS 语义 flex/grid item 的 z-index ≠ auto 还创建 stacking context，按三带即可表达）；SC 触发全集=已落地（第四批②④ + 第五批㉒：transform / filter / clip-path / will-change 含触发属性 / isolation: isolate / mix-blend-mode ≠ normal——clip-path 已升实裁剪（F3c，见 T0 段条），其余仅触发、无效果实现）】（ADR-0008，CSS 2.1 Appendix E 简化三带）：SC 触发 = positioned 且数字 z、opacity < 1（clamp [0,1]）；带序 Neg（负 z 升序、等值树序）→ Flow（in-flow 树序）→ Pos（auto/0 树序在前、正 z 升序在后，非定位 SC 触发者键 0 树序）；SC 子树经 paint 递归天然原子。opacity 经 `PaintOp::PushOpacity{alpha}/PopOpacity` 层对（sink 用 vello `push_layer` alpha，快照目验通过）；`z-index: auto` 物化为 `ZIndex(None)`（与缺席等价、不触发 SC），数字为 `ZIndex(Some)`。残余偏差：flex/grid 子项的 z-index（无 position）不生效；transform 触发者已落地（第四批②，Pos 带键 0——层序测试覆盖树序控制组 + 快照目验）；filter 触发者已落地（第四批④：`DeclValue::Effect(bool)` 存在性语义位——`filter: none` 缺席、任意值宽容存在，函数块经 skip_block_content 递归吞咽满足 parse_nested_block 的 parse_entirely 耗尽契约；带序并入 SC 判定、不产生任何 PaintOp——测试断言 op 数与控制组一致；效果实现显式不在范围）；clip-path 已升实裁剪（F3c，ADR-0025——ClipShape 全形状解析 + PushClipPath 绘制裁剪，SC 触发=形状≠none，inset(0) 实发 PushClip/PopClip 对、效果触发测试已重基线）；will-change/isolation/mix-blend-mode 触发者已落地（第五批㉒ SC 触发全集：will-change 列表含 transform/filter/opacity/mix-blend-mode/clip-path/isolation/perspective 才置位（宽容接受任意 ident、纯语义位无提示优化）、isolation 仅 isolate 置位、mix-blend-mode 16 标准模式 + plus-lighter/darker 非 normal 置位——isolation/mix-blend-mode 已升实混合层（P1-2，见 T0 段混合层条；will-change 纯语义位不变），带序测试 + 解析语义测试×2 覆盖）。

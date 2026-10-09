@@ -9,9 +9,9 @@
 //! UA 细节（单元格内边距/表头居中）、`display: list-item`（初始值保持
 //! Block，breaking 不做，B 级在案）。
 //!
-//! 偏差【B】：HTML `small/big` 规范语义为相对字号（smaller/larger），
-//! 本表以 CSS 绝对字号关键字物化（small=13px/large=18px），因引擎
-//! font-size 尚未支持相对关键字。
+//! 偏差【B】（P9-1c 已消除 small/big 一项）：HTML `small/big` 规范语义
+//! 为相对字号（smaller/larger，css-fonts-4 `<<relative-size>>`）——本表
+//! 已按规范改写；残余偏差见上方范围界定。
 
 /// HTML 语义最小缺省表（UA 层，css-cascade-5 UserAgent origin）。
 ///
@@ -48,9 +48,10 @@ i, em, cite, var, dfn { font-style: italic; }
 u, ins { text-decoration-line: underline; }
 s, strike, del { text-decoration-line: line-through; }
 
-/* -- 短语语义：缩放（相对字号以绝对关键字物化，偏差【B】） -- */
-small { font-size: small; }
-big { font-size: large; }
+/* -- 短语语义：缩放（larger/smaller = css-fonts-4 <<relative-size>>，
+   级联物化期按父字号终结：表步进或 1.2 比例） -- */
+small { font-size: smaller; }
+big { font-size: larger; }
 
 /* -- 短语语义：对齐 -- */
 center { text-align: center; }

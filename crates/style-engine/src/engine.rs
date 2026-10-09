@@ -10723,6 +10723,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ua_small_big_relative_font_size() {
+        // P9-1c：UA 表 small/big → smaller/larger（css-fonts-4
+        // <<relative-size>>）。body(16=medium) > small → 13（small）；
+        // 16 下 big → 18（large）。author 绝对字号压过 UA origin。
+        let mut engine: StyleEngine<Key> = StyleEngine::new();
+        engine.set_ua_stylesheet(crate::builtins::DEFAULT_UA_SHEET);
+        assert!(engine.insert(None, Key(1), StyleNode::default()).is_ok());
+        assert!(
+            engine
+                .insert(
+                    Some(Key(1)),
+                    Key(2),
+                    StyleNode {
+                        name: Some("small".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        assert!(
+            engine
+                .insert(
+                    Some(Key(1)),
+                    Key(3),
+                    StyleNode {
+                        name: Some("big".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        let fs = |k: Key| engine.computed_style(k).unwrap().font_size_px();
+        assert!(
+            (fs(Key(2)) - 13.0).abs() < 1e-4,
+            "16px 下 smaller → small(13)"
+        );
+        assert!(
+            (fs(Key(3)) - 18.0).abs() < 1e-4,
+            "16px 下 larger → large(18)"
+        );
+
+        // author 覆盖：big { font-size: 20px }（非表值）→ 其子 small
+        // smaller = 20/1.2 ≈ 16.67（比例回退）。
+        let mut engine2: StyleEngine<Key> = StyleEngine::new();
+        engine2.set_ua_stylesheet(crate::builtins::DEFAULT_UA_SHEET);
+        engine2.set_stylesheet("big { font-size: 20px }");
+        assert!(
+            engine2
+                .insert(
+                    None,
+                    Key(1),
+                    StyleNode {
+                        name: Some("big".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        assert!(
+            engine2
+                .insert(
+                    Some(Key(1)),
+                    Key(2),
+                    StyleNode {
+                        name: Some("small".into()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+        );
+        let frame = engine2.frame((800.0, 600.0), 1.0, 0.0);
+        let _ = frame;
+        let fs2 = |k: Key| engine2.computed_style(k).unwrap().font_size_px();
+        assert!(
+            (fs2(Key(1)) - 20.0).abs() < 1e-4,
+            "author 20px 压 UA larger"
+        );
+        assert!((fs2(Key(2)) - 20.0 / 1.2).abs() < 1e-4, "20/1.2 比例回退");
+    }
+
     /// P6（ADR-0035 D1）：host 快筛键提取矩阵——类/类型/通配/前缀组合器
     /// 哨兵/id 键，且表装载路径重建索引。
     #[test]

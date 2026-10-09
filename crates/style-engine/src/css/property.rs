@@ -1424,6 +1424,11 @@ pub enum DeclValue {
     /// 查表终结为 [`DeclValue::Number`]（计算值恒为绝对权重，消费者与
     /// 过渡层只见 Number）。
     RelativeFontWeight(bool),
+    /// font-size 相对关键字（css-fonts-4 `<relative-size>`）：larger →
+    /// true、smaller → false。级联物化期按父计算字号经
+    /// [`relative_font_size`] 终结为 `Len(Px)`（计算值恒为绝对 px，
+    /// 消费者只见 Len）。
+    RelativeFontSize(bool),
     /// color/background-color/border-*-color。
     Color(ColorValue),
     /// display 值族。
@@ -3934,23 +3939,80 @@ pub fn relative_font_weight(inherited: f32, bolder: bool) -> f32 {
     }
 }
 
-/// font-size：<length-percentage> 或 CSS 绝对字号关键字（物化为 px 表）。
+/// font-size 的 larger/smaller（css-fonts-4 `<<relative-size>>`）：父字号
+/// 恰为 [`ABSOLUTE_FONT_SIZES_PX`] 表值时步进一格（端点钳制：xx-small
+/// 更小 / xxx-large 更大保持不变），否则按简单比例 1.2 放大/缩小——规范
+/// 允许 UA 自定 ratio（建议 1.2–1.5），取 1.2 与 Chromium 行为一致。
+pub fn relative_font_size(parent_px: f32, larger: bool) -> f32 {
+    const EPS: f32 = 1e-4;
+    let idx = ABSOLUTE_FONT_SIZES_PX
+        .iter()
+        .position(|&s| (s - parent_px).abs() < EPS);
+    match idx {
+        Some(i) => {
+            if larger {
+                ABSOLUTE_FONT_SIZES_PX[(i + 1).min(ABSOLUTE_FONT_SIZES_PX.len() - 1)]
+            } else {
+                ABSOLUTE_FONT_SIZES_PX[i.saturating_sub(1)]
+            }
+        }
+        None => {
+            if larger {
+                parent_px * 1.2
+            } else {
+                parent_px / 1.2
+            }
+        }
+    }
+}
+
+/// `<absolute-size>` 关键字名表（与 [`ABSOLUTE_FONT_SIZES_PX`] 按下标
+/// 一一对应；css-fonts-4 `<<absolute-size>>`，medium = 初始 16px）。
+pub const ABSOLUTE_FONT_SIZE_NAMES: [&str; 8] = [
+    "xx-small",
+    "x-small",
+    "small",
+    "medium",
+    "large",
+    "x-large",
+    "xx-large",
+    "xxx-large",
+];
+
+/// `<absolute-size>` 关键字物化 px 表（css-fonts-4 §absolute-size-mapping
+/// 允许 UA 表定制，引擎取经典 CSS 2.1 阶梯的物化值；[`relative_font_size`]
+/// 表步进与 [`parse_font_size`] 共用单源）。
+pub const ABSOLUTE_FONT_SIZES_PX: [f32; 8] = [9.0, 10.0, 13.0, 16.0, 18.0, 24.0, 32.0, 48.0];
+
+/// font-size：`<relative-size>` 关键字、CSS 绝对字号关键字（物化为 px 表）
+/// 或 `<length-percentage>`。
 pub fn parse_font_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    // 相对字号关键字——级联物化期按父计算字号终结（[`relative_font_size`]）
+    let rel = p.try_parse(|p| -> ValResult<bool> {
+        let t = p.next()?.clone();
+        match &t {
+            Token::Ident(name) if name.eq_ignore_ascii_case("larger") => Ok(true),
+            Token::Ident(name) if name.eq_ignore_ascii_case("smaller") => Ok(false),
+            _ => Err(p.new_error_for_next_token()),
+        }
+    });
+    if let Ok(larger) = rel {
+        return Ok(DeclValue::RelativeFontSize(larger));
+    }
     let kw = p.try_parse(|p| -> ValResult<LengthPercentage> {
         let t = p.next()?.clone();
         // CSS 绝对字号表（medium = 初始 16px）
         let px = match &t {
-            Token::Ident(name) => match name.to_ascii_lowercase().as_str() {
-                "xx-small" => 9.0,
-                "x-small" => 10.0,
-                "small" => 13.0,
-                "medium" => 16.0,
-                "large" => 18.0,
-                "x-large" => 24.0,
-                "xx-large" => 32.0,
-                "xxx-large" => 48.0,
-                _ => return Err(p.new_error_for_next_token()),
-            },
+            Token::Ident(name) => {
+                let lower = name.to_ascii_lowercase();
+                match ABSOLUTE_FONT_SIZE_NAMES
+                    .iter()
+                    .position(|n| *n == lower.as_str())
+                {
+                    Some(i) => ABSOLUTE_FONT_SIZES_PX[i],
+                    None => return Err(p.new_error_for_next_token()),
+                }
+            }
             _ => return Err(p.new_error_for_next_token()),
         };
         Ok(LengthPercentage::Px(px))
