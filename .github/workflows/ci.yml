@@ -114,6 +114,12 @@ jobs:
     # 容差），PNG 字形 AA 亦逐字节不同；字节等价检查只能钉单一平台，
     # 引擎侧跨平台一致性由 numeric/pixel 通道的容差预算保证。
     # 重生成协议 = 本地（Windows）重跑 tools/dump_rects.py 并提交。
+    # 两级门禁：numeric.json（与 pixel.png 以外的一切）字节等价硬门；
+    # pixel.png 不做字节门禁——Chromium 截图的字形 AA 风味绑定机器
+    # （DirectWrite 字体平滑设置），几何全同（numeric 全一致，run 27 实测）
+    # 时仍逐字节不同（table-basic/text-pixel 两例）。PNG 基线的语义保护 =
+    # gate job 的 pixel.rs 预算对比（引擎输出 vs 入库 PNG，Class 预算吸收
+    # AA 差异）；重生成仅在渲染相关变更落地时按协议本地执行。
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,8 +134,18 @@ jobs:
       - name: Pin line-ending normalization
         run: git config core.autocrlf true
       - name: Fail on golden drift
+        shell: bash
         run: |
-          git diff --exit-code -- crates/style-engine-conformance/cases || {
-            echo "::error::golden 漂移：dump_rects.py 重生成结果与仓库不一致——本地重跑 tools/dump_rects.py 并提交"
+          drift=$(git diff --name-only -- crates/style-engine-conformance/cases | grep -v 'pixel\.png$' || true)
+          if [ -n "$drift" ]; then
+            echo "::error::golden 漂移（numeric 字节等价硬门）："
+            echo "$drift"
+            echo "::error::本地重跑 tools/dump_rects.py 并提交（协议见本文件注释）"
             exit 1
-          }
+          fi
+          png=$(git diff --name-only -- crates/style-engine-conformance/cases | grep 'pixel\.png$' || true)
+          if [ -n "$png" ]; then
+            echo "pixel.png 字节差异（AA 风味，非门禁项；恢复入库版）："
+            echo "$png"
+            git checkout -- $png
+          fi
