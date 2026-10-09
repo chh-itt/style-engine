@@ -41,14 +41,19 @@ impl Default for NodeState {
     }
 }
 
-/// 伪元素变体（C1/ADR-0015）：宿主不可构造——引擎 materialize_pseudos
-/// 专用。tree.rs 自定义（selector.rs 引用映射，避免反向依赖）。
+/// 伪元素变体（C1/ADR-0015、P9-3）：宿主不可构造——引擎
+/// materialize_pseudos 专用。tree.rs 自定义（selector.rs 引用映射，避免
+/// 反向依赖）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PseudoWhich {
     /// ::before（首子伪节点）。
     Before,
     /// ::after（末子伪节点）。
     After,
+    /// ::marker（P9-3，css-lists-3 §3.1）：列表项标记伪节点——宿主首子、
+    /// ::before 之前；文本由引擎按宿主 list-style-* 机器合成（§3.2 内容
+    /// 算法），非 list-item 宿主的内容计算为 none（抑制成盒）。
+    Marker,
 }
 
 /// 单个节点的样式输入（宿主拥有语义，引擎镜像存储）。

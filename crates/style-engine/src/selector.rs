@@ -198,6 +198,9 @@ pub enum PseudoElement {
     Selection,
     /// ::placeholder（C4/ADR-0018：非盒生成——占位文本样式通道）。
     Placeholder,
+    /// ::marker（P9-3/css-lists-3 §3.1：盒生成——列表项标记伪节点，
+    /// 文本由引擎按宿主 list-style-* 合成）。
+    Marker,
 }
 
 impl sel_css::ToCss for PseudoElement {
@@ -207,6 +210,7 @@ impl sel_css::ToCss for PseudoElement {
             Self::After => "::after",
             Self::Selection => "::selection",
             Self::Placeholder => "::placeholder",
+            Self::Marker => "::marker",
         })
     }
 }
@@ -264,6 +268,8 @@ impl<'i> SelectorParserTrait<'i> for SelectorParser {
             Ok(PseudoElement::Selection)
         } else if name.eq_ignore_ascii_case("placeholder") {
             Ok(PseudoElement::Placeholder)
+        } else if name.eq_ignore_ascii_case("marker") {
+            Ok(PseudoElement::Marker)
         } else {
             Err(
                 location.new_custom_error(SelectorParseErrorKind::UnsupportedPseudoClassOrElement(
@@ -507,6 +513,7 @@ impl<'a> ElementTrait for TreeNode<'a> {
         let which = match pe {
             PseudoElement::Before => crate::tree::PseudoWhich::Before,
             PseudoElement::After => crate::tree::PseudoWhich::After,
+            PseudoElement::Marker => crate::tree::PseudoWhich::Marker,
             PseudoElement::Selection | PseudoElement::Placeholder => {
                 return self.0.node(self.1).pseudo.is_none();
             }

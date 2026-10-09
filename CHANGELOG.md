@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 列表闭环：display:list-item、::marker 与 list-style（P9-3）
+
+- **值面（feat，css-lists-3 §3.3–§3.6，ADR-0041）**：新增 `list-style-type`（`<counter-style>` 名或 `<string>` 字面；未知名使用期回退 decimal，css-counter-styles-3 §2；`none` 抑制）、`list-style-position`（inside|outside）、`list-style-image`（复用背景图像值文法）三物理槽（slot 173/174/175，SLOT_COUNT 180→183，均继承；初始 disc/outside/none）与 `Display::ListItem`（map_style→taffy Block）。`list-style` 简写（第 37 项）：三长手 `||`，none 二义消解按 §3.6（none 归未设分量——`none disc`→image=none+type=disc、裸 `none`→双双 none、`none disc url(b)` 语法错误）；var() 挂起路径经三表同步自动走通。
+- **::marker 伪节点（feat，css-lists-3 §3.1/§3.2，ADR-0041）**：`PseudoWhich::Marker`（key=(host,2)、首子位、::before 之前）；列表项宿主无条件创建（UA 表 li{display:list-item} 无伪元素规则场景 keep-alive 门控）；作者 `li::marker { color/font-size/… }` 经 originating_element 既有通路生效。标记内容算法按 §3.2 首个真条件：作者 content > list-style-image > list-style-type（计数表示+prefix+suffix，复用 P8 counter-format 单源 `marker_text`）> none（非列表项宿主恒 none 抑制成盒）。
+- **标记渲染 = 绘制层合成（fix，D3 redesign）**：marker 伪节点 taffy 恒隐藏、不参与布局；paint 层在宿主首行内容左缘合成 Text op（样式取 marker 自身 computed style），宿主文本 x 偏移 marker 前进宽、折行宽度让位——inside 语义天然成立；outside 按 inside 渲染（B 级豁免：css-lists-3 自认 outside 布局 handwavey；重估条件=IFC 重构）。SINK 面零改动（marker=普通 Text op）。
+- **隐式 list-item 计数器（feat，css-lists-3 §4.6）**：`display:list-item` 元素自动累加隐式 list-item 计数器（显式 counter-increment:list-item 不叠加；counter-reset: list-item N 照常）——`<ol>` 数字标记开箱即用。
+- **list-style-image（B 级近似）**：按宿主上一帧计算值向 marker 注入 `background-image`+`width/height:1em` 声明（默认 object size 1em 方 §3.3）；首帧无图、尺寸非内容固有；image 在场时文本标记不发射（§3.2 条件序）。
+- **UA 表（fix，行为变化，ADR-0041）**：`li` 由普通块改为 `display:list-item`；`ul` disc / `ul ul` circle / `ul ul ul` square / `ol` decimal（嵌套族对齐 Chromium）。不注入 `padding-inline-start:40px`（缩进属宿主排版决策，范围界定在案）。white-space:pre 声明注入 marker 节点（§3.1 UA 义务，保 suffix 尾空格；作者不可覆盖=B·豁免）。
+- **行内运行收集器收窄（fix，D7）**：`display` 为 ListItem/Table/TableRow/TableRowGroup/TableCaption 的带文本子节点终止行内运行（CSS 2.1 §9.2.1 块级盒文本属自身盒）——修复相邻列表项被横排进同一行的块堆叠破坏（UA 表装载 li 后暴露；纯 div 场景为预存行为，未暴露）。Block+文本仍按 F1 契约作匿名行内叶参与（其彻底修正属 IFC 重构 T-契约）。
+- **锁定测试（+9）**：tests/css_lists.rs——ol 数字序与隐式计数、ul disc 与嵌套 circle、list-style:none 抑制、`<string>` 字面标记、作者 ::marker 色、display:list-item 于 div+counter-reset、inside 首行几何（marker 前进+两 li 逐项堆叠）、两帧幂等（differential 增量≡全量）、非列表项 ::marker 抑制；decl.rs 简写锁 7 代表值。
+
 ### 1.0 对齐 — font / grid / grid-template 简写（P9-2）
 
 - **font 简写（feat，css-fonts-4 §3.7，ADR-0040）**：`[<'font-style'> || <font-variant-css2> || <'font-weight'> || <font-width-css3>]? <'font-size'> [/ <'line-height'>]? <'font-family'>` 解析期展开——前导 `||` 组任意序各至多一次（`normal` 三处文法均接受，幂等置初始）；字宽分量仅九关键字（百分比仅长手）；size/weight 接受相对关键字（larger/smaller、bolder/lighter，P9-1b/c）；缺 family 或尾随垃圾整条无效。reset 集=引擎 font 长手全集 9 项。系统 UI 字体关键字（caption 等 6 个）全长手初始展开（B·豁免：无 OS UI 字体映射，重估条件=宿主字体桥接）。

@@ -42,6 +42,27 @@ use crate::css::stylesheet::counter_style::{
 /// 表示长度护栏（css-counter-styles-3 §2 注的 UA 允许项下限）。
 const MAX_REP_CODEPOINTS: usize = 60;
 
+/// P9-3（css-lists-3 §3.2 ③）：::marker 内容 = list-item 计数表示 +
+/// prefix + suffix（css-counter-styles-3 §2 注：affixes 仅由 ::marker
+/// 内容算法追加——counter()/counters() 不含，故 [`format_counter_with`]
+/// 不拼接）。`none` → 空串（调用方据以抑制成盒）；未知名按 decimal
+/// 生成（缺省 suffix ". "）。
+pub fn marker_text(name: &str, value: i64, registry: &[CounterStyleRule]) -> String {
+    if name.eq_ignore_ascii_case("none") {
+        return String::new();
+    }
+    match resolve_rule(name, registry) {
+        Some(rule) => {
+            let rep = format_rule(&rule, value, registry, &mut vec![name.to_string()]);
+            let prefix = rule.prefix.unwrap_or_default();
+            format!("{prefix}{rep}{}", rule.suffix)
+        }
+        // css-counter-styles-3 §2 步骤 1：未知样式按 decimal 生成
+        // （decimal = Numeric 系统 + suffix ". "）。
+        None => format!("{value}. "),
+    }
+}
+
 /// 以指定计数样式格式化一个计数值。
 ///
 /// `registry` 为文档级 @counter-style 登记表（合并序，同名后写胜）；

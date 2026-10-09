@@ -410,6 +410,14 @@ pub enum PropertyId {
     CounterIncrement,
     /// quotes — 引号对表（P5，ADR-0036 D3）。继承。
     Quotes,
+    /// list-style-type — 列表项标记样式（P9-3，css-lists-3 §3.4）。
+    /// 继承。初始 disc。
+    ListStyleType,
+    /// list-style-position — 标记盒位置 inside|outside（P9-3，§3.5）。
+    /// 继承。初始 outside（引擎按 inside 渲染=B 级近似，ADR-0041）。
+    ListStylePosition,
+    /// list-style-image — 标记图像（P9-3，§3.3）。继承。初始 none。
+    ListStyleImage,
 }
 
 impl PropertyId {
@@ -598,20 +606,26 @@ impl PropertyId {
         Self::CounterReset,
         Self::CounterIncrement,
         Self::Quotes,
+        // P9-3（css-lists-3）：list-style 三长手（ALL 尾追加；动画描述符
+        // 槽整体后移 ×3 至 176..183，slot_alignment 不变量=ALL 序连续）
+        Self::ListStyleType,
+        Self::ListStylePosition,
+        Self::ListStyleImage,
     ];
 
-    /// 槽位存储总槽位数：ALL 全部 173 位（0..139 原序、F2 文本 7 位、
+    /// 槽位存储总槽位数：ALL 全部 176 位（0..139 原序、F2 文本 7 位、
     /// F3b 背景 6 位、F3d 边框图 5 位、F3d 字体 5 位、F4 两属性、G1
-    /// transition 五长手、P3 vertical-align、P5 计数器三属性，slot()
-    /// 显式编号）加 7 个动画描述符位（非 ALL）。
-    pub const SLOT_COUNT: usize = 180;
+    /// transition 五长手、P3 vertical-align、P5 计数器三属性、P9-3 列表
+    /// 三属性，slot() 显式编号）加 7 个动画描述符位（非 ALL）。
+    pub const SLOT_COUNT: usize = 183;
 
     /// 槽位存储下标（ComputedStyle 的 `Vec<Option<DeclValue>>` 用）。
     /// 0..139 = ALL 原序；139..146 = F2 文本追加（ALL 尾部成员）；
     /// 146..152 = F3b 背景追加；152..164 = F3d 边框图+字体追加+F4 两
     /// 属性；164..169 = G1 transition 五长手（ALL 尾部成员）；
     /// 169 = P3 vertical-align（ALL 尾部成员）；170..173 = P5 计数器三
-    /// 属性（ALL 尾部成员）；173..180 = 动画描述符（不在 ALL）。
+    /// 属性（ALL 尾部成员）；173..176 = P9-3 列表三属性（ALL 尾部成员）；
+    /// 176..183 = 动画描述符（不在 ALL）。
     /// clip-path 沿用原 ALL 位 71（第四批④ 占位，F3c 原位升级，ADR-0025）。
     /// `slot_alignment` 测试锁定本表
     /// 与 ALL 的一致性——新增变体时必须同步扩展本 match 与 SLOT_COUNT。
@@ -806,15 +820,20 @@ impl PropertyId {
             Self::CounterReset => 170,
             Self::CounterIncrement => 171,
             Self::Quotes => 172,
+            // P9-3（css-lists-3）：list-style 三长手（ALL 尾位；描述符
+            // 让位 ×3）
+            Self::ListStyleType => 173,
+            Self::ListStylePosition => 174,
+            Self::ListStyleImage => 175,
             // 动画描述符（非 ALL 成员；声明/采样时落槽；P3 追加后整体
-            // 后移 ×1，P5 再 ×3）
-            Self::AnimationName => 173,
-            Self::AnimationDuration => 174,
-            Self::AnimationDelay => 175,
-            Self::AnimationIterationCount => 176,
-            Self::AnimationTimingFunction => 177,
-            Self::AnimationDirection => 178,
-            Self::AnimationFillMode => 179,
+            // 后移 ×1，P5 再 ×3，P9-3 再 ×3）
+            Self::AnimationName => 176,
+            Self::AnimationDuration => 177,
+            Self::AnimationDelay => 178,
+            Self::AnimationIterationCount => 179,
+            Self::AnimationTimingFunction => 180,
+            Self::AnimationDirection => 181,
+            Self::AnimationFillMode => 182,
             Self::Hyphens => 162,
             Self::BackdropFilter => 163,
         }
@@ -853,6 +872,9 @@ impl PropertyId {
             Self::CounterReset => "counter-reset",
             Self::CounterIncrement => "counter-increment",
             Self::Quotes => "quotes",
+            Self::ListStyleType => "list-style-type",
+            Self::ListStylePosition => "list-style-position",
+            Self::ListStyleImage => "list-style-image",
             Self::TransitionDelay => "transition-delay",
             Self::TransitionBehavior => "transition-behavior",
             Self::Width => "width",
@@ -1583,6 +1605,16 @@ pub enum DeclValue {
     CounterList(Vec<(String, i64)>),
     /// quotes（P5，ADR-0036 D3）：引号对表。
     Quotes(QuotesValue),
+    /// list-style-type（P9-3，css-lists-3 §3.4）：`None` = 关键字 none
+    /// （抑制标记）；`Some(Name)` = 计数样式名（未知名使用期回退 decimal，
+    /// css-counter-styles-3 §2）；`Some(Str)` = 字面字符串标记（无
+    /// prefix/suffix 附加）。
+    ListStyleType(Option<ListStyleTypeValue>),
+    /// list-style-position（P9-3，§3.5）：inside|outside。
+    ListStylePosition(ListStylePosition),
+    /// list-style-image（P9-3，§3.3）：`None` = none；`Some` = 标记图像
+    /// （复用 BackgroundImage 值形：url()/渐变）。
+    ListStyleImage(Option<BackgroundImage>),
     /// filter / backdrop-filter（P2 批，ADR-0031 D1）：有序 filter 函数
     /// 链（`Filters(vec![])` = none，有效声明显式无滤镜）。旧 Effect(bool)
     /// 存在性语义退役（will-change/isolation 仍用 Effect）。
@@ -1783,6 +1815,29 @@ pub enum GridAutoFlowKind {
     Column,
 }
 
+/// list-style-type 值（P9-3，css-lists-3 §3.4）：计数样式名或字面
+/// 字符串。关键字 none 由 DeclValue::ListStyleType(None) 承载。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListStyleTypeValue {
+    /// `<counter-style-name>`——解析期不校验注册表（CSS 动态性：@counter-style
+    /// 可后置注册），未知名使用期回退 decimal（css-counter-styles-3 §2）。
+    Name(String),
+    /// `<string>`——字面标记（无 prefix/suffix 附加）。
+    Str(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// list-style-position 值族（P9-3，css-lists-3 §3.5）。
+#[non_exhaustive]
+pub enum ListStylePosition {
+    /// inside — 标记盒为主盒首个行内级内容（引擎天然成立：marker 伪
+    /// 节点文本叶参与首行打包）。
+    Inside,
+    /// outside — 标记盒悬挂于行内盒之外（规范自认 handwavey；引擎按
+    /// inside 渲染=B 级近似，ADR-0041）。
+    Outside,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// display 值族（inline/inline-block=F1 行内语义，其余 inline* 解析期归一）。
 #[non_exhaustive]
@@ -1815,6 +1870,10 @@ pub enum Display {
     /// 三期④：display:table-caption——表标题盒（块流置于行区上方，
     /// 宽度=表内容宽；不参与列发现）。
     TableCaption,
+    /// P9-3（css-lists-3）：display:list-item——列表项：生成主块盒 +
+    /// 引擎侧 ::marker 伪节点（隐式 list-item 计数器累加，§4.6）；
+    /// layout 映射 taffy Block（块化）。
+    ListItem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3237,6 +3296,7 @@ pub fn parse_display(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             "table-cell" => Display::TableCell,
             "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
             "table-caption" => Display::TableCaption,
+            "list-item" => Display::ListItem,
             "none" => Display::None,
             _ => return None,
         ))
@@ -6250,6 +6310,9 @@ pub fn parse_declaration(id: PropertyId, p: &mut Parser<'_>) -> ValResult<DeclVa
         P::CounterReset => parse_counter_list(p, 0),
         P::CounterIncrement => parse_counter_list(p, 1),
         P::Quotes => parse_quotes(p),
+        P::ListStyleType => parse_list_style_type(p),
+        P::ListStylePosition => parse_list_style_position(p),
+        P::ListStyleImage => parse_list_style_image(p),
         P::Hyphens => parse_hyphens(p),
         P::BackdropFilter => parse_filter_value_list(p),
         P::TextOverflow => parse_text_overflow(p),
@@ -6690,6 +6753,49 @@ pub fn parse_quotes(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             Ok(DeclValue::Quotes(QuotesValue::Pairs(pairs)))
         }
         _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// list-style-type 解析（P9-3，css-lists-3 §3.4）：
+/// `<counter-style> | <string> | none`——`<counter-style>` 形仅接受
+/// `<counter-style-name>`（ident；函数形 symbols()/counter() 不在列表
+/// 标记文法内）；未知名解析期不校验（@counter-style 后置注册），使用期
+/// 回退 decimal（css-counter-styles-3 §2）。CSS 宽关键字上游拦截。
+pub fn parse_list_style_type(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    p.skip_whitespace();
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(id) if id.eq_ignore_ascii_case("none") => Ok(DeclValue::ListStyleType(None)),
+        Token::Ident(id) => Ok(DeclValue::ListStyleType(Some(ListStyleTypeValue::Name(
+            id.to_string(),
+        )))),
+        Token::QuotedString(s) => Ok(DeclValue::ListStyleType(Some(ListStyleTypeValue::Str(
+            s.to_string(),
+        )))),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+/// list-style-position 解析（P9-3，css-lists-3 §3.5）：inside | outside。
+pub fn parse_list_style_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    keyword(p, |s| {
+        Some(match_ignore_ascii_case!(s,
+            "inside" => ListStylePosition::Inside,
+            "outside" => ListStylePosition::Outside,
+            _ => return None,
+        ))
+    })
+    .map(DeclValue::ListStylePosition)
+}
+
+/// list-style-image 解析（P9-3，css-lists-3 §3.3）：`<image> | none`
+/// （单值；复用背景单层图解析 none|url()|渐变族）。
+pub fn parse_list_style_image(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    p.skip_whitespace();
+    let img = parse_background_image_one(p)?;
+    match img {
+        BackgroundImage::None => Ok(DeclValue::ListStyleImage(None)),
+        other => Ok(DeclValue::ListStyleImage(Some(other))),
     }
 }
 

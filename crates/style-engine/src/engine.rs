@@ -804,12 +804,25 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// 有 → 为每个宿主节点确保 ::before 首子 / ::after 末子存在并归位。
     /// 伪节点裸 StyleNode（无身份——selectors 经 originating_element 回
     /// origin 匹配左复合）；文本由 sync_pseudo_text 按 content 计算值供给。
+    /// P9-3（css-lists-3 §3.1）：每个宿主另确保 ::marker 伪节点（首子、
+    /// ::before 之前；空 marker 由 sync_pseudo_text 抑制成盒）——无条件
+    /// 创建使 list-item 宿主首帧即有样式（无 materialize 期滞后）；marker
+    /// 的 list-style-image 注入按上一帧宿主样式（首帧无图像=B·豁免，
+    /// ADR-0041）。any_pseudo 快路径例外：UA/作者表无伪元素规则但存在
+    /// list-item 时 marker 仍需存活——快路径条件加 any_list_item 逃逸。
     fn materialize_pseudos(&mut self) {
         let any_pseudo = self.sheet.has_pseudo_rules
             || self.user_sheet.as_ref().is_some_and(|s| s.has_pseudo_rules)
             || self.ua_sheet.as_ref().is_some_and(|s| s.has_pseudo_rules)
             || self.extra_sheets.iter().any(|(_, _, s)| s.has_pseudo_rules);
-        if !any_pseudo {
+        // P9-3：上一帧存在 list-item 宿主（或 UA 表可产生）→ marker 通道
+        // 必须 keep-alive（即便无伪元素规则）。
+        let any_list_item = self
+            .styles
+            .values()
+            .any(|cs| cs.display() == crate::css::property::Display::ListItem)
+            || self.ua_sheet.is_some();
+        if !any_pseudo && !any_list_item {
             if self.pseudo_ids.is_empty() {
                 return;
             }
@@ -830,6 +843,77 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         while let Some(cur) = stack.pop() {
             if !self.tree.is_pseudo(cur) {
                 let host = cur;
+                // P9-3：::marker 首子（css-lists-3 §3.1：marker 位于
+                // ::before 之前）。
+                let m = match self.pseudo_ids.get(&(host, 2)).copied() {
+                    Some(e) => e,
+                    None => {
+                        let nid = self.tree.insert_child(
+                            host,
+                            crate::tree::StyleNode {
+                                pseudo: Some(crate::tree::PseudoWhich::Marker),
+                                ..Default::default()
+                            },
+                        );
+                        self.pseudo_ids.insert((host, 2), nid);
+                        changed = true;
+                        nid
+                    }
+                };
+                // P9-3：list-style-image 注入（上一帧宿主样式；B·豁免：
+                // 首帧 styles 空不注入，ADR-0041）。每帧重算保持幂等——
+                // 图像消失时清注入。white-space: pre 恒注入（css-lists-3
+                // §3.1 UA 义务：suffix 尾空格不被折叠；注入于声明层级，
+                // 作者 ::marker white-space 不可覆盖=B·豁免）。
+                let host_image = self
+                    .styles
+                    .get(&host)
+                    .and_then(|hcs| hcs.list_style_image());
+                let mut marker_decls: Vec<crate::css::Declaration> =
+                    vec![crate::css::Declaration {
+                        id: crate::css::PropertyId::WhiteSpace,
+                        important: false,
+                        value: crate::css::decl::DeclSource::Parsed(
+                            crate::css::property::DeclValue::WhiteSpace(
+                                crate::css::property::WhiteSpace::Pre,
+                            ),
+                        ),
+                    }];
+                if let Some(img) = &host_image {
+                    marker_decls.push(crate::css::Declaration {
+                        id: crate::css::PropertyId::BackgroundImage,
+                        important: false,
+                        value: crate::css::decl::DeclSource::Parsed(
+                            crate::css::property::DeclValue::BackgroundImage(vec![img.clone()]),
+                        ),
+                    });
+                    marker_decls.push(crate::css::Declaration {
+                        id: crate::css::PropertyId::Width,
+                        important: false,
+                        value: crate::css::decl::DeclSource::Parsed(
+                            crate::css::property::DeclValue::Len(
+                                crate::css::value::LengthPercentage::Em(1.0),
+                            ),
+                        ),
+                    });
+                    marker_decls.push(crate::css::Declaration {
+                        id: crate::css::PropertyId::Height,
+                        important: false,
+                        value: crate::css::decl::DeclSource::Parsed(
+                            crate::css::property::DeclValue::Len(
+                                crate::css::value::LengthPercentage::Em(1.0),
+                            ),
+                        ),
+                    });
+                }
+                let mnode = self.tree.node_mut(m);
+                if mnode.declarations.decls != marker_decls {
+                    mnode.declarations = crate::css::decl::DeclarationBlock {
+                        decls: marker_decls,
+                        ..Default::default()
+                    };
+                    changed = true;
+                }
                 // ::before 首子
                 let b = match self.pseudo_ids.get(&(host, 0)).copied() {
                     Some(e) => e,
@@ -862,15 +946,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         nid
                     }
                 };
-                // 归位：before + 宿主子序 + after（伪节点不参与宿主结构序）
+                // 归位：marker + before + 宿主子序 + after（伪节点不参与宿主结构序）
                 let host_kids: Vec<NodeId> = self
                     .tree
                     .children(host)
                     .iter()
                     .copied()
-                    .filter(|c| *c != b && *c != a && !self.tree.is_pseudo(*c))
+                    .filter(|c| *c != b && *c != a && *c != m && !self.tree.is_pseudo(*c))
                     .collect();
-                let mut want = Vec::with_capacity(host_kids.len() + 2);
+                let mut want = Vec::with_capacity(host_kids.len() + 3);
+                want.push(m);
                 want.push(b);
                 want.extend(host_kids);
                 want.push(a);
@@ -944,7 +1029,36 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         }
                     }
                 }
+                // P9-3（css-lists-3 §4.6）：display:list-item 自动累加隐式
+                // list-item 计数器（step=1）；显式 counter-increment 含
+                // list-item 时以其为准（不重复累加）。
+                if cs.display() == crate::css::property::Display::ListItem
+                    && !cs.counter_increment().iter().any(|(n, _)| n == "list-item")
+                {
+                    let n = scopes.len();
+                    let hit = scopes
+                        .iter()
+                        .rev()
+                        .find_map(|f| f.get("list-item").copied());
+                    match hit {
+                        Some(v) => {
+                            scopes[n - 1].insert("list-item".to_string(), v + 1);
+                        }
+                        None => {
+                            scopes[n - 1].insert("list-item".to_string(), 1);
+                        }
+                    }
+                }
             }
+        } else if self.tree.node(nid).pseudo == Some(crate::tree::PseudoWhich::Marker) {
+            // P9-3（css-lists-3 §3.1/§3.2）：marker 文本由宿主 list-style
+            // 机器合成（§3.2 内容算法）。文本/测量照常供给（绘制层合成
+            // 消费）；taffy 侧 map_style 恒隐藏——空 marker 天然无产物，
+            // 无需显式抑制 pass。
+            let (text, _hide, new_depth) =
+                self.eval_marker_text(nid, *quote_depth, scopes, host_of);
+            *quote_depth = new_depth;
+            self.apply_pseudo_text(nid, text);
         } else {
             // 伪节点：content 求值（计数器栈/引号深度/attrs 消费）。
             let (text, new_depth) = self.eval_pseudo_content(nid, *quote_depth, scopes, host_of);
@@ -1103,6 +1217,85 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 self.measures.remove(&pid);
                 self.auto_text.remove(&pid);
             }
+        }
+    }
+
+    /// P9-3（css-lists-3 §3.2）：::marker 内容算法（按首个真条件求值）。
+    /// 返回 (文本, hide, 新引号深度)；hide=true → 引擎显式抑制成盒
+    ///（suppress_marker 置 taffy Display::None，每帧重放=稳态幂等）。
+    /// ① 宿主非 list-item → 抑制（§3.1：非 list-item 的 ::marker content
+    /// 计算为 none）；② 作者 content ≠ normal → 按 content 求值（同
+    /// ::before）；③ list-style-image 有效 → 匿名替换元素盒（materialize
+    /// 注入 1em 声明，文本 None 不 hide）；④ list-style-type：none →
+    /// 抑制；string → 字面；counter-style 名 → list-item 计数表示 +
+    /// prefix + suffix（未知名回退 decimal，css-counter-styles-3 §2）。
+    #[cfg(feature = "text")]
+    fn eval_marker_text(
+        &self,
+        pid: NodeId,
+        depth: i64,
+        scopes: &[std::collections::HashMap<String, i64>],
+        host_of: &std::collections::HashMap<NodeId, NodeId>,
+    ) -> (Option<String>, bool, i64) {
+        let Some(host) = host_of.get(&pid).copied() else {
+            return (None, true, depth);
+        };
+        let Some(hcs) = self.styles.get(&host) else {
+            return (None, true, depth);
+        };
+        if hcs.display() != crate::css::property::Display::ListItem {
+            return (None, true, depth);
+        }
+        let Some(cs) = self.styles.get(&pid) else {
+            return (None, true, depth);
+        };
+        // ② 作者 content 优先（§3.2 条件 1）。
+        let author_content = cs.content_pieces().is_some_and(|p| !p.is_empty())
+            || matches!(cs.content(), crate::css::property::ContentValue::Str(_));
+        if author_content {
+            let (text, d) = self.eval_pseudo_content(pid, depth, scopes, host_of);
+            let hide = text.is_none();
+            return (text, hide, d);
+        }
+        // ③ list-style-image（§3.2 条件 2）。
+        if cs.list_style_image().is_some() {
+            return (None, false, depth);
+        }
+        // ④ list-style-type（§3.2 条件 3）。
+        match cs.list_style_type() {
+            None => (None, true, depth),
+            Some(crate::css::property::ListStyleTypeValue::Str(s)) => (Some(s), false, depth),
+            Some(crate::css::property::ListStyleTypeValue::Name(name)) => {
+                // list-item 计数值：宿主帧（marker 为宿主子节点，帧已含
+                // 隐式/显式增量）；无实例 → 0。
+                let v = scopes
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.get("list-item").copied())
+                    .unwrap_or(0);
+                let text = crate::css::stylesheet::counter_format::marker_text(
+                    &name,
+                    v,
+                    &self.counter_styles,
+                );
+                (Some(text), false, depth)
+            }
+        }
+    }
+
+    /// P9-3：空 marker 显式 taffy 抑制。map_style 对 Marker 伪节点不做
+    /// content 空判隐藏（可见性由本函数与文本供给管）；rebuild_taffy 每
+    /// 帧重播种 → 本抑制每帧重放（稳态幂等）。
+    #[cfg(feature = "text")]
+    #[allow(dead_code)]
+    fn suppress_marker(&mut self, pid: NodeId) {
+        let Some(cs) = self.styles.get(&pid).cloned() else {
+            return;
+        };
+        if let Some(&tid) = self.taffy_node.get(&pid) {
+            let mut ts = map_style(&cs, &self.map_env());
+            ts.display = taffy::prelude::Display::None;
+            let _ = self.taffy.set_style(tid, ts);
         }
     }
 
@@ -2548,6 +2741,21 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         // ADR-0010：按有效根序逐根追加绘制基元（超根无样式条目，不可作
         // paint 走查起点；用户根的样式/布局条目齐备——单根视觉输出与
         // 旧「自 tree.root() 走查」逐位一致，超根本身不产生基元）。
+        // P9-3（css-lists-3 §3.1/§3.5）：list-item 宿主 → 可见文本 marker
+        // 绘制层合成表（host → (marker 节点, 前进宽 px)）。marker 伪节点
+        // taffy 隐藏（map_style 恒 Display::None），由 paint 层在宿主首行
+        // 内容左缘合成文本 op（inside 语义；outside≈inside B·豁免
+        // ADR-0041）；advance = marker 测量宽（含 white-space:pre 尾空格）。
+        // 非 text 特性：measures 恒空 → 表恒空（marker 不绘制）。
+        let mut markers: HashMap<NodeId, (NodeId, f32)> = HashMap::new();
+        for (&(host, slot), &m) in &self.pseudo_ids {
+            if slot != 2 {
+                continue;
+            }
+            if let Some(adv) = self.marker_advance_of(host) {
+                markers.insert(host, (m, adv));
+            }
+        }
         {
             let ctx = crate::paint::PaintCtx {
                 tree: &self.tree,
@@ -2561,6 +2769,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 hit: Some(&hit_cell),
                 images: &self.images,
                 column_rules: &self.column_rules,
+                markers: &markers,
             };
             let mut root_ids: Vec<NodeId> = self
                 .root_order_applied
@@ -3464,9 +3673,27 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         crate::css::value::FontMetrics::default()
     }
 
+    /// P9-3（css-lists-3 §3.1）：list-item 宿主的可见文本 marker 前进宽。
+    /// 条件 = 宿主 display:list-item + marker 节点存在 + 文本非空 + 测量
+    /// 就绪（sync_pseudo_text 供 measures；非 text 特性恒空 → None）。
+    /// 返回 None = marker 抑制或图像盒（无文本合成）。
+    fn marker_advance_of(&self, host: NodeId) -> Option<f32> {
+        if self.styles.get(&host)?.display() != crate::css::property::Display::ListItem {
+            return None;
+        }
+        let m = *self.pseudo_ids.get(&(host, 2))?;
+        let text = self.tree.node(m).text.as_ref()?;
+        if text.is_empty() {
+            return None;
+        }
+        self.measures.get(&m).map(|(w, _)| *w)
+    }
+
     /// 叶换行约束宽=包含块内容宽（父 border-box − padding − 有效 border；
     /// multicol 重挂叶=幻影列宽无内缩）。T5c-2 remeasure 与 F2 截断结算
-    /// 共用（ADR-0022 D2）。
+    /// 共用（ADR-0022 D2）。P9-3：父为带可见文本 marker 的 list-item →
+    /// 减 marker 前进宽（inside 语义：首行文本自 marker 右缘起排；后续
+    /// 行同宽收缩=B·豁免近似，ADR-0041）。
     #[cfg(feature = "text")]
     fn leaf_wrap_width(&self, id: NodeId) -> Option<f32> {
         let parent_id = *self.parents.get(&id)?;
@@ -3480,6 +3707,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let pl = self.taffy.layout(effp).ok()?;
             return Some(pl.size.width.max(0.0));
         }
+        let marker_adv = self.marker_advance_of(parent_id).unwrap_or(0.0);
         let pl = self.taffy.layout(ptid).ok()?;
         let pcs = self.styles.get(&parent_id)?;
         let rctx = crate::css::value::ResolveCtx {
@@ -3509,7 +3737,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         .iter()
         .filter_map(|(pid, style_pid)| used_h_inset(pcs, *pid, *style_pid, &rctx))
         .sum();
-        Some((pl.size.width - inset).max(0.0))
+        Some((pl.size.width - inset - marker_adv).max(0.0))
     }
 
     /// F2（ADR-0022 D2）：ellipsis 截断文本——二分最长字符前缀使
@@ -4951,16 +5179,6 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                     }
                     continue;
                 }
-                if self
-                    .tree
-                    .node(c)
-                    .text
-                    .as_deref()
-                    .is_some_and(|t| !t.is_empty())
-                {
-                    parts.push(InlinePart::Leaf { id: c });
-                    continue;
-                }
                 let disp = self
                     .styles
                     .get(&c)
@@ -4968,6 +5186,37 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                         Some(DeclValue::Display(d)) => Some(*d),
                         _ => None,
                     });
+                let has_text = self
+                    .tree
+                    .node(c)
+                    .text
+                    .as_deref()
+                    .is_some_and(|t| !t.is_empty());
+                // P9-3（css-lists-3 §3，ADR-0041）：带文本子节点的行内参与
+                // 仅限行内级与 Block（Block+文本=引擎树模型的匿名行内近似，
+                // F1 契约）；ListItem/Table*/TableRowGroup 等无歧义块级盒的
+                // 文本属自身盒（CSS 2.1 §9.2.1），终止运行而非叶参与——
+                // 否则相邻文本 li 会被打包进同一行（块堆叠被破坏）。
+                if matches!(
+                    disp,
+                    Some(Display::ListItem)
+                        | Some(Display::Table)
+                        | Some(Display::TableRow)
+                        | Some(Display::TableRowGroup)
+                        | Some(Display::TableCaption)
+                ) {
+                    if parts.len() >= 2 || parts.iter().any(|p| matches!(p, InlinePart::Box { .. }))
+                    {
+                        runs.push((id, std::mem::take(&mut parts)));
+                    } else {
+                        parts.clear();
+                    }
+                    continue;
+                }
+                if has_text {
+                    parts.push(InlinePart::Leaf { id: c });
+                    continue;
+                }
                 match disp {
                     Some(Display::InlineBlock) | Some(Display::Inline) => {
                         parts.push(InlinePart::Box { id: c });

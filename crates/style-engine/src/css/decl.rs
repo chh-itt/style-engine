@@ -512,6 +512,9 @@ fn shorthand_exists(name: &str) -> bool {
             // §7.6/§7.3；dense 未支持 = 声明无效，见 ADR-0040 D4）
             | "grid"
             | "grid-template"
+            // P9-3（css-lists-3 §3.6）：list-style 简写（三长手 || +
+            // none 二义消解）
+            | "list-style"
     )
 }
 
@@ -699,6 +702,8 @@ pub(crate) fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
             P::GridTemplateColumns,
             P::GridTemplateAreas,
         ],
+        // P9-3（css-lists-3 §3.6）：list-style 三长手
+        "list-style" => vec![P::ListStyleType, P::ListStylePosition, P::ListStyleImage],
         _ => return None,
     })
 }
@@ -2188,6 +2193,84 @@ pub(crate) fn expand_shorthand(
             }
             out
         }
+        // P9-3（css-lists-3 §3.6）：list-style 简写 = <'list-style-position'>
+        // || <'list-style-image'> || <'list-style-type'>。none 二义消解：
+        // none 应用于未被简写其它分量设置的属性——`none disc` → image=none
+        // +type=disc；`none url(b)` → image=url +type=none；`none` → 双双
+        // none；两分量均已被设置时 none 非法（语法错误）。缺省部件回初始：
+        // type disc、position outside、image none。
+        "list-style" => {
+            use crate::css::property::{
+                BackgroundImage, ListStylePosition, ListStyleTypeValue, parse_list_style_image,
+                parse_list_style_position, parse_list_style_type,
+            };
+            let mut pos: Option<ListStylePosition> = None;
+            let mut img: Option<Option<BackgroundImage>> = None;
+            let mut typ: Option<Option<ListStyleTypeValue>> = None;
+            let mut nones = 0usize;
+            loop {
+                // none 词面拦截（§3.6 二义消解：none 落到未被其它分量
+                // 设置的槽，循环后统一裁决——若被 type/image 分量解析
+                // 吞掉，`none url(b)` 等形会误判）。
+                let save0 = p.state();
+                if matches!(
+                    p.next(),
+                    Ok(Token::Ident(s)) if s.eq_ignore_ascii_case("none")
+                ) {
+                    nones += 1;
+                    continue;
+                }
+                p.reset(&save0);
+                if pos.is_none()
+                    && let Ok(DeclValue::ListStylePosition(k)) =
+                        p.try_parse(parse_list_style_position)
+                {
+                    pos = Some(k);
+                    continue;
+                }
+                if img.is_none()
+                    && let Ok(DeclValue::ListStyleImage(i)) = p.try_parse(parse_list_style_image)
+                {
+                    img = Some(i);
+                    continue;
+                }
+                if typ.is_none()
+                    && let Ok(DeclValue::ListStyleType(t)) = p.try_parse(parse_list_style_type)
+                {
+                    typ = Some(t);
+                    continue;
+                }
+                break;
+            }
+            // 无任何分量（含 none）= 空声明，非法。
+            if pos.is_none() && img.is_none() && typ.is_none() && nones == 0 {
+                return Err(p.new_error_for_next_token());
+            }
+            // 尾随垃圾拒绝（与 grid 臂同型）。
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            // none 消解（§3.6）：type 优先承接（`none disc` 双双 none 的
+            // 对偶面——`disc none` 同型）；两槽均已设置则溢出 none 非法。
+            for _ in 0..nones {
+                if typ.is_none() {
+                    typ = Some(None);
+                } else if img.is_none() {
+                    img = Some(None);
+                } else {
+                    return Err(p.new_error_for_next_token());
+                }
+            }
+            // `none none` = 双双 none 合法；三 none 溢出 → 上循环已拒。
+            let t = typ.unwrap_or_else(|| Some(ListStyleTypeValue::Name("disc".to_string())));
+            let i = img.unwrap_or(None);
+            let pp = pos.unwrap_or(ListStylePosition::Outside);
+            vec![
+                (P::ListStyleType, DeclValue::ListStyleType(t)),
+                (P::ListStylePosition, DeclValue::ListStylePosition(pp)),
+                (P::ListStyleImage, DeclValue::ListStyleImage(i)),
+            ]
+        }
         "border-radius" => {
             // 第五批⑪椭圆圆角：`<lp>{1,4} [ '/' <lp>{1,4} ]?`（tl tr br bl
             // 各按 CSS 1-4 展开）；无斜杠=圆形角（纵=横），带斜杠但纵组
@@ -2945,6 +3028,14 @@ mod tests {
             ("grid", "100px / auto-flow 150px"),
             ("grid", "auto-flow / 200px"),
             ("grid-template", "[r1] \"a a\" 40px [r2] / [c1] 1fr [c2]"),
+            // P9-3（css-lists-3 §3.6）list-style 代表值（含 none 消解面）
+            ("list-style", "none"),
+            ("list-style", "none disc"),
+            ("list-style", "disc none"),
+            ("list-style", "inside url(x.png)"),
+            ("list-style", "url(x.png) none"),
+            ("list-style", "square inside"),
+            ("list-style", "\"-\""),
         ];
         for (name, val) in cases {
             let mut p = cssparser::Parser::new(val);

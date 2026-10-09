@@ -360,6 +360,10 @@ pub fn inherits(id: PropertyId) -> bool {
             // P5（ADR-0036 D3）：quotes 继承（css-content-3）；
             // counter-reset/counter-increment 不继承（css-lists-3）。
             | P::Quotes
+            // P9-3（css-lists-3 §3.3-3.5）：list-style 三长手全继承。
+            | P::ListStyleType
+            | P::ListStylePosition
+            | P::ListStyleImage
     )
 }
 
@@ -409,6 +413,15 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
         // P5（ADR-0036 D2/D3）：计数器空表（不继承）/ quotes auto（继承）。
         P::CounterReset | P::CounterIncrement => DeclValue::CounterList(Vec::new()),
         P::Quotes => DeclValue::Quotes(crate::css::property::QuotesValue::Auto),
+        // P9-3（css-lists-3 §3.3-3.5）：list-style 初始 disc/outside/none
+        // （三长手全继承）。
+        P::ListStyleType => DeclValue::ListStyleType(Some(
+            crate::css::property::ListStyleTypeValue::Name("disc".to_string()),
+        )),
+        P::ListStylePosition => {
+            DeclValue::ListStylePosition(crate::css::property::ListStylePosition::Outside)
+        }
+        P::ListStyleImage => DeclValue::ListStyleImage(None),
         P::MinWidth | P::MinHeight => DeclValue::Len(LengthPercentage::Px(0.0)),
         P::AspectRatio => DeclValue::AspectRatio(None),
         // margin 初始值为 0（CSS）；显式 auto 仍解析为 LenAuto(None) → 居中语义保留
@@ -861,6 +874,34 @@ impl ComputedStyle {
     pub fn content_pieces(&self) -> Option<&[crate::css::property::ContentPiece]> {
         match self.get(PropertyId::Content) {
             Some(DeclValue::Content(crate::css::property::ContentValue::Seq(p))) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// list-style-type 计算值（P9-3，css-lists-3 §3.4）：`None` = 关键字
+    /// none（抑制标记）；缺槽回退初始 disc。
+    pub fn list_style_type(&self) -> Option<crate::css::property::ListStyleTypeValue> {
+        match self.get(PropertyId::ListStyleType) {
+            Some(DeclValue::ListStyleType(t)) => t.clone(),
+            _ => Some(crate::css::property::ListStyleTypeValue::Name(
+                "disc".to_string(),
+            )),
+        }
+    }
+
+    /// list-style-position 计算值（P9-3，§3.5）：缺槽回退初始 outside。
+    pub fn list_style_position(&self) -> crate::css::property::ListStylePosition {
+        match self.get(PropertyId::ListStylePosition) {
+            Some(DeclValue::ListStylePosition(p)) => *p,
+            _ => crate::css::property::ListStylePosition::Outside,
+        }
+    }
+
+    /// list-style-image 计算值（P9-3，§3.3）：`None` = none；缺槽回退初始
+    /// none。
+    pub fn list_style_image(&self) -> Option<crate::css::property::BackgroundImage> {
+        match self.get(PropertyId::ListStyleImage) {
+            Some(DeclValue::ListStyleImage(i)) => i.clone(),
             _ => None,
         }
     }

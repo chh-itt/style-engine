@@ -364,11 +364,19 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
     let padding = cs.padding();
 
     let mut ts = Style {
-        display: if cs.pseudo().is_some()
+        display: if cs.pseudo() == Some(crate::tree::PseudoWhich::Marker) {
+            // P9-3（css-lists-3 §3.1/§3.5，ADR-0041）：marker 伪节点恒
+            // taffy 隐藏——不参与布局/行打包（引擎 IFC 不合并宿主自身
+            // 文本与子盒，独立盒会占据独立行）；文本由 paint 层在宿主
+            // 首行内容左缘合成（inside 语义；outside≈inside B·豁免）。
+            // 测量仍经 sync_pseudo_text→apply_pseudo_text 入 measures。
+            taffy::prelude::Display::None
+        } else if cs.pseudo().is_some()
             && !cs.content_pieces().map_or_else(
                 || matches!(cs.content(), crate::css::property::ContentValue::Str(_)),
                 |pieces| !pieces.is_empty(),
-            ) {
+            )
+        {
             // C1（ADR-0015）：伪节点 content none/normal → 无盒（spec：
             // content 仅作用于伪元素；宿主节点恒 Normal 不受影响）。
             // P5（ADR-0036）：content 升级 <content-list>——单串也承载为
@@ -381,6 +389,9 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
                 //（零布局差异）；行内参与由引擎 settle_lines 行打包处理。
                 crate::css::property::Display::Inline
                 | crate::css::property::Display::InlineBlock => taffy::prelude::Display::Block,
+                // P9-3（css-lists-3）：list-item 块化——marker 生成与隐式
+                // list-item 计数由引擎管线承担（§4.6）。
+                crate::css::property::Display::ListItem => taffy::prelude::Display::Block,
                 crate::css::property::Display::Flex => taffy::prelude::Display::Flex,
                 crate::css::property::Display::Grid => taffy::prelude::Display::Grid,
                 crate::css::property::Display::None => taffy::prelude::Display::None,

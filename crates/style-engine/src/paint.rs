@@ -669,6 +669,11 @@ pub struct PaintCtx<'a> {
     pub images: &'a HashMap<String, ImageRes>,
     /// 多列列规条带（三期⑤c）：NodeId → 段列表（引擎逐帧重建）。
     pub column_rules: &'a HashMap<NodeId, Vec<ColumnRuleSeg>>,
+    /// P9-3（css-lists-3 §3.1，ADR-0041）：list-item 宿主 → 文本 marker
+    /// (marker 节点, 前进宽 px)。marker 伪节点 taffy 隐藏——paint 层在
+    /// 宿主首行内容左缘合成 marker 文本 op，宿主文本 op x 偏移前进宽
+    ///（inside 语义；outside≈inside B·豁免）。
+    pub markers: &'a HashMap<NodeId, (NodeId, f32)>,
 }
 
 /// 构建绘制清单（树序遍历；布局按节点给出 border-box）。
@@ -1319,6 +1324,12 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     let layout = ctx.layout;
     let scroll = ctx.scroll;
     let env = ctx.env;
+    // P9-3（ADR-0041）：::marker 伪节点自身不绘制——taffy 隐藏但零尺寸
+    // 布局条目仍存在；其文本已由宿主 paint 层合成（markers 表），此处
+    // 跳过防双重发射。
+    if tree.node(id).pseudo == Some(crate::tree::PseudoWhich::Marker) {
+        return;
+    }
     let Some(style) = styles.get(&id) else {
         return;
     };
@@ -1977,6 +1988,44 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             .len(PropertyId::PaddingTop)
             .map(|lp| px(lp, style, env))
             .unwrap_or(0.0);
+        // P9-3（css-lists-3 §3.1，ADR-0041）：宿主首行内容左缘合成
+        // marker 文本 op（树序先于宿主文本）；样式/文本/度量取 marker
+        // 节点自身（::marker 作者规则经 originating element 级联）。
+        // 无折行（单行标记；max_advance None）、无 span、无命中收集
+        //（标记非交互目标）。suffix 尾空格经 white-space:pre 计入测量
+        // 宽，与宿主文本间距由前进宽承载。
+        if let Some(&(mid, _adv)) = ctx.markers.get(&id)
+            && let Some(mcs) = styles.get(&mid)
+            && let Some(mtext) = tree.node(mid).text.as_ref()
+            && !mtext.is_empty()
+        {
+            out.ops.push(PaintOp::Text {
+                x: x + pad_l,
+                y: y + pad_t,
+                text: mtext.clone(),
+                color: resolve_color(&mcs.color(), mcs, env),
+                spans: Vec::new(),
+                font_size: mcs.font_size_px(),
+                font_family: mcs.font_family().clone(),
+                font_weight: mcs.font_weight(),
+                italic: mcs.font_style() == FontStyle::Italic,
+                max_advance: None,
+                line_height: mcs.resolved_line_height_px(env),
+                letter_spacing: mcs.resolved_letter_spacing_px(env),
+                text_align: mcs.text_align(),
+                word_break: mcs.word_break(),
+                overflow_wrap: mcs.overflow_wrap(),
+                decorations: text_decorations(mcs, env),
+                shadows: text_shadows(mcs, env),
+                font_stretch: mcs.font_stretch(),
+                word_spacing: mcs.resolved_word_spacing_px(env),
+                font_features: mcs.effective_font_features(),
+                font_variations: mcs.font_variations(),
+            });
+        }
+        // inside 语义：宿主文本自 marker 右缘起排（前进宽偏移；折行宽
+        // 已在引擎 leaf_wrap_width 同步收缩）。
+        let marker_adv = ctx.markers.get(&id).map(|(_, a)| *a).unwrap_or(0.0);
         let color = resolve_color(&style.color(), style, env);
         // T5c：span 绘制期样式终结（与基样式同一条解析路径）；C2（ADR-0016）：
         // text-transform 分段变换——op.text 携带变换后文本 + span 偏移经
@@ -2102,7 +2151,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
             }
         }
         out.ops.push(PaintOp::Text {
-            x: x + pad_l,
+            x: x + pad_l + marker_adv,
             y: y + pad_t,
             text: op_text,
             color,
@@ -3162,6 +3211,7 @@ mod tests {
             hit: None,
             images: &images,
             column_rules: &HashMap::new(),
+            markers: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
@@ -3298,6 +3348,7 @@ mod tests {
             hit: None,
             images: &images,
             column_rules: &HashMap::new(),
+            markers: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望顺序：a(x=10) → c(x=210)（流带）→ b(x=110)（flex 子项 z=5 进
@@ -3353,6 +3404,7 @@ mod tests {
             hit: None,
             images: &images,
             column_rules: &HashMap::new(),
+            markers: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望顺序：b(z0,x=110) → c(z1,x=210) → a(z2,x=10)；根无背景不产生 FillRect
@@ -3418,6 +3470,7 @@ mod tests {
             hit: None,
             images: &images,
             column_rules: &HashMap::new(),
+            markers: &HashMap::new(),
         };
         build_display_list(&ctx, root, 1, &mut out);
         // 期望：n1(Neg) → n2(Flow) → n3(auto) → n5(faded) → n4(z2)
@@ -3752,6 +3805,7 @@ mod tests {
             hit: None,
             images: &images,
             column_rules: &HashMap::new(),
+            markers: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         // F3b（ADR-0024）：多层发射 → 图层包 PushClip/PopClip，按 op 找
@@ -3869,6 +3923,7 @@ mod tests {
             hit: None,
             images: &HashMap::new(),
             column_rules: &rules,
+            markers: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         match &out.ops[0] {
@@ -4121,6 +4176,7 @@ mod tests {
             hit: Some(&cell),
             images: &HashMap::new(),
             column_rules: &HashMap::new(),
+            markers: &HashMap::new(),
         };
         let mut out = DisplayList::default();
         build_display_list(&ctx, id, 1, &mut out);
@@ -4357,6 +4413,7 @@ mod tests {
             hit: None,
             images,
             column_rules: &HashMap::new(),
+            markers: &HashMap::new(),
         };
         build_display_list(&ctx, id, 1, &mut out);
         out
