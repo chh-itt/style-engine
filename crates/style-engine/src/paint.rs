@@ -765,6 +765,7 @@ fn paint_border_image(
                         position: s.position.clone(),
                     })
                     .collect(),
+                hints: g.hints.clone(),
             };
             let linear = match &g.kind {
                 crate::css::property::GradientKind::Linear(angle) => {
@@ -1634,6 +1635,7 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                                 position: s.position.clone(),
                             })
                             .collect(),
+                        hints: g.hints.clone(),
                     };
                     let radial = match &g.kind {
                         crate::css::property::GradientKind::Radial(spec) => {
@@ -4663,6 +4665,7 @@ mod tests {
                 kind: crate::css::property::GradientKind::Linear(crate::css::value::Angle(90.0)),
                 repeating: false,
                 stops: vec![],
+                hints: vec![],
             },
             radial: None,
             conic: None,
@@ -4724,6 +4727,7 @@ mod tests {
                 kind: crate::css::property::GradientKind::Linear(crate::css::value::Angle(90.0)),
                 repeating: true,
                 stops: vec![],
+                hints: vec![],
             },
             radial: None,
             conic: None,

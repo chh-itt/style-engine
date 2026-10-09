@@ -119,6 +119,18 @@ pub struct GradientDump {
     pub repeating: bool,
     /// 停靠点。
     pub stops: Vec<ColorStopDump>,
+    /// 色彩提示（css-images-3，P9-1a；缺省空兼容旧 dump）。
+    #[serde(default)]
+    pub hints: Vec<GradientHintDump>,
+}
+
+/// 色彩提示投影。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradientHintDump {
+    /// 提示位于该索引停点之前。
+    pub after_stop: usize,
+    /// 提示位置。
+    pub position: LPDump,
 }
 
 /// 渐变类型投影（non_exhaustive——未知变体降级 Linear 180deg）。
@@ -423,6 +435,14 @@ fn gradient_dump(g: &Gradient) -> GradientDump {
                 position: s.position.as_ref().map(lp_dump),
             })
             .collect(),
+        hints: g
+            .hints
+            .iter()
+            .map(|h| GradientHintDump {
+                after_stop: h.after_stop,
+                position: lp_dump(&h.position),
+            })
+            .collect(),
     }
 }
 
@@ -472,6 +492,16 @@ fn gradient_load(d: &GradientDump) -> Gradient {
             .map(|s| crate::css::property::ColorStop {
                 color: color_load(&s.color),
                 position: s.position.as_ref().and_then(lp_load),
+            })
+            .collect(),
+        hints: d
+            .hints
+            .iter()
+            .filter_map(|h| {
+                lp_load(&h.position).map(|position| crate::css::property::GradientHint {
+                    after_stop: h.after_stop,
+                    position,
+                })
             })
             .collect(),
     }

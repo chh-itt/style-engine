@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 渐变停点文法补齐与双 sink 均布统一（P9-1a）
+
+- **停点文法（feat，css-images-3/4，ADR-0038）**：色彩提示（`linear-gradient(red, 50%, blue)`）与任意序位置（`25% red`）入文法（旧文法强制色前位置，此类声明整条 IACVT）；css-images-4 双位置（`red 10% 90%`）按同色两停点 desugar。`Gradient` 增 `hints: Vec<GradientHint>`（`after_stop`/`position`），ComputedStyle→PaintOp::Gradient→serde dump/load 全链透传（旧 dump 缺字段经 `#[serde(default)]` 兼容）。解析拒绝：首停点前提示、尾随提示、双位置缺色、单停点。新增锁定测试 9 件（css_images.rs）。
+- **均布单源（fix）**：停点缺省位置均布上移核心 `distribute_stop_positions`（首 0 末 1、缺位段邻点间均布、css-images-3 §4.5.2 逆序抬升）；修复 soft sink 旧前向填充把中段无位停点塌缩到前一停位的偏差（red,yellow,blue 曾渲染为黄→蓝、红带消失），vello 删本地重复实现同源接入。soft 均布修复像素锁 + vello 表测试。
+- **色彩提示展开（feat）**：sink 侧经核心共享 `apply_gradient_hints` 把提示展开为「位置=提示点、色=前后停点色中点」的合成停点（css-images-3 提示语义的精确等价形，非近似）；提示位置经邻域 clamp 保单调；em/rem/cq 等无上下文单位提示整体丢弃=线性回退（B·豁免，与 em 停点同约定）。
+- **防御分支统一（fix）**：停点非 Absolute 色两 sink 统一为不透明黑（旧 soft=透明黑、vello=不透明黑相反；引擎契约=绘制发射前 `resolve_color` 已终结全部停点色，该分支为防御路径）。
+
 ### 1.0 对齐 — 计数器样式格式化
 
 - **@counter-style 接入 content 渲染（feat）**：新增 `css::stylesheet::counter_format`

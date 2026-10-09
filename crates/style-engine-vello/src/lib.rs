@@ -55,6 +55,7 @@ mod tests {
                 stop(None),
                 stop(Some(LengthPercentage::Percent(1.0))),
             ],
+            &[],
             200.0,
         );
         let offs: Vec<f32> = out.iter().map(|(o, _)| *o).collect();
@@ -65,10 +66,57 @@ mod tests {
                 stop(Some(LengthPercentage::Percent(0.6))),
                 stop(Some(LengthPercentage::Percent(0.4))),
             ],
+            &[],
             200.0,
         );
         let offs: Vec<f32> = out.iter().map(|(o, _)| *o).collect();
         assert_eq!(offs, [0.6, 0.6]);
+    }
+
+    #[test]
+    fn gradient_hint_expands_stop_table() {
+        // P9-1a：提示在停点表中展开为色=前后中点的合成停点。
+        use style_engine::css::property::{ColorStop, GradientHint};
+        use style_engine::css::value::{ColorValue, LengthPercentage};
+        use vello::peniko::color::AlphaColor;
+        let stop = |position: Option<LengthPercentage>| ColorStop {
+            color: ColorValue::Absolute(AlphaColor::new([1.0, 0.0, 0.0, 1.0])),
+            position,
+        };
+        // red 0 / hint 50% / red 100% → 3 表项：中点色 = 红/红中点 = 红
+        // （色相同则数值不可分辨，改用红/蓝端点验色）。
+        let mut red = stop(Some(LengthPercentage::Percent(0.0)));
+        let blue = ColorStop {
+            color: ColorValue::Absolute(AlphaColor::new([0.0, 0.0, 1.0, 1.0])),
+            position: Some(LengthPercentage::Percent(1.0)),
+        };
+        red.position = Some(LengthPercentage::Percent(0.0));
+        let out = super::distribute_stops(
+            &[red, blue],
+            &[GradientHint {
+                after_stop: 1,
+                position: LengthPercentage::Percent(0.5),
+            }],
+            200.0,
+        );
+        assert_eq!(out.len(), 3, "提示应展开为第三个表项");
+        assert_eq!(out[1].0, 0.5);
+        // 中点色 = 红/蓝中点
+        assert!((out[1].1.components[0] - 0.5).abs() < 1e-4);
+        assert!((out[1].1.components[2] - 0.5).abs() < 1e-4);
+        // em 等无上下文单位提示整体丢弃（表不展开）
+        let out = super::distribute_stops(
+            &[
+                stop(Some(LengthPercentage::Percent(0.0))),
+                stop(Some(LengthPercentage::Percent(1.0))),
+            ],
+            &[GradientHint {
+                after_stop: 1,
+                position: style_engine::css::value::LengthPercentage::Em(1.0),
+            }],
+            200.0,
+        );
+        assert_eq!(out.len(), 2, "无上下文单位提示应整体丢弃");
     }
 
     #[test]
@@ -1700,7 +1748,7 @@ fn peniko_gradient(
             }
         }
     };
-    let stops = distribute_stops(&g.stops, line_len);
+    let stops = distribute_stops(&g.stops, &g.hints, line_len);
     if g.repeating {
         return repeating_peniko(out, stops);
     }
@@ -1794,71 +1842,37 @@ fn to_peniko_mix(mode: &style_engine::css::property::BlendMode) -> Mix {
     }
 }
 
-/// 按补齐 CSS 语义的 stop 位置构建 (offset, sRGB 颜色) 序列。
+/// 按补齐 CSS 语义的 stop 位置构建 (offset, sRGB 颜色) 序列（P9-1a）。
 /// Px=沿渐变线 px → 按线长归一为 0..1 offset（vello stop 语义）；
 /// Percent 存储即线长分数直取；其余单位（em/rem/cq…）sink 侧无
-/// 字体/容器上下文，与 soft sink 同约定按缺省自动均布（偏差在案
-/// FEATURES.md）；显式位置逆序时按 css-images-3 §4.5.2 抬至前停位。
+/// 字体/容器上下文——位置交核心共享均布 `distribute_stop_positions`
+/// （首 0 末 1、缺位段邻点间均布、显式位置逆序按 css-images-3 §4.5.2
+/// 抬升），色彩提示交核心 `apply_gradient_hints` 展开（em/rem/cq
+/// 提示无上下文单位整体丢弃 = 线性回退，soft sink 同约定）。
+/// 非 Absolute 停点色防御性视作不透明黑（与 soft sink 统一；引擎
+/// 契约=绘制发射前 `resolve_color` 已终结全部停点色）。
 fn distribute_stops(
     stops: &[style_engine::css::property::ColorStop],
+    hints: &[style_engine::css::property::GradientHint],
     line_len: f32,
 ) -> Vec<(f32, AlphaColor<Srgb>)> {
-    let n = stops.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut positions: Vec<f32> = Vec::with_capacity(n);
-    for s in stops {
-        match &s.position {
-            Some(style_engine::css::value::LengthPercentage::Px(v)) => {
-                positions.push(if line_len > 0.0 {
-                    (v / line_len).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                })
-            }
-            Some(style_engine::css::value::LengthPercentage::Percent(f)) => {
-                positions.push(f.clamp(0.0, 1.0))
-            }
-            // None 与 em/rem/cq 等无 sink 上下文的单位：自动均布
-            _ => positions.push(f32::NAN),
-        }
-    }
-    if positions[0].is_nan() {
-        positions[0] = 0.0;
-    }
-    if positions[n - 1].is_nan() {
-        positions[n - 1] = 1.0;
-    }
-    let mut last_known = 0.0f32;
-    let mut i = 0;
-    while i < n {
-        if positions[i].is_nan() {
-            let mut j = i;
-            while j < n && positions[j].is_nan() {
-                j += 1;
-            }
-            let next = if j < n { positions[j] } else { 1.0 };
-            let span = (j - i + 1) as f32;
-            for (k, idx) in (i..j).enumerate() {
-                positions[idx] = last_known + (next - last_known) * ((k + 1) as f32 / span);
-            }
-            i = j;
-        } else {
-            last_known = positions[i];
-            i += 1;
-        }
-    }
-    // css-images-3 §4.5.2：解析器不夹取位置，后停位 < 前停位时抬至前停位
-    // （用值期语义归 sink；均布值本身已落于邻点之间，不受影响）
-    for i in 1..n {
-        if positions[i] < positions[i - 1] {
-            positions[i] = positions[i - 1];
-        }
-    }
-    stops
+    let positions: Vec<Option<f32>> = stops
         .iter()
-        .zip(positions)
+        .map(|s| match &s.position {
+            Some(style_engine::css::value::LengthPercentage::Px(v)) => Some(if line_len > 0.0 {
+                (v / line_len).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }),
+            Some(style_engine::css::value::LengthPercentage::Percent(f)) => Some(f.clamp(0.0, 1.0)),
+            // None 与 em/rem/cq 等无 sink 上下文的单位：核心均布
+            _ => None,
+        })
+        .collect();
+    let normalized = style_engine::css::property::distribute_stop_positions(&positions);
+    let table: Vec<(f32, AlphaColor<Srgb>)> = stops
+        .iter()
+        .zip(normalized)
         .map(|(s, p)| {
             let c = match s.color.pick_scheme(false) {
                 ColorValue::Absolute(c) => c,
@@ -1866,7 +1880,28 @@ fn distribute_stops(
             };
             (p, c)
         })
-        .collect()
+        .collect();
+    let hs: Vec<(usize, f32)> = hints
+        .iter()
+        .filter_map(|h| match &h.position {
+            style_engine::css::value::LengthPercentage::Percent(f) => {
+                Some((h.after_stop, f.clamp(0.0, 1.0)))
+            }
+            style_engine::css::value::LengthPercentage::Px(v) => Some((
+                h.after_stop,
+                if line_len > 0.0 {
+                    (v / line_len).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+            )),
+            _ => None, // em/rem/cq 等：丢弃提示（线性回退）
+        })
+        .collect();
+    if hs.is_empty() {
+        return table;
+    }
+    style_engine::css::property::apply_gradient_hints(&table, &hs)
 }
 
 /// 圆弧上另起一段（起点 move_to，不绘制；y-down，θ 递增 = 屏幕顺时针）。

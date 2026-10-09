@@ -7,6 +7,7 @@ use crate::css::value::{
     Angle, ColorValue, LengthPercentage, ValResult, parse_color_value, parse_length_percentage,
     parse_number,
 };
+use crate::{AlphaColor, Srgb};
 use cssparser::{Parser, Token, match_ignore_ascii_case};
 use smallvec::SmallVec;
 
@@ -2532,8 +2533,25 @@ pub struct Gradient {
     /// 渐变线/半径/角度无限平铺，周期 = 首末停点跨距；周期为 0 时透明黑）。
     /// P1-3 起解析；几何平铺由 sink 终结（vello Extend::Repeat / soft 取模采样）。
     pub repeating: bool,
-    /// 颜色停靠点序列（至少 1 个）。
+    /// 颜色停靠点序列（至少 2 个；提示不计数）。
     pub stops: Vec<ColorStop>,
+    /// 色彩提示（css-images-3 color-stop-list：相邻两停点之间的
+    /// `<length-percentage>`）。不参与停点位置均布，仅在采样期展开为
+    /// 前后停点色的中点合成停点（`apply_gradient_hints`，soft/vello
+    /// sink 共享单源）。引擎绘制期发射的 Gradient 已随 stops 透传，
+    /// sink 消费时机=位置补齐之后。
+    pub hints: Vec<GradientHint>,
+}
+
+/// 渐变色彩提示（css-images-3；P9-1a ADR-0038）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientHint {
+    /// 提示位于该索引停点之前（即 stops[idx-1] 与 stops[idx] 之间）。
+    /// 首停点之前（idx=0）与末停点之后（idx>=stops.len()）语法非法，
+    /// 解析期拒绝。
+    pub after_stop: usize,
+    /// 提示位置（沿渐变线；文法与停点位置同族 <length-percentage>）。
+    pub position: LengthPercentage,
 }
 
 /// 渐变类型（linear/radial）。
@@ -2607,6 +2625,92 @@ pub struct ColorStop {
     pub color: ColorValue,
     /// 停靠位置（None → 沿轴自动均布）。
     pub position: Option<LengthPercentage>,
+}
+
+/// css-images-3 §4.5.2 停点位置补齐（soft/vello sink 共享单源，P9-1a）：
+/// 首停缺位=0.0、末停缺位=1.0；中间缺位段在最近已知邻点间**均布**
+/// （span 含段后首个已知停点）；显式位置逆序时逐点抬升至前停位（单调化）。
+/// 输入为各 sink 完成单位归一化（px→沿线分数、%直取，无上下文单位=None）
+/// 并钳制 [0,1] 后的位置序列。
+pub fn distribute_stop_positions(raw: &[Option<f32>]) -> Vec<f32> {
+    let n = raw.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut positions: Vec<f32> = raw.iter().map(|p| p.unwrap_or(f32::NAN)).collect();
+    if positions[0].is_nan() {
+        positions[0] = 0.0;
+    }
+    if positions[n - 1].is_nan() {
+        positions[n - 1] = 1.0;
+    }
+    let mut last_known = 0.0f32;
+    let mut i = 0;
+    while i < n {
+        if positions[i].is_nan() {
+            let mut j = i;
+            while j < n && positions[j].is_nan() {
+                j += 1;
+            }
+            let next = if j < n { positions[j] } else { 1.0 };
+            let span = (j - i + 1) as f32;
+            for (k, idx) in (i..j).enumerate() {
+                positions[idx] = last_known + (next - last_known) * ((k + 1) as f32 / span);
+            }
+            i = j;
+        } else {
+            last_known = positions[i];
+            i += 1;
+        }
+    }
+    // css-images-3 §4.5.2：解析器不夹取位置，后停位 < 前停位时抬至前停位
+    for w in 1..n {
+        if positions[w] < positions[w - 1] {
+            positions[w] = positions[w - 1];
+        }
+    }
+    positions
+}
+
+/// css-images-3 色彩提示展开（soft/vello sink 共享单源，P9-1a）：
+/// 在已补齐位置的 `(offset, 颜色)` 停点序列上，为每个提示
+/// `(after_stop, 归一位置)` 合成一个中点停点（前后停点色均值），
+/// 插值曲线 = 分段线性经过提示位（css-images-3 平滑曲线的线性近似，
+/// 偏差在案 SINK-MATRIX；重估条件=sink 级曲线插值原语）。after_stop
+/// 越界（0 或 ≥ 停点数）或提示位落出所属区间时忽略该提示。
+/// 提示位归一化（px→沿线分数等）由调用方完成；无法归一化的单位
+/// （em/rem/cq 等 sink 无上下文）应整体丢弃提示（线性即无提示行为）。
+pub fn apply_gradient_hints(
+    stops: &[(f32, AlphaColor<Srgb>)],
+    hints: &[(usize, f32)],
+) -> Vec<(f32, AlphaColor<Srgb>)> {
+    let n = stops.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<(f32, AlphaColor<Srgb>)> = stops.to_vec();
+    let mut synth: Vec<(f32, AlphaColor<Srgb>)> = Vec::with_capacity(hints.len());
+    for &(idx, pos) in hints {
+        if idx == 0 || idx >= n {
+            continue; // 首停点前 / 末停点后：解析期已拒，防御忽略
+        }
+        let (p_prev, c_prev) = stops[idx - 1];
+        let (p_next, c_next) = stops[idx];
+        let a = c_prev.components;
+        let b = c_next.components;
+        let mid = AlphaColor::new([
+            (a[0] + b[0]) * 0.5,
+            (a[1] + b[1]) * 0.5,
+            (a[2] + b[2]) * 0.5,
+            (a[3] + b[3]) * 0.5,
+        ]);
+        let lo = p_prev.min(p_next);
+        let hi = p_prev.max(p_next);
+        synth.push((pos.clamp(lo, hi), mid));
+    }
+    out.extend(synth);
+    out.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// 阴影（第五批⑩：inset 关键字支持——内/外阴影按 CSS 绘制序分别发射）。
@@ -4993,11 +5097,12 @@ fn parse_linear_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
         // 方向段之后必须跟逗号
         p.expect_comma().map_err(cssparser::ParseError::from)?;
     }
-    let stops = parse_gradient_stops(p)?;
+    let (stops, hints) = parse_gradient_stops(p)?;
     Ok(Gradient {
         kind,
         repeating: false, // 分派器（parse_background_image_one）按函数名改写
         stops,
+        hints,
     })
 }
 
@@ -5086,7 +5191,7 @@ fn parse_radial_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
     if shape.is_some() || size.is_some() || position.is_some() {
         p.expect_comma().map_err(cssparser::ParseError::from)?;
     }
-    let stops = parse_gradient_stops(p)?;
+    let (stops, hints) = parse_gradient_stops(p)?;
     Ok(Gradient {
         repeating: false, // 分派器按函数名改写
         kind: GradientKind::Radial(RadialSpec {
@@ -5098,6 +5203,7 @@ fn parse_radial_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
             )),
         }),
         stops,
+        hints,
     })
 }
 
@@ -5141,7 +5247,7 @@ fn parse_conic_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
     if from.is_some() || position.is_some() {
         p.expect_comma().map_err(cssparser::ParseError::from)?;
     }
-    let stops = parse_gradient_stops(p)?;
+    let (stops, hints) = parse_gradient_stops(p)?;
     Ok(Gradient {
         repeating: false, // 分派器按函数名改写
         kind: GradientKind::Conic(ConicSpec {
@@ -5152,6 +5258,7 @@ fn parse_conic_gradient(p: &mut Parser<'_>) -> ValResult<Gradient> {
             )),
         }),
         stops,
+        hints,
     })
 }
 
@@ -5222,12 +5329,70 @@ fn parse_position_component(p: &mut Parser<'_>) -> ValResult<LengthPercentage> {
     }
 }
 
-fn parse_gradient_stops(p: &mut Parser<'_>) -> ValResult<Vec<ColorStop>> {
-    let mut stops = Vec::new();
+/// 渐变停点列表解析（css-images-3 color-stop-list；P9-1a ADR-0038 补全）：
+/// 每项 = `<color> && <length-percentage>{0,2}`（任意序）：
+/// - 颜色 + 0 位置 → 停点（位置自动均布）；
+/// - 颜色 + 1 位置 → 停点；
+/// - 颜色 + 2 位置 → css-images-4 双位置 desugar（同色两停点 = 钳制区间）；
+/// - 仅 1 位置（无颜色）→ 色彩提示（hint）：不参与均布，采样期由
+///   `apply_gradient_hints` 展开为前后停点色中点合成停点；
+///   首停点之前 / 末停点之后的提示语法非法（整条 IACVT）。
+///
+/// 返回 (停点列表, 提示列表)；停点 ≥ 2（提示不计数）。
+fn parse_gradient_stops(p: &mut Parser<'_>) -> ValResult<(Vec<ColorStop>, Vec<GradientHint>)> {
+    let mut stops: Vec<ColorStop> = Vec::new();
+    let mut hints: Vec<GradientHint> = Vec::new();
     loop {
-        let color = parse_color_value(p)?;
-        let position = p.try_parse(|p| parse_length_percentage(p)).ok();
-        stops.push(ColorStop { color, position });
+        let mut lps: SmallVec<[LengthPercentage; 2]> = SmallVec::new();
+        let mut color: Option<ColorValue> = None;
+        loop {
+            if lps.len() < 2 && let Ok(lp) = p.try_parse(parse_length_percentage) {
+                lps.push(lp);
+                continue;
+            }
+            if color.is_none() && let Ok(c) = p.try_parse(parse_color_value) {
+                color = Some(c);
+                continue;
+            }
+            break;
+        }
+        match (color.take(), lps.len()) {
+            (Some(c), 0) => stops.push(ColorStop {
+                color: c,
+                position: None,
+            }),
+            (Some(c), 1) => stops.push(ColorStop {
+                color: c,
+                position: Some(lps[0].clone()),
+            }),
+            // css-images-4 双位置：`red 10% 90%` ≡ red@10% 与 red@90%
+            // 两个同色停点（钳制区间；位置序保持输入序，逆序由
+            // §4.5.2 单调化兜底）。
+            (Some(c), 2) => {
+                stops.push(ColorStop {
+                    color: c,
+                    position: Some(lps[0].clone()),
+                });
+                stops.push(ColorStop {
+                    color: c,
+                    position: Some(lps[1].clone()),
+                });
+            }
+            // 色彩提示：无颜色的单项 <length-percentage>；
+            // after_stop = 下一停点索引（解析期即锚定）。
+            (None, 1) => {
+                if stops.is_empty() {
+                    return Err(p.new_error_for_next_token()); // 首停点前提示非法
+                }
+                hints.push(GradientHint {
+                    after_stop: stops.len(),
+                    position: lps[0].clone(),
+                });
+            }
+            (None, _) => return Err(p.new_error_for_next_token()), // 2 位置无颜色 / 空项
+            // lps 收集循环上限 2，此臂不可达；防御视为语法错
+            (Some(_), _) => return Err(p.new_error_for_next_token()),
+        }
         let more = p.try_parse(|p| p.expect_comma());
         if more.is_err() {
             break;
@@ -5236,7 +5401,11 @@ fn parse_gradient_stops(p: &mut Parser<'_>) -> ValResult<Vec<ColorStop>> {
     if stops.len() < 2 {
         return Err(p.new_error_for_next_token());
     }
-    Ok(stops)
+    // 尾随提示（末停点之后无后继停点）非法
+    if hints.last().is_some_and(|h| h.after_stop >= stops.len()) {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok((stops, hints))
 }
 
 /// box-shadow：none 或逗号分隔阴影列表（inset 前导、2/3/4 长度 + 颜色）。

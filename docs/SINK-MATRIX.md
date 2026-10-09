@@ -25,6 +25,9 @@
 | 通路 | soft | vello | 分级/备注 |
 |---|---|---|---|
 | FillRect / Gradient 基元 | 逐像素直绘 | vello Scene | 一致（Pixel 通道双腿锁定） |
+| 渐变停点均布 | 核心 `distribute_stop_positions`（P9-1a 共享单源） | 同（P9-1a 起删本地实现） | 一致；旧 soft 前向填充塌缩（中段无位停点并到前停位）已修 |
+| 渐变色彩提示 | `apply_gradient_hints` 展开（Px/% 提示；em/rem/cq 丢弃） | 同 | 一致（P9-1a）；无上下文单位提示丢弃=B·豁免（与 em 停点同约定） |
+| 渐变停点非 Absolute 色防御分支 | 不透明黑 | 不透明黑 | 一致（P9-1a 统一；旧 soft=透明黑、vello=不透明黑相反——引擎契约下不可达路径） |
 | 阴影 blur | 真 3× 可分离盒模糊（σ=blur/2） | 多重同心圆环近似 | B（两条路径均文档化，FEATURES「阴影」条） |
 | Border dashed/dotted | 按边拆 FillRect 序列（P4 D1） | 同 soft（PaintOp 层已拆） | 一致；不等宽圆角弧起点 B |
 | Text 对齐/spans | P7 收口：逐字符 span 归属 | parley VelloTextSystem | 一致；装饰线基样式单行近似 B |

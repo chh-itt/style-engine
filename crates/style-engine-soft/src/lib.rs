@@ -12,7 +12,7 @@
 //! | op | 支持 | 备注 |
 //! |---|---|---|
 //! | FillRect | ✓ | 椭圆圆角逐像素覆盖测试 |
-//! | Gradient | ✓ | linear（CSS 角度）+ radial（RadialGeom 椭圆）+ conic（ConicGeom 扫角，C3）；停点色仅 Absolute（其余视作全透明），位置仅 Px/Percent（其余/None 自动均布） |
+//! | Gradient | ✓ | linear（CSS 角度）+ radial（RadialGeom 椭圆）+ conic（ConicGeom 扫角，C3）；停点位置（Px/Percent/None 自动均布，P9-1a 共享核心 `distribute_stop_positions`）+ 色彩提示展开（`apply_gradient_hints`，em/rem/cq 提示无上下文单位丢弃）；停点色仅 Absolute（其余防御性视作不透明黑，与 vello sink 统一） |
 //! | Shadow | ✓ blur 路径 | blur=0：外扩/内缩平移矩形（原路径）；blur>0：真形状遮罩（圆角矩形 out/inset）+ 3×盒模糊≈高斯（σ=blur/2、pad=⌈3σ⌉、整数滑动窗确定性）——仅纯平移矩阵，旋转/缩放回退平移矩形（记录偏差） |
 //! | Image | ✓ | 最近邻采样（缩放无滤波） |
 //! | Border | ✓ P8 | 圆角弧逐像素（css-backgrounds §5.5 缩放 + 内缩内半径孔洞）+ 角域外角→内角对角线二分（方角=vello fill_tri 同法同含界）+ 角域实线（vello 虚线相位穿弧近似，记录）+ 直段 Dashed=3w/3w、Dotted=点径 w 间距 2w（vello 同参）|
@@ -34,12 +34,12 @@ pub mod filter;
 mod ttf;
 
 use style_engine::css::property::{
-    BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientKind, TextAlign,
-    TextDecoStyleKind,
+    BlendMode, BorderStyle, ColorStop, FamilyName, FontFamilyList, GradientHint, GradientKind,
+    TextAlign, TextDecoStyleKind,
 };
 use style_engine::css::value::{ColorValue, LengthPercentage};
 use style_engine::paint::{ConicGeom, FilterEffect, RadialGeom};
-use style_engine::{DisplayList, PaintOp};
+use style_engine::{AlphaColor, DisplayList, PaintOp, Srgb};
 
 /// 纯软件画布：RGBA8 直 alpha、sRGB 编码值（与 DisplayList 色彩语义一致）。
 pub struct SoftCanvas {
@@ -550,20 +550,22 @@ fn apply_op(
                 _ => None,
             };
             let stops = gradient.stops.clone();
+            let hints = gradient.hints.clone();
             // F3d（ADR-0026）：linear 绝对几何优先——采样 = 对渐变线段
             // （全盒解析，9-slice 区域共用）的归一投影；否则退回盒心投影。
             let lin = *linear;
             let line_len = lin
                 .map(|g| ((g.end[0] - g.start[0]).powi(2) + (g.end[1] - g.start[1]).powi(2)).sqrt())
                 .unwrap_or(line.2);
+            // P9-1a：停点采样表一次构建（含提示展开），像素闭包内查表插值。
+            let table = build_stop_table(&stops, &hints, line_len);
             // repeating（css-images-3，P1-3）：停点模式周期 = 首末停点跨距
             // （全线索引分数）；采样 t 取模回周期内再插值。周期 0（显式停点
             // 逆序抬升后首末重合等）→ 透明黑（source-over 之下 = 无操作）。
             let repeating = if gradient.repeating {
-                let pos = stop_positions(&gradient.stops, line_len);
-                let first = pos.first().copied().unwrap_or(0.0);
-                let period = pos.last().copied().unwrap_or(0.0) - first;
-                Some((first, period))
+                let first = table.first().map(|(p, _)| *p).unwrap_or(0.0);
+                let last = table.last().map(|(p, _)| *p).unwrap_or(0.0);
+                Some((first, last - first))
             } else {
                 None
             };
@@ -613,9 +615,9 @@ fn apply_op(
                         // t 可越出 [0,1]（CSS repeating 沿轴无限平铺）：
                         // u = first + mod(t − first, period) 落回首末停点间
                         let u = first + (t - first).rem_euclid(period);
-                        return stop_at(&stops, u.clamp(0.0, 1.0), line_len);
+                        return sample_table(&table, u.clamp(0.0, 1.0));
                     }
-                    stop_at(&stops, t.clamp(0.0, 1.0), line_len)
+                    sample_table(&table, t.clamp(0.0, 1.0))
                 },
             );
         }
@@ -2351,71 +2353,90 @@ fn draw_text(
 }
 
 /// 渐变停点：位置 Px（沿渐变线 px）/Percent（线长分数）直接解析，
-/// 其余与 None 自动均布（CSS 简化规则：首 0 末 1，中间取邻点中点）。
+/// 其余与 None 交核心共享均布算法（`distribute_stop_positions`，
+/// P9-1a：首 0 末 1、缺位段邻点间均布、逆序单调化——修复旧前向填充
+/// 把中间无位停点塌缩到前一停位的偏差）。
 fn stop_positions(stops: &[ColorStop], line_len: f32) -> Vec<f32> {
-    let n = stops.len();
-    let mut pos: Vec<Option<f32>> = stops
+    let raw: Vec<Option<f32>> = stops
         .iter()
         .map(|s| match &s.position {
-            Some(LengthPercentage::Px(v)) => Some((v / line_len).clamp(0.0, 1.0)),
+            Some(LengthPercentage::Px(v)) => Some(if line_len > 0.0 {
+                (v / line_len).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }),
             Some(LengthPercentage::Percent(f)) => Some(f.clamp(0.0, 1.0)),
             _ => None,
         })
         .collect();
-    if n > 0 && pos[0].is_none() {
-        pos[0] = Some(0.0);
-    }
-    if n > 1 && pos[n - 1].is_none() {
-        pos[n - 1] = Some(1.0);
-    }
-    // 简化均布：从左到右，未定 = 前一已定值；再从右到左补全为 1 起点。
-    for i in 1..n {
-        if pos[i].is_none() {
-            pos[i] = pos[i - 1];
-        }
-    }
-    for i in (0..n.saturating_sub(1)).rev() {
-        if pos[i].is_none() {
-            pos[i] = pos[i + 1];
-        }
-    }
-    // css-images-3 §4.5.2：显式位置逆序时抬至前停位（单调化；
-    // 解析器不夹取，用值期语义归 sink）
-    for i in 1..n {
-        if pos[i] < pos[i - 1] {
-            pos[i] = pos[i - 1];
-        }
-    }
-    pos.into_iter().map(|p| p.unwrap_or(0.0)).collect()
+    style_engine::css::property::distribute_stop_positions(&raw)
 }
 
-/// t 处停点色（sRGB 插值；非 Absolute 停点色视作全透明——记录偏差）。
-fn stop_at(stops: &[ColorStop], t: f32, line_len: f32) -> [f32; 4] {
-    if stops.is_empty() {
-        return [0.0, 0.0, 0.0, 0.0];
-    }
+/// 停点采样表（P9-1a）：停点 → (归一 offset, sRGBA)，随后展开色彩提示
+/// （css-images-3：提示 = 前后停点色中点合成停点，核心共享
+/// `apply_gradient_hints`；线性近似曲线，偏差在案 SINK-MATRIX）。
+/// 提示位置归一化：Percent 直取、Px/线长；em/rem/cq 等 sink 无上下文
+/// 单位整体丢弃提示（线性 = 无提示行为）。非 Absolute 停点色视为
+/// 不透明黑（与 vello sink 一致；引擎契约=绘制期已终结 Absolute，
+/// 本分支为防御路径）。
+fn build_stop_table(
+    stops: &[ColorStop],
+    hints: &[GradientHint],
+    line_len: f32,
+) -> Vec<(f32, [f32; 4])> {
     let pos = stop_positions(stops, line_len);
     let rgba = |c: &ColorValue| match c {
         ColorValue::Absolute(a) => a.components,
-        _ => [0.0, 0.0, 0.0, 0.0],
+        _ => [0.0, 0.0, 0.0, 1.0],
     };
-    if t <= pos[0] {
-        return rgba(&stops[0].color);
+    let table: Vec<(f32, AlphaColor<Srgb>)> = stops
+        .iter()
+        .zip(pos)
+        .map(|(s, p)| (p, AlphaColor::new(rgba(&s.color))))
+        .collect();
+    let hs: Vec<(usize, f32)> = hints
+        .iter()
+        .filter_map(|h| match &h.position {
+            LengthPercentage::Percent(f) => Some((h.after_stop, f.clamp(0.0, 1.0))),
+            LengthPercentage::Px(v) => Some((
+                h.after_stop,
+                if line_len > 0.0 {
+                    (v / line_len).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+            )),
+            _ => None, // em/rem/cq 等：丢弃提示（线性回退）
+        })
+        .collect();
+    style_engine::css::property::apply_gradient_hints(&table, &hs)
+        .into_iter()
+        .map(|(p, c)| (p, c.components))
+        .collect()
+}
+
+/// t 处采样表颜色（sRGB 分段线性插值；t 越界夹取端点色）。
+fn sample_table(table: &[(f32, [f32; 4])], t: f32) -> [f32; 4] {
+    if table.is_empty() {
+        return [0.0, 0.0, 0.0, 0.0];
     }
-    for i in 1..stops.len() {
-        if t <= pos[i] {
-            let (p0, p1) = (pos[i - 1], pos[i]);
+    if t <= table[0].0 {
+        return table[0].1;
+    }
+    for i in 1..table.len() {
+        if t <= table[i].0 {
+            let (p0, c0) = table[i - 1];
+            let (p1, c1) = table[i];
             let k = if p1 > p0 { (t - p0) / (p1 - p0) } else { 0.0 };
-            let (a, b) = (rgba(&stops[i - 1].color), rgba(&stops[i].color));
             return [
-                a[0] + (b[0] - a[0]) * k,
-                a[1] + (b[1] - a[1]) * k,
-                a[2] + (b[2] - a[2]) * k,
-                a[3] + (b[3] - a[3]) * k,
+                c0[0] + (c1[0] - c0[0]) * k,
+                c0[1] + (c1[1] - c0[1]) * k,
+                c0[2] + (c1[2] - c0[2]) * k,
+                c0[3] + (c1[3] - c0[3]) * k,
             ];
         }
     }
-    rgba(&stops[stops.len() - 1].color)
+    table[table.len() - 1].1
 }
 
 #[cfg(test)]
@@ -2866,6 +2887,7 @@ mod tests {
                         LengthPercentage::Percent(0.5),
                     ),
                 }),
+                hints: vec![],
                 stops: vec![
                     ColorStop {
                         color: red,
@@ -2932,6 +2954,7 @@ mod tests {
             gradient: Gradient {
                 repeating: false,
                 kind: GradientKind::Linear(Angle(90.0)),
+                hints: vec![],
                 stops: vec![
                     ColorStop {
                         color: ColorValue::Absolute(rgba([0.0, 0.0, 0.0, 1.0])),
@@ -2959,6 +2982,142 @@ mod tests {
     }
 
     #[test]
+    fn linear_gradient_unpositioned_stops_distribute_evenly() {
+        // P9-1a 均布修复锁：red/yellow/blue 全缺位 → 0/0.5/1（旧前向填充
+        // 塌缩 0/0/1，红带消失、整条黄→蓝）。100px 盒 90deg：
+        // x=25 → t=0.25 红/黄中点 [1,0.5,0]；x=75 → 黄/蓝中点 [0.5,0.5,0.5]。
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::Gradient {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 4.0,
+            radius: [0.0; 8],
+            gradient: Gradient {
+                repeating: false,
+                kind: GradientKind::Linear(Angle(90.0)),
+                hints: vec![],
+                stops: vec![
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0])),
+                        position: None,
+                    },
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([1.0, 1.0, 0.0, 1.0])),
+                        position: None,
+                    },
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([0.0, 0.0, 1.0, 1.0])),
+                        position: None,
+                    },
+                ],
+            },
+            radial: None,
+            conic: None,
+            linear: None,
+        });
+        let c = render(&list, 100, 4, [0, 0, 0, 255]);
+        let px = |x: usize| &c.pixels[(2 * 100 + x) * 4..(2 * 100 + x) * 4 + 3];
+        // t=(25+0.5)/100=0.255 → 红→黄 k=0.51 → r≈255, g≈130, b=0
+        let (r, g, b) = (px(25)[0], px(25)[1], px(25)[2]);
+        assert!(r > 240, "25% 处应有红分量（旧塌缩缺陷时 r≈128）: {r}");
+        assert!((100..=160).contains(&g), "25% 处绿≈红黄混合: {g}");
+        assert!(b < 20, "25% 处不应有蓝: {b}");
+        // t=(75+0.5)/100=0.755 → 黄→蓝 k=0.51 → [128,128,128]
+        let (r, g, b) = (px(75)[0], px(75)[1], px(75)[2]);
+        assert!((100..=160).contains(&r), "75% 处红=黄蓝混合: {r}");
+        assert!((100..=160).contains(&g), "75% 处绿=黄蓝混合: {g}");
+        assert!(b > 100, "75% 处应有蓝分量: {b}");
+    }
+
+    #[test]
+    fn linear_gradient_color_hint_bends_interpolation() {
+        // P9-1a 提示展开：red 0 / blue 1 + 提示 25% → 提示停点色=红蓝中点
+        // [0.5,0,0.5]。x=25（t≈0.255）落提示停点上 ≈ [0.5,0,0.5]（无提示
+        // 时该处为 [0.75,0,0.75]）——插值曲线被弯折。
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::Gradient {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 4.0,
+            radius: [0.0; 8],
+            gradient: Gradient {
+                repeating: false,
+                kind: GradientKind::Linear(Angle(90.0)),
+                hints: vec![GradientHint {
+                    after_stop: 1,
+                    position: LengthPercentage::Percent(0.25),
+                }],
+                stops: vec![
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0])),
+                        position: Some(LengthPercentage::Percent(0.0)),
+                    },
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([0.0, 0.0, 1.0, 1.0])),
+                        position: Some(LengthPercentage::Percent(1.0)),
+                    },
+                ],
+            },
+            radial: None,
+            conic: None,
+            linear: None,
+        });
+        let c = render(&list, 100, 4, [0, 0, 0, 255]);
+        let px = |x: usize| &c.pixels[(2 * 100 + x) * 4..(2 * 100 + x) * 4 + 3];
+        // t=0.255：红→提示(0.25,[0.5,0,0.5]) k≈0.02 → [0.51,0,0.51]→130
+        let (r, b) = (px(25)[0], px(25)[2]);
+        assert!((110..=150).contains(&r), "提示点处红≈0.5: {r}");
+        assert!((110..=150).contains(&b), "提示点处蓝≈0.5: {b}");
+        // t=0.655：提示(0.25)→蓝(1.0) k≈0.62 → r≈0.5×0.38≈0.19→49
+        let (r, b) = (px(65)[0], px(65)[2]);
+        assert!((30..=70).contains(&r), "提示后段红应快速衰减: {r}");
+        assert!(b > 180, "提示后段蓝应接近纯蓝: {b}");
+    }
+
+    #[test]
+    fn gradient_non_absolute_stop_color_is_opaque_black() {
+        // P9-1a 防御分支统一：非 Absolute 停点色 = 不透明黑（与 vello 一致；
+        // 旧 soft 为全透明——引擎契约下不可达，锁死防御语义）。
+        let mut list = DisplayList::default();
+        list.ops.push(PaintOp::Gradient {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 4.0,
+            radius: [0.0; 8],
+            gradient: Gradient {
+                repeating: false,
+                kind: GradientKind::Linear(Angle(90.0)),
+                hints: vec![],
+                stops: vec![
+                    ColorStop {
+                        color: ColorValue::CurrentColor,
+                        position: Some(LengthPercentage::Px(0.0)),
+                    },
+                    ColorStop {
+                        color: ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0])),
+                        position: Some(LengthPercentage::Px(8.0)),
+                    },
+                ],
+            },
+            radial: None,
+            conic: None,
+            linear: None,
+        });
+        let c = render(&list, 8, 4, [255, 255, 255, 255]);
+        let px = |x: usize| &c.pixels[(2 * 8 + x) * 4..(2 * 8 + x) * 4 + 3];
+        // x=0：t≈0.06 → 黑为主
+        assert!(
+            px(0)[0] < 40 && px(0)[1] < 40 && px(0)[2] < 40,
+            "非 Absolute 停点应为不透明黑"
+        );
+        // x=7：t≈0.94 → 红为主
+        assert!(px(7)[0] > 200, "末端应为红");
+    }
+
+    #[test]
     fn repeating_linear_gradient_tiles_period() {
         // P1-3（css-images-3）：40px 盒 repeating-linear-gradient(90deg,
         // red 0px, blue 20px) → 周期 20px（线长分数 0.5），沿轴无限平铺；
@@ -2974,6 +3133,7 @@ mod tests {
                 gradient: Gradient {
                     repeating,
                     kind: GradientKind::Linear(Angle(90.0)),
+                    hints: vec![],
                     stops: vec![
                         ColorStop {
                             color: ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0])),
@@ -3027,6 +3187,7 @@ mod tests {
             gradient: Gradient {
                 repeating: true,
                 kind: GradientKind::Linear(Angle(90.0)),
+                hints: vec![],
                 stops: vec![
                     ColorStop {
                         color: ColorValue::Absolute(rgba([1.0, 0.0, 0.0, 1.0])),

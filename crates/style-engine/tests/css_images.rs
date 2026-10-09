@@ -377,3 +377,184 @@ fn repeating_gradient_flags_all_families() {
     };
     assert!(!g.repeating);
 }
+
+// ------------------------------------------------- 停点文法（P9-1a，css-images-3/4）
+
+use style_engine::css::property::{apply_gradient_hints, distribute_stop_positions};
+
+/// 取 #t 计算后的首个渐变。
+fn first_gradient(sheet: &str) -> style_engine::css::property::Gradient {
+    let mut e = engine_img(sheet, None, false);
+    let _ = e.frame((800.0, 600.0), 1.0, 0.0);
+    let style = e.computed_style(2).unwrap().clone();
+    let Some(DeclValue::BackgroundImage(images)) = style.get(PropertyId::BackgroundImage) else {
+        panic!("{sheet}: 背景图应为渐变（声明被整条丢弃？）");
+    };
+    match images.first() {
+        Some(BackgroundImage::Gradient(g)) => g.clone(),
+        other => panic!("{sheet}: 首层应为渐变，实为 {other:?}"),
+    }
+}
+
+/// 非法停点文法 → IACVT → 初始 none 层。
+fn gradient_dropped(sheet: &str) {
+    let mut e = engine_img(sheet, None, false);
+    let _ = e.frame((800.0, 600.0), 1.0, 0.0);
+    let style = e.computed_style(2).unwrap().clone();
+    let Some(DeclValue::BackgroundImage(images)) = style.get(PropertyId::BackgroundImage) else {
+        panic!("{sheet}: 应回落初始值");
+    };
+    assert!(
+        matches!(images.first(), Some(BackgroundImage::None)),
+        "{sheet}: 非法停点文法应整条丢弃回落 none，实为 {images:?}"
+    );
+}
+
+#[test]
+fn gradient_color_hint_parses_between_stops() {
+    // css-images-3：`red, 50%, blue` —— 50% 是色彩提示（前后停点色中点），
+    // 非法旧文法曾整条 IACVT（P9-1a 修复）。
+    let g = first_gradient(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(red, 50%, blue); }",
+    );
+    assert_eq!(g.stops.len(), 2);
+    assert_eq!(g.hints.len(), 1);
+    assert_eq!(g.hints[0].after_stop, 1);
+    assert_eq!(g.hints[0].position, LengthPercentage::Percent(0.5));
+}
+
+#[test]
+fn gradient_any_order_position_before_color() {
+    // css-images-3：位置可在色前（`25% red`）。
+    let g = first_gradient(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(25% red, blue); }",
+    );
+    assert_eq!(g.stops.len(), 2);
+    assert_eq!(g.stops[0].position, Some(LengthPercentage::Percent(0.25)));
+    assert!(g.hints.is_empty());
+}
+
+#[test]
+fn gradient_double_position_desugars_same_color() {
+    // css-images-4：双位置 `red 10% 90%` = 同色两停点 desugar。
+    let g = first_gradient(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(red 10% 90%, blue); }",
+    );
+    assert_eq!(g.stops.len(), 3);
+    assert_eq!(g.stops[0].position, Some(LengthPercentage::Percent(0.1)));
+    assert_eq!(g.stops[1].position, Some(LengthPercentage::Percent(0.9)));
+    // 两停点同色（红）
+    for s in &g.stops[..2] {
+        match &s.color {
+            ColorValue::Absolute(c) => {
+                assert!((c.components[0] - 1.0).abs() < 1e-3);
+                assert!((c.components[1]).abs() < 1e-3);
+            }
+            _ => panic!("双位置 desugar 停点应为绝对红"),
+        }
+    }
+    assert!(g.hints.is_empty());
+}
+
+#[test]
+fn gradient_hint_before_first_stop_is_invalid() {
+    gradient_dropped(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(50%, red, blue); }",
+    );
+}
+
+#[test]
+fn gradient_trailing_hint_is_invalid() {
+    gradient_dropped(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(red, blue, 50%); }",
+    );
+}
+
+#[test]
+fn gradient_double_position_without_color_is_invalid() {
+    gradient_dropped(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(10% 90%, red); }",
+    );
+}
+
+#[test]
+fn gradient_single_stop_is_invalid() {
+    gradient_dropped("#t { width: 60px; height: 40px; background-image: linear-gradient(red); }");
+}
+
+#[test]
+fn gradient_hints_flow_to_display_list() {
+    // 引擎集成：提示经 ComputedStyle → PaintOp::Gradient.hints 全链透传。
+    let mut e: StyleEngine<u64> = StyleEngine::new();
+    e.set_stylesheet(
+        "#t { width: 60px; height: 40px; background-image: linear-gradient(red, 50%, blue); }",
+    );
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
+    e.insert(None, 1, root).unwrap();
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        ..StyleNode::default()
+    };
+    e.insert(Some(1), 2, leaf).unwrap();
+    let f = e.frame((800.0, 600.0), 1.0, 0.0);
+    let op = f
+        .paint
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            PaintOp::Gradient { gradient, .. } => Some(gradient),
+            _ => None,
+        })
+        .expect("应有渐变 op");
+    assert_eq!(op.hints.len(), 1);
+    assert_eq!(op.hints[0].after_stop, 1);
+    assert_eq!(op.hints[0].position, LengthPercentage::Percent(0.5));
+}
+
+#[test]
+fn distribute_stop_positions_core_semantics() {
+    // 首 0 末 1 / NaN 段邻点间均布 / 显式逆序抬升。
+    let p = |v: Option<f32>| v;
+    // red,yellow,blue 全缺位 → 0 / 0.5 / 1（旧 soft 前向填充塌缩 0/0/1）
+    assert_eq!(
+        distribute_stop_positions(&[p(None), p(None), p(None)]),
+        vec![0.0, 0.5, 1.0]
+    );
+    // 中段缺位均布：0 / 0.25 / 0.5 / 1
+    assert_eq!(
+        distribute_stop_positions(&[p(Some(0.0)), p(None), p(Some(0.5)), p(Some(1.0))]),
+        vec![0.0, 0.25, 0.5, 1.0]
+    );
+    // 首 0 末 1 补齐
+    assert_eq!(
+        distribute_stop_positions(&[p(None), p(Some(0.7))]),
+        vec![0.0, 0.7]
+    );
+    // 逆序抬升（css-images-3 §4.5.2）
+    assert_eq!(
+        distribute_stop_positions(&[p(Some(0.6)), p(Some(0.4))]),
+        vec![0.6, 0.6]
+    );
+}
+
+#[test]
+fn apply_gradient_hints_midpoint_color() {
+    use style_engine::{AlphaColor, Srgb};
+    let red = AlphaColor::<Srgb>::new([1.0, 0.0, 0.0, 1.0]);
+    let blue = AlphaColor::<Srgb>::new([0.0, 0.0, 1.0, 1.0]);
+    // 提示 50% 于 0/1 停点间 → 位置 0.5、色 = 红/蓝中点。
+    let out = apply_gradient_hints(&[(0.0, red), (1.0, blue)], &[(1, 0.5)]);
+    assert_eq!(out.len(), 3);
+    approx(out[1].0, 0.5);
+    approx(out[1].1.components[0], 0.5);
+    approx(out[1].1.components[2], 0.5);
+    // 提示位置 clamp 到前后停位区间内（40% 落在 0.6/0.8 之间之外 → 钳入）
+    let out = apply_gradient_hints(&[(0.6, red), (0.8, blue)], &[(1, 0.4)]);
+    approx(out[1].0, 0.6);
+    // 首停点前/末停点后提示被忽略（解析期已拒绝，防御）
+    let out = apply_gradient_hints(&[(0.0, red), (1.0, blue)], &[(0, 0.5), (2, 0.5)]);
+    assert_eq!(out.len(), 2);
+}
