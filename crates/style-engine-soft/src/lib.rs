@@ -2137,6 +2137,9 @@ fn text_device_polys(
     // color/font_size/family 覆盖（font-weight/italic 覆盖无消费点：
     // FontBank 单文件族无变体合成，记偏差）。族变化重解析字体、字号
     // 变化重算 scale；装饰线仍基样式单行（既有近似在案）。
+    // P9-5（ADR-0042）：span 级字距覆盖（letter_spacing 计算值随 span
+    // 终结值逐字符生效，与测量/vello 同规则）；span 级行高不消费
+    // （软 sink 单行渲染，行高仅影响基线居中，记 B 级近似）。
     let resolve_family = |fams: &FontFamilyList| -> Option<ttf::SoftFont<'_>> {
         let data = fams.0.iter().find_map(|f| match f {
             FamilyName::Named(name) => bank.get(name.as_str()),
@@ -2165,9 +2168,14 @@ fn text_device_polys(
         let span = spans.iter().rev().find(|s| {
             (s.start as usize) <= byte_off && byte_off < (s.end as usize).min(text.len())
         });
-        let (ch_color, ch_size, ch_fam) = match span {
-            Some(s) => (s.color.components, s.font_size, &s.font_family),
-            None => (color, font_size, family),
+        let (ch_color, ch_size, ch_fam, ch_ls) = match span {
+            Some(s) => (
+                s.color.components,
+                s.font_size,
+                &s.font_family,
+                s.letter_spacing,
+            ),
+            None => (color, font_size, family, letter_spacing),
         };
         if !std::ptr::eq(ch_fam, cur_fam)
             && let Some(f) = resolve_family(ch_fam)
@@ -2195,7 +2203,7 @@ fn text_device_polys(
             }
             glyph_groups.push((ch_color, contours));
         }
-        pen += font.advance(gid, ch_scale) * fw + letter_spacing;
+        pen += font.advance(gid, ch_scale) * fw + ch_ls;
         if ch == ' ' {
             pen += ws;
         }
@@ -3733,6 +3741,8 @@ mod tests {
                 font_size: 16.0,
                 font_weight: 400.0,
                 italic: false,
+                letter_spacing: 0.0,
+                line_height: None,
                 font_family: FontFamilyList(smallvec![FamilyName::Named("DejaVu Sans".into())]),
             }],
         );
@@ -3778,6 +3788,8 @@ mod tests {
                     font_size: 32.0,
                     font_weight: 400.0,
                     italic: false,
+                    letter_spacing: 0.0,
+                    line_height: None,
                     font_family: FontFamilyList(smallvec![FamilyName::Named("DejaVu Sans".into())]),
                 }],
             )],
@@ -4122,6 +4134,8 @@ mod tests {
                 font_size: 32.0,
                 font_weight: 400.0,
                 italic: false,
+                letter_spacing: 0.0,
+                line_height: None,
                 font_family: FontFamilyList(smallvec![FamilyName::Named("DejaVu Sans".into())]),
             });
         }

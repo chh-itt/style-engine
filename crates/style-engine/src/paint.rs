@@ -9,8 +9,8 @@ use crate::computed::ComputedStyle;
 use crate::css::property::{
     Attachment, BackgroundBox, BackgroundClip, BackgroundImage, BgSize, BorderImageOutsetComp,
     BorderImageRepeatKind, BorderImageSliceComp, BorderImageWidthComp, BorderStyle, ClipRadius,
-    ClipShape, DeclValue, FontStyle, Gradient, LPorAuto, OutlineStyle, Overflow, Position2D,
-    PositionComp, PropertyId, RepeatAxis, RepeatXY, TransformFn,
+    ClipShape, DeclValue, FontStyle, Gradient, LPorAuto, LineHeight, OutlineStyle, Overflow,
+    Position2D, PositionComp, PropertyId, RepeatAxis, RepeatXY, TransformFn,
 };
 use crate::css::property::{FontFamilyList, TextAlign};
 use crate::css::stylesheet::MediaEnv;
@@ -573,6 +573,10 @@ pub struct TextSpanPaint {
     pub italic: bool,
     /// 字体族列表（font-family，按序回退）。
     pub font_family: crate::css::property::FontFamilyList,
+    /// span 字距 px（letter-spacing 计算值；0 = 无字距）。
+    pub letter_spacing: f32,
+    /// span 行高 px（line-height 计算值；None = normal，回退 op 级行高）。
+    pub line_height: Option<f32>,
 }
 
 /// 一帧的绘制清单。
@@ -2124,6 +2128,14 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                     font_weight: scs.font_weight(),
                     italic: scs.font_style() == FontStyle::Italic,
                     font_family: scs.font_family().clone(),
+                    // P9-5（ADR-0042）：span 级行高/字距终结值——测量
+                    // （text.rs build_layout）与 sink 同规则消费。
+                    letter_spacing: scs.resolved_letter_spacing_px(env),
+                    line_height: if scs.line_height() == &LineHeight::Normal {
+                        None
+                    } else {
+                        scs.resolved_line_height_px(env)
+                    },
                 })
             })
             .collect();
@@ -2147,6 +2159,14 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
                     font_weight: scs.font_weight(),
                     italic: scs.font_style() == FontStyle::Italic,
                     font_family: scs.font_family().clone(),
+                    // caps 合成区间：测量侧仅推字号覆盖（F3d），行高/字距
+                    // 均按覆盖 span 的计算值承载（无覆盖 = 基样式）。
+                    letter_spacing: scs.resolved_letter_spacing_px(env),
+                    line_height: if scs.line_height() == &LineHeight::Normal {
+                        None
+                    } else {
+                        scs.resolved_line_height_px(env)
+                    },
                 });
             }
         }
@@ -4890,6 +4910,8 @@ mod tests {
                 font_weight: 700.0,
                 italic: true,
                 font_family: family(),
+                letter_spacing: 1.5,
+                line_height: Some(24.0),
             }],
             font_size: 16.0,
             font_family: family(),

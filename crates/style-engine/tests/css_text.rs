@@ -266,3 +266,132 @@ fn font_shorthand_direct_and_resets() {
     ));
     assert_eq!(cs.font_size_px(), 12.0);
 }
+
+// ---- P9-5（ADR-0042）：span 级行高/字距生效 ----
+
+use style_engine::PaintOp;
+
+/// span 声明助手。
+fn span(range: (u32, u32), decls: &str) -> style_engine::tree::TextSpan {
+    style_engine::tree::TextSpan {
+        range,
+        declarations: style_engine::css::decl::parse_inline_declarations(decls).0,
+    }
+}
+
+/// 带富文本 span 的骨架：#root(1) → #t(2)，#t 携带文本 + spans。
+fn engine_text_spans(
+    sheet: &str,
+    text: &str,
+    spans: Vec<style_engine::tree::TextSpan>,
+) -> StyleEngine<u64> {
+    let mut engine: StyleEngine<u64> = StyleEngine::new();
+    engine.add_font(FONT.to_vec());
+    engine.add_font(FONT_SC.to_vec());
+    engine.set_stylesheet(sheet);
+    let root = StyleNode {
+        id: Some("root".to_string()),
+        ..StyleNode::default()
+    };
+    engine.insert(None, 1, root).unwrap();
+    let leaf = StyleNode {
+        id: Some("t".to_string()),
+        text: Some(text.to_string()),
+        spans: spans.into_iter().collect(),
+        ..StyleNode::default()
+    };
+    engine.insert(Some(1), 2, leaf).unwrap();
+    engine
+}
+
+/// 单行盒（宽容器不折行）宽。
+fn box_w(e: &mut StyleEngine<u64>) -> f32 {
+    let f = e.frame((2000.0, 600.0), 1.0, 0.0);
+    f.boxes.iter().find(|b| b.key == 2).unwrap().width
+}
+
+/// 收缩适应骨架：absolute 叶第三 pass 宽=max-content≈文本推进宽
+/// （块级盒宽恒等于容器宽，宽度比较必须走 shrink-to-fit）。
+const SHRINK: &str = "#root { position: relative; } #t { position: absolute; }";
+
+#[test]
+fn span_letter_spacing_widens_layout_and_paint() {
+    // span 字距：测量（盒宽）与绘制（Text op span 终结值）同链生效。
+    let mut a = engine_text(&format!("{SHRINK} #t {{ {BASE} }}"), "hello world");
+    let w_plain = box_w(&mut a);
+    let mut b = engine_text_spans(
+        &format!("{SHRINK} #t {{ {BASE} }}"),
+        "hello world",
+        vec![span((0, 5), "letter-spacing: 4px")],
+    );
+    let w_sp = box_w(&mut b);
+    assert!(
+        w_sp > w_plain + 4.0 * 4.0,
+        "span 字距应加宽（plain={w_plain} span={w_sp}）"
+    );
+    // 绘制侧：Text op spans 携带终结字距 4。
+    let fr = b.frame((2000.0, 600.0), 1.0, 0.0);
+    let got = fr
+        .paint
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            PaintOp::Text { spans, .. } if !spans.is_empty() => Some(spans[0].letter_spacing),
+            _ => None,
+        })
+        .expect("span op");
+    assert!((got - 4.0).abs() < 1e-3, "op span letter_spacing={got}");
+}
+
+#[test]
+fn span_letter_spacing_zero_overrides_inherited_base() {
+    // 显式 0 覆盖继承非零基值（恒推规则；parley ranged 语义）。
+    let mut a = engine_text(
+        &format!("{SHRINK} #t {{ {BASE} letter-spacing: 3px; }}"),
+        "hello world",
+    );
+    let w_base = box_w(&mut a);
+    let mut b = engine_text_spans(
+        &format!("{SHRINK} #t {{ {BASE} letter-spacing: 3px; }}"),
+        "hello world",
+        vec![span((0, 11), "letter-spacing: 0")],
+    );
+    let w_zero = box_w(&mut b);
+    assert!(
+        w_zero < w_base - 3.0 * 10.0,
+        "span 0 应覆盖继承 3px（base={w_base} zero={w_zero}）"
+    );
+}
+
+#[test]
+fn span_line_height_grows_line_box() {
+    // 整行被 span 覆盖 → 行高 = max(基, span) = span 60。
+    let mut a = engine_text(
+        &format!("#t {{ {BASE} line-height: 20px; }}"),
+        "hello world",
+    );
+    let h_base = box_h(&mut a);
+    assert!((h_base - 20.0).abs() < 0.5, "基行高={h_base}");
+    let mut b = engine_text_spans(
+        &format!("#t {{ {BASE} line-height: 20px; }}"),
+        "hello world",
+        vec![span((0, 11), "line-height: 60px")],
+    );
+    let h_span = box_h(&mut b);
+    assert!(
+        (h_span - 60.0).abs() < 0.5,
+        "span 行高应主导行盒（={h_span}）"
+    );
+    // 在案 B 级近似（ADR-0042）：span 显式 normal（parley 无 Normal 变体）
+    // 回退基默认 20，而非字体度量 normal（Chromium ≈16）。
+    let mut c = engine_text_spans(
+        &format!("#t {{ {BASE} line-height: 20px; }}"),
+        "hello world",
+        vec![span((0, 11), "line-height: normal")],
+    );
+    let h_normal = box_h(&mut c);
+    assert!(
+        (h_normal - 20.0).abs() < 0.5,
+        "normal 回退基值（={h_normal}）"
+    );
+}

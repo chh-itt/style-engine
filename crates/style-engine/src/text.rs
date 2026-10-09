@@ -261,7 +261,7 @@ impl TextSystem {
         }
         // 行高/字距（盘点修复）：此前 line-height/letter-spacing 已解析入库
         // 但无任何消费者。normal 不推（parley 默认 = 字体度量 ≈ CSS normal）；
-        // 字距 0 不推（等同默认）。span 级行高/字距为已知近似（仅基样式生效）。
+        // 字距 0 不推（等同默认）。span 级覆盖见下方 span 循环（P9-5 生效）。
         let lh_px = match style.line_height() {
             // ㉔：normal 探针后由第二遍 forced_lh 注入 Chromium 对齐值
             LineHeight::Normal => None,
@@ -346,8 +346,30 @@ impl TextSystem {
             );
             builder.push(FontFamily::Source(family_cow(span_cs)), range.clone());
             if span_cs.font_style() == crate::css::property::FontStyle::Italic {
-                builder.push(StyleProperty::FontStyle(ParleyFontStyle::Italic), range);
+                builder.push(
+                    StyleProperty::FontStyle(ParleyFontStyle::Italic),
+                    range.clone(),
+                );
             }
+            // P9-5（ADR-0042）：span 级行高/字距生效——ranged push 覆盖基
+            // 默认（parley 行高=行内各 run 解析值的 max ≈ CSS line box；
+            // 字距按簇前追加）。字距恒推（显式 0 覆盖继承非零基值=精确语
+            // 义；与基值同值时推入无害）。行高仅在 span 计算值非 normal 时
+            // 推：parley 无 Normal 变体，显式 normal（父非 normal）回退基
+            // 默认（B 级近似，ADR-0042 在案）。sinks 侧（vello/soft）按
+            // TextSpanPaint 携带的终结值同规则消费，测量/渲染一致。
+            if span_cs.line_height() != &LineHeight::Normal
+                && let Some(lh) = span_cs.resolved_line_height_px(env)
+            {
+                builder.push(
+                    StyleProperty::LineHeight(parley::style::LineHeight::Absolute(lh)),
+                    range.clone(),
+                );
+            }
+            builder.push(
+                StyleProperty::LetterSpacing(span_cs.resolved_letter_spacing_px(env)),
+                range,
+            );
         }
         // F3d：caps 合成区间字号覆盖（0.8×，基字号或覆盖 span 字号）。
         // 后推覆盖前推 = parley ranged 语义，故置于 span 推送之后。

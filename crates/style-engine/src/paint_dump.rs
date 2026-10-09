@@ -588,6 +588,12 @@ pub struct TextSpanDump {
     pub italic: bool,
     /// 字体族列表。
     pub font_family: Vec<String>,
+    /// span 字距 px（P9-5；缺省 0 = 旧 dump 兼容）。
+    #[serde(default)]
+    pub letter_spacing: f32,
+    /// span 行高 px（P9-5；缺省 None = normal，旧 dump 兼容）。
+    #[serde(default)]
+    pub line_height: Option<f32>,
 }
 
 /// 文本装饰投影。
@@ -1024,6 +1030,8 @@ fn span_dump(s: &TextSpanPaint) -> TextSpanDump {
         font_weight: s.font_weight,
         italic: s.italic,
         font_family: families_dump(&s.font_family),
+        letter_spacing: s.letter_spacing,
+        line_height: s.line_height,
     }
 }
 
@@ -1473,6 +1481,8 @@ fn op_load(d: &OpDump) -> Option<PaintOp> {
                             s.font_family.iter().map(|f| family_name_load(f)).collect(),
                         ),
                     ),
+                    letter_spacing: s.letter_spacing,
+                    line_height: s.line_height,
                 })
                 .collect(),
             font_size: *font_size,

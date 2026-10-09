@@ -767,9 +767,24 @@ impl VelloTextSystem {
             if s.italic {
                 builder.push(
                     parley::style::StyleProperty::FontStyle(parley::fontique::FontStyle::Italic),
-                    range,
+                    range.clone(),
                 );
             }
+            // P9-5（ADR-0042）：span 级行高/字距——与测量（text.rs
+            // build_layout）同规则：行高仅非 normal（Some）时推；字距恒推
+            // （显式 0 覆盖继承非零基值=精确语义）。
+            if let Some(lh) = s.line_height {
+                builder.push(
+                    parley::style::StyleProperty::LineHeight(parley::style::LineHeight::Absolute(
+                        lh,
+                    )),
+                    range.clone(),
+                );
+            }
+            builder.push(
+                parley::style::StyleProperty::LetterSpacing(s.letter_spacing),
+                range,
+            );
         }
         let mut layout = builder.build(content);
         // 与测量共用同一 max_advance（T5c-2）：保证折行一致

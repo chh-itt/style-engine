@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — span 级行高与字距（P9-5）
+
+- **span 覆盖行高/字距生效（feat，ADR-0042）**：span 覆盖样式经 parley ranged push 进测量与 vello 绘制——行高仅 span 计算值 ≠ normal 时推 ranged Absolute（行盒行高 = 各 run running max，覆盖 span 抬升整行）；字距恒推 ranged，显式 `0` 覆盖继承非零基值（精确语义）。测量与绘制同规则，折行一致。
+- **绘制契约扩展（feat）**：`PaintOp::Text` 的 `TextSpanPaint` 增加 `letter_spacing`/`line_height` 终结值；serde dump 同步（旧 dump 缺字段兼容）。
+- **soft sink（feat + B·豁免）**：`text_device_polys` 逐字符字距取 span 覆盖；span 行高不消费（soft 单行渲染无行盒语义，在案豁免）。
+- **在案近似（B 级）**：span 显式 `line-height: normal` 回退基样式默认而非字体度量 normal（parley 0.11 LineHeight 无 Normal 变体；重估条件=上游提供 Normal 语义）。锁定测试 ×3（字距加宽+绘制终结值、0 覆盖继承、行高主导行盒+normal 回退锁）。
+
 ### 1.0 对齐 — 裸声明容错扩展与容器失效收窄（P9-4）
 
 - **裸声明容错扩展（fix，css-syntax 恢复语义对齐）**：规则表级裸声明剥除恢复从样式表顶层扩展到条件组体（@media/@supports/@container/@layer 块）与嵌套体失败声明——`@media screen { color: blue; p { color: green } }` 中 `p` 规则不再连带丢失（旧行为=cssparser prelude 视图吞至下一 `{`），`p { bogus-prop: 1; .c { … } }` 中 `.c` 存活。css-nesting 合法嵌套声明语义不变；已知限制：缺 `;` 的裸声明仍吞至下一 `{`（解析器视图边界，在案）。锁测试：条件组体恢复 ×2 + 嵌套体失败声明恢复 + 既有顶层五件回归。
