@@ -40,10 +40,14 @@ taffy = "0.14.0"
 # icu_segmenter_data baked（≈+2MiB 数据段）。CJK 行断行仍走 UAX#14
 # （icu_segmenter 2.x 行分段器有意不加载 CJ 词典——设计取舍，见 DEPENDENCIES）。
 parley = { version = "0.11.1", features = ["complex-scripts"] }
-vello = "0.10.0"
+# P9-8（2026-10-08）：0.10→0.11 已执行——0.11.0（2026-10-02）唯一 breaking=
+# wgpu/naga 升 30（#1909），Scene/Renderer/peniko/kurbo 使用面零变化；
+# peniko 维持 ^0.6.1（0.11 代仍配 0.6.x）、parley 已在 0.11.1。
+vello = "0.11.0"
 
 # --- 宿主侧（仅 demo/sink，核心 crate 禁止，ADR-0001） ---
-wgpu = "29.0.3"
+# wgpu 必须跟随 vello 的锁定走（vello 0.11 = ^30）——版本配对铁律见 docs/DEPENDENCIES.md。
+wgpu = "30.0.1"
 winit = "=0.31.0-beta.3"
 
 # --- 基础设施 ---

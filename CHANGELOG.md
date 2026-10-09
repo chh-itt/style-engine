@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — 渲染栈升级 vello 0.11 / wgpu 30（P9-8）
+
+- **依赖升级（feat）**：vello 0.10→0.11.0（2026-10-02，唯一 breaking=wgpu/naga 升 30）、wgpu 29→30.0.1、naga 29→30.0.1——升级前核实与实测一致，vello Scene/Renderer/peniko/kurbo 使用面零变化、peniko 维持 ^0.6.1、parley 已在 0.11.1（版本配对铁律：wgpu 跟 vello 锁定走）。MSRV 地板不变（仍 ordered-float 5.5.0 的 1.90 最高）。
+- **适配面（7 处）**：vello sink 2 处（`RequestAdapterOptions.apply_limit_buckets: bool` 新字段填 `false`；`get_mapped_range` 改返回 `Result<BufferView, MapRangeError>`）+ demo main 3 处（同款 adapter 字段、`SurfaceTexture::present()` → `Queue::present(tex)` 消费式、`SurfaceConfiguration.color_space` 新字段填 `SurfaceColorSpace::Auto`=复现历史行为零漂移）+ demo snapshot 示例 2 处（同款）。行为零漂移：conformance 像素腿（WARP）与 blend 探针全绿。
+- **文档**：DEPENDENCIES.md 版本配对节改「已执行」态并记录差分；T7-API-NOTES.md 增 wgpu 30 相对 29 实测差分节（5 项 API 变化）；FEATURES.md 能力性版本表述随 0.11 复核（纯 2D 仿射/无内置高斯不变）。
+
 ### 1.0 对齐 — v1.0 验收基准文档化（P9-6）
 
 - **docs/V1-SCOPE.md（新增）**：v1.0 行为验收基准——v1.0 定义（框架无关 CSS 语义层的行为可信点，桌面尺度、非浏览器对齐）、四层验收维度与达标证据（L1 级联/L2 结算/L3 双 sink+文本/验证体系）、接受的偏差面（B/C 分级台账为准）、显式排除项（T2）、上游等待面（DEPENDENCIES）与定版后变更纪律。

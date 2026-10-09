@@ -187,6 +187,8 @@ mod tests {
                 power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                // wgpu 30 新字段；false = 不启用适配器档位桶，等价旧版默认行为。
+                apply_limit_buckets: false,
             }))
         else {
             eprintln!("blend_space_linear_not_srgb: 无可用 GPU 适配器，环境受限跳过");
@@ -284,7 +286,8 @@ mod tests {
         device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll");
-        let data = slice.get_mapped_range();
+        // wgpu 30：get_mapped_range 改返回 Result（映射可能已被校验拒绝）。
+        let data = slice.get_mapped_range().expect("staging buffer 已映射可读");
         let off = (32 * BYTES_PER_ROW + 32 * 4) as usize;
         let (r, g, b) = (data[off], data[off + 1], data[off + 2]);
         assert_eq!(data[off + 3], 255, "全覆盖后 alpha=255");
@@ -1038,6 +1041,8 @@ pub fn render_offscreen(
         power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: None,
         force_fallback_adapter: false,
+        // wgpu 30 新字段；false = 不启用适配器档位桶，等价旧版默认行为。
+        apply_limit_buckets: false,
     })) else {
         return Ok(None);
     };
@@ -1126,7 +1131,10 @@ pub fn render_offscreen(
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|e| format!("设备 poll 失败: {e}"))?;
-    let data = slice.get_mapped_range();
+    // wgpu 30：get_mapped_range 改返回 Result（映射可能已被校验拒绝）。
+    let data = slice
+        .get_mapped_range()
+        .map_err(|e| format!("读回缓冲映射失败: {e}"))?;
     let row = width as usize * 4;
     let mut out = Vec::with_capacity(row * height as usize);
     for y in 0..height as usize {

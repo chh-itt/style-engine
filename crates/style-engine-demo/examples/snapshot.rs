@@ -123,6 +123,8 @@ fn main() {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
+        // wgpu 30 新字段；false = 不启用适配器档位桶，等价旧版默认行为。
+        apply_limit_buckets: false,
     }))
     .expect("adapter");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -210,7 +212,8 @@ fn main() {
             .expect("poll");
         rx.recv().unwrap().expect("map async");
     }
-    let data = buf.get_mapped_range(..).to_vec();
+    // wgpu 30：get_mapped_range 改返回 Result。
+    let data = buf.get_mapped_range(..).expect("映射读取").to_vec();
     buf.unmap();
 
     let mut img = image::RgbaImage::new(W, H);

@@ -214,7 +214,8 @@ impl DemoApp {
                 },
             )
             .expect("render to texture");
-        tex.present();
+        // wgpu 30：SurfaceTexture::present() → Queue::present(texture)（消费纹理）。
+        gpu.queue.present(tex);
         window.request_redraw(); // 连续帧驱动（演示用）
     }
     /// ADR-0007 宿主集成样例：命中测试 → 量程夹紧 → set_scroll_offset。
@@ -260,6 +261,8 @@ impl ApplicationHandler for DemoApp {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            // wgpu 30 新字段；false = 不启用适配器档位桶，等价旧版默认行为。
+            apply_limit_buckets: false,
         }))
         .expect("request adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -280,6 +283,8 @@ impl ApplicationHandler for DemoApp {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
+            // wgpu 30 新字段；Auto = 由后端按格式选择，复现历史行为。
+            color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };

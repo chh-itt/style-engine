@@ -19,19 +19,20 @@
 | peniko | 0.6.1 | 核心(词汇表) | 画笔/颜色/图片类型 | 无 GPU 依赖，vello 同款，见 ADR-0001 |
 | kurbo | (peniko 传递) | 核心(词汇表) | 几何词汇表（仅经 peniko 传递） | 阶段4 审计：本方 DisplayList 几何全部为 `f32` 字段，kurbo 类型不出现在公有面 |
 | parley | 0.11.1 | L2 核心 | 文本 shaping/测量/行布局（测量内置，见 ADR-0006） | 传递引入 fontique |
-| vello | 0.10.0 | sink | GPU 绘制执行器 | 2026-08-14 发布；0.11.0 已发布（2026-10-02）锁 wgpu 30——升级阶梯候选，见"版本配对"节 |
-| wgpu | **29.x** | sink | GPU 底座 | ⚠️ 见下"版本配对" |
+| vello | 0.11.0 | sink | GPU 绘制执行器 | 2026-10-02 发布锁 wgpu 30；**P9-8（2026-10-08）已从 0.10 升级**，见"版本配对"节 |
+| wgpu | **30.x** | sink | GPU 底座 | 30.0.1；⚠️ 见下"版本配对" |
 | winit | =0.31.0-beta.3 | demo/harness | 窗口（仅示例与冒烟测试） | beta，精确锁版本 |
 | image | 0.25.10 | 资源 | 图片解码（宿主喂字节，核心不做 IO） | |
 | tracing | 0.1.x | 全部 | 警告/诊断通道 | ParseReport 同时进 tracing |
 | bytemuck | 1.x | sink | vello 传递依赖（^1.25） | |
 
-## 版本配对：wgpu 必须跟 vello 走（29，不是 30）
+## 版本配对：wgpu 必须跟 vello 走（当前 30）
 
-vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29 与 30 是 semver 不兼容的大版本：若我们直接声明 wgpu 30.0.1，应用会同时编译两份 wgpu（或无法与 vello 统一）。因此：
+vello 0.11.0 的 wgpu 依赖为 `^30`（optional feature `wgpu`）。wgpu 大版本间 semver 不兼容：若 sink/宿主声明与 vello 不同的 wgpu 大版本，应用会同时编译两份 wgpu（或无法统一）。因此：
 
-- sink 与宿主统一使用 vello 传递的 wgpu 29.x，sink crate 显式声明同版本（其测试代码直接使用 wgpu API；**公有 API 不暴露任何 wgpu 类型，无需 re-export**——阶段4 审计修正，此前的 `pub use wgpu` 计划未落地也不再需要）。
-- 这符合"选**兼容的**最新版本"原则：29.x 就是当前兼容的最新。~~等 vello 升级支持 wgpu 30（linebender 节奏通常数周内跟上）后整体升级。~~ **2026-10-06 更新：vello 0.11.0 已发布（锁 wgpu ^30），升级路径就绪**——按"一次升级整条 linebender 链"规则（2026-10-08 官方 changelog 核实修正：0.10→0.11 唯一 breaking=wgpu/naga 升 30 #1909，Scene/Renderer/kurbo/peniko 使用面零变化、我方 sink API 无触碰，sbix 字形修复与自管字形无关——实际升级面仅 vello+wgpu 两件；先前「vello+peniko+parley 同批 0.11 代」有误，peniko 0.11 代仍 ^0.6.1、parley 已在 0.11.1），作为升级阶梯候选待排期；当前 29.x 组合仍为最新兼容稳定组合，无安全/缺陷驱动，不单独追高；重评条件=需要 wgpu 30 新特性或 29.x 出现 RustSec advisory。
+- sink 与宿主统一使用 vello 传递的 wgpu 30.x，sink crate 显式声明同版本（其测试代码直接使用 wgpu API；**公有 API 不暴露任何 wgpu 类型，无需 re-export**——阶段4 审计修正，此前的 `pub use wgpu` 计划未落地也不再需要）。
+- **P9-8（2026-10-08）升级已执行**：vello 0.10→0.11 + wgpu 29→30（30.0.1）+ naga 29→30。实际 breaking 面与升级前核实一致（仅 wgpu/naga 升 30，vello Scene/Renderer/peniko/kurbo 使用面零变化）：我方代码共 5 处适配——vello sink 2 处（`RequestAdapterOptions` 新字段 `apply_limit_buckets: bool` 填 false=旧默认、`get_mapped_range` 改返回 `Result<BufferView, MapRangeError>` 补 expect/map_err）+ demo main 3 处（同上 adapter 字段、`SurfaceTexture::present()` → `Queue::present(tex)` 消费式、`SurfaceConfiguration` 新字段 `color_space: SurfaceColorSpace` 填 `Auto`=后端按格式选择复现历史行为）+ demo snapshot 示例 2 处（同款）。`SurfaceColorSpace::Auto` 为 #[default] 且文档明言复现历史行为——行为零漂移，conformance 像素腿（WARP）全绿佐证。
+- 重估条件更新：追高 vello 0.12+/wgpu 31 时仍按"一次升级整条 linebender 链"规则执行。
 - winit 0.31-beta 与 wgpu 的对接走 raw-window-handle，不受此影响。
 
 ## 版本策略
@@ -39,7 +40,7 @@ vello 0.10.0 的 wgpu 依赖为 `^29.0.3`（optional feature `wgpu`）。wgpu 29
 - 决定性依赖（上表前 12 行）在 workspace 根 Cargo.toml 用 `[workspace.dependencies]` 统一声明，成员 crate 一律引用 workspace 版本。
 - winit beta 是唯一精确锁（`=0.31.0-beta.3`）的依赖，且只出现在 demo/harness；0.31 stable 发布后立即替换。
 - vello/parley/taffy 均 0.x：允许破坏性升级，但必须一次升级整条 linebender 链（vello+peniko+parley 同批），不允许混代。
-- MSRV 以依赖最高者为准：workspace `rust-version = 1.90`（2026-10 CI msrv 实测上调——edition 2024 起点 1.85 被依赖链抬升：ordered-float 5.5.0 需 1.90、smol_str 0.3.6 需 1.89、vello 0.10/parley 0.11/fontique 0.11 链需 1.88、wgpu-types/naga-bridge 29.0.4 需 1.87、winit 0.31.0-beta.3 系需 1.86；msrv job 以 `dtolnay/rust-toolchain@1.90.0` 钉定验证。依赖再抬高时以实际失败为准上调）。
+- MSRV 以依赖最高者为准：workspace `rust-version = 1.90`（2026-10 CI msrv 实测上调——edition 2024 起点 1.85 被依赖链抬升：ordered-float 5.5.0 需 1.90、smol_str 0.3.6 需 1.89、vello 0.11 需 1.89/parley 0.11/fontique 0.11 链需 1.88、wgpu-types/naga 30.0.1 需 1.87、winit 0.31.0-beta.3 系需 1.86；msrv job 以 `dtolnay/rust-toolchain@1.90.0` 钉定验证。依赖再抬高时以实际失败为准上调）。
 - 不承诺 no_std；L1（值与级联）保持 no_std+alloc 可达性，作为将来选项保留。
 
 ## taffy calc 直通（二期①已落地：引擎侧结算式直通；2026-09 复评修正上游结论）
