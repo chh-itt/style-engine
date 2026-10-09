@@ -138,3 +138,37 @@ fn areas_create_implicit_column() {
     let (_x, _y, w, _h) = box_of(&mut e, 2);
     assert_eq!(w, 350.0, "区域第三列 = 隐式轨（auto-columns 定宽）");
 }
+
+#[test]
+fn grid_shorthand_via_var_suspension() {
+    // P9-2（ADR-0040）：grid 简写含 var() → 挂起 10 长手 → 计算值期
+    // 代换展开（模板形 rows / cols）→ 几何与直写长手一致。
+    let mut e = engine_grid(
+        "#g { display: grid; width: 400px; --t: 50px 100px / 100px 300px; \
+          grid: var(--t); }",
+    );
+    let (x, y, w, h) = box_of(&mut e, 2);
+    assert_eq!((x, y), (0.0, 0.0));
+    assert_eq!((w, h), (100.0, 50.0), "var() 挂起展开：列 100px 行 50px");
+}
+
+#[test]
+fn grid_shorthand_track_form_direct() {
+    // 轨道形直写（非 var 路径）：grid: 50px 100px / 100px 300px。
+    let mut e = engine_grid("#g { display: grid; width: 400px; grid: 50px 100px / 100px 300px; }");
+    let (_x, _y, w, h) = box_of(&mut e, 2);
+    assert_eq!((w, h), (100.0, 50.0));
+}
+
+#[test]
+fn grid_shorthand_auto_flow_rows_form() {
+    // rows / auto-flow <auto-rows>（隐含 row）：显式 2 行 + 自动行 30px
+    // → 第 3 行子项（height auto → stretch）高 = 30（自动行尺寸生效）。
+    let mut e = engine_grid(
+        "#g { display: grid; width: 400px; grid: 40px 40px / auto-flow 30px; } \
+         #c { grid-row: 3; }",
+    );
+    let (_x, y, _w, h) = box_of(&mut e, 2);
+    assert_eq!(y, 80.0, "第 3 行 = 两显式行之后");
+    assert_eq!(h, 30.0, "自动行尺寸 = auto-rows 30px");
+}

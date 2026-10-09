@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+### 1.0 对齐 — font / grid / grid-template 简写（P9-2）
+
+- **font 简写（feat，css-fonts-4 §3.7，ADR-0040）**：`[<'font-style'> || <font-variant-css2> || <'font-weight'> || <font-width-css3>]? <'font-size'> [/ <'line-height'>]? <'font-family'>` 解析期展开——前导 `||` 组任意序各至多一次（`normal` 三处文法均接受，幂等置初始）；字宽分量仅九关键字（百分比仅长手）；size/weight 接受相对关键字（larger/smaller、bolder/lighter，P9-1b/c）；缺 family 或尾随垃圾整条无效。reset 集=引擎 font 长手全集 9 项。系统 UI 字体关键字（caption 等 6 个）全长手初始展开（B·豁免：无 OS UI 字体映射，重估条件=宿主字体桥接）。
+- **grid / grid-template 简写（feat，css-grid-1 §7.3/§7.6，ADR-0040）**：`grid` 三形——轨道形 `rows / cols`、areas 形 `[线名? string 轨? 线名?]+ [/ 列表]?`（行轨缺省 Auto、前后线名归槽、矩形性校验复用 validate_area_rows 单源）、auto-flow 形两向；reset 集 10 长手（模板三 + auto 两 + flow + 放置四）。`grid-template` 独立简写 = none | 轨道形 | areas 形，reset 仅模板三长手。`none` 关键字两简写均按初始全集物化。dense 关键字拒绝（与 grid-auto-flow 长手一致——GridAutoFlowKind 无 Dense、稀疏自动放置，接受而忽略会静默错排；B 级在案）。
+- **var() 挂起路径（feat）**：三简写自动获得 var() 计算值期代换重展开（PendingShorthand 统一经 expand_shorthand，无需新增代码——shorthand_longhands 三表同步即得）。锁定测试 15 件：decl 内联 4（全组件/系统关键字/轨道+auto-flow 形/areas+none 重置）+ 代表值表 10 条（shorthand_longhands_match_expand 扩容）+ engine 级 5（var 挂起端到端 ×2、轨道形直接展开、auto-flow 布局、font 级联与重置面）。
+
 ### 1.0 对齐 — 相对字号 larger/smaller（P9-1c）
 
 - **相对字号关键字（feat，css-fonts-4 `<<relative-size>>`，ADR-0039 附）**：`font-size: larger|smaller` 入文法（旧仅绝对关键字/长度百分比，相对关键字整条 IACVT）。`DeclValue::RelativeFontSize(bool)` 存活至级联物化期（步骤 4b），按父计算字号经核心单源 `relative_font_size` 终结为绝对 `Len(Px)`——父字号恰为绝对字号表值时步进一格（端点钳制）、非表值按 1.2 比例缩放（规范 may 语气允许的两实现，表步进优先与 Chromium 对齐）；根节点以初始 16px 为基；继承链每层重复解析。绝对字号 px 表升公共单源 `ABSOLUTE_FONT_SIZES_PX`/`ABSOLUTE_FONT_SIZE_NAMES`（解析与步进共用）。锁定测试 +4：表步进与比例回退、larger/smaller 链式物化、绝对关键字物化不漂移+垃圾值拒绝、UA 语义与 author 覆盖。

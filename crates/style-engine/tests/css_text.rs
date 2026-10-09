@@ -222,3 +222,47 @@ fn uppercase_and_break_all_interplay() {
     let h2 = box_h(&mut b);
     assert!(h2 > h1, "变换+断行叠加（{h1} → {h2}）");
 }
+
+#[test]
+fn font_shorthand_via_var_suspension() {
+    // P9-2（ADR-0040）：font 简写含 var() → 挂起 9 长手 → 计算值期
+    // 代换展开 → 计算样式与直写等价（style/size/line-height）。
+    let mut e = engine_text(
+        "#t { --f: italic 20px/1.5 serif; font: var(--f); }",
+        "hello",
+    );
+    let _ = e.frame((800.0, 600.0), 1.0, 0.0);
+    let cs = e.computed_style(2).expect("computed");
+    assert!(matches!(
+        cs.font_style(),
+        style_engine::css::property::FontStyle::Italic
+    ));
+    assert_eq!(cs.font_size_px(), 20.0);
+    assert!(matches!(
+        cs.line_height(),
+        style_engine::css::property::LineHeight::Number(n) if *n == 1.5
+    ));
+}
+
+#[test]
+fn font_shorthand_direct_and_resets() {
+    // 直写：前导组 + size/line-height/family；未指定部件回初始。
+    let mut e = engine_text("#t { font: bold 24px/2 serif; }", "hello");
+    let _ = e.frame((800.0, 600.0), 1.0, 0.0);
+    let cs = e.computed_style(2).expect("computed");
+    assert_eq!(cs.font_weight(), 700.0);
+    assert_eq!(cs.font_size_px(), 24.0);
+    assert!(matches!(
+        cs.line_height(),
+        style_engine::css::property::LineHeight::Number(n) if *n == 2.0
+    ));
+    assert!(matches!(cs.font_stretch(), v if (v - 100.0).abs() < f32::EPSILON));
+    let mut e = engine_text("#t { font: 12px serif; }", "hello");
+    let _ = e.frame((800.0, 600.0), 1.0, 0.0);
+    let cs = e.computed_style(2).expect("computed");
+    assert!(matches!(
+        cs.font_variant_caps(),
+        style_engine::css::property::FontVariantCapsKind::Normal
+    ));
+    assert_eq!(cs.font_size_px(), 12.0);
+}

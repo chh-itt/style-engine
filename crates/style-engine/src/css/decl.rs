@@ -458,7 +458,8 @@ pub fn parse_declaration_block(p: &mut Parser<'_>) -> (DeclarationBlock, ParseRe
 
 // ---------- 简写展开（MVP 子集） ----------
 
-/// MVP 支持的简写名（FEATURES.md）；background/font/grid 简写不支持。
+/// 支持的简写名（FEATURES.md；P9-2（ADR-0040）补齐 font/grid/grid-template，
+/// background 已由 F3b（ADR-0024）落地）。
 fn shorthand_exists(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -505,6 +506,12 @@ fn shorthand_exists(name: &str) -> bool {
             | "border-image"
             // G1（ADR-0032）：transition 简写（<single-transition>#）
             | "transition"
+            // P9-2（ADR-0040）：font 简写（css-fonts-4 §3.7）
+            | "font"
+            // P9-2（ADR-0040）：grid / grid-template 简写（css-grid-1
+            // §7.6/§7.3；dense 未支持 = 声明无效，见 ADR-0040 D4）
+            | "grid"
+            | "grid-template"
     )
 }
 
@@ -659,6 +666,38 @@ pub(crate) fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
             P::BorderBlockEndWidth,
             P::BorderBlockEndStyle,
             P::BorderBlockEndColor,
+        ],
+        // P9-2（ADR-0040）：font 简写 → 全部字体长手（css-fonts-4 §3.7
+        // reset 集；含 font-variant-caps/font-features/font-variations）
+        "font" => vec![
+            P::FontStyle,
+            P::FontVariantCaps,
+            P::FontWeight,
+            P::FontStretch,
+            P::FontSize,
+            P::LineHeight,
+            P::FontFamily,
+            P::FontFeatures,
+            P::FontVariations,
+        ],
+        // P9-2（ADR-0040）：grid 简写 reset 集 = css-grid-1 §7.6 十长手；
+        // grid-template 仅重置模板三长手（§7.3）
+        "grid" => vec![
+            P::GridTemplateRows,
+            P::GridTemplateColumns,
+            P::GridTemplateAreas,
+            P::GridAutoRows,
+            P::GridAutoColumns,
+            P::GridAutoFlow,
+            P::GridRowStart,
+            P::GridRowEnd,
+            P::GridColumnStart,
+            P::GridColumnEnd,
+        ],
+        "grid-template" => vec![
+            P::GridTemplateRows,
+            P::GridTemplateColumns,
+            P::GridTemplateAreas,
         ],
         _ => return None,
     })
@@ -1776,6 +1815,379 @@ pub(crate) fn expand_shorthand(
                 ),
             ]
         }
+        // P9-2（ADR-0040）：font 简写（css-fonts-4 §3.7）：
+        // [<'font-style'> || <font-variant-css2> || <'font-weight'> ||
+        //  <font-width-css3>]? <'font-size'> [/ <'line-height'>]?
+        // <'font-family'>；caption|icon|menu|message-box|small-caption|
+        // status-bar = 系统 UI 字体（无 OS 映射 → 全长手初始展开，B·豁免
+        // D5）。未指定部件回初始（reset 集 = 字体长手全集）。
+        "font" => {
+            use crate::css::property::{
+                FamilyName, FontFamilyList, FontVariantCapsKind, LineHeight, parse_font_family,
+                parse_font_size, parse_font_stretch_kw, parse_font_style, parse_font_weight,
+                parse_line_height,
+            };
+            // 系统字体关键字：整体匹配（后续组件文法会拒）→ 初始展开。
+            {
+                let save = p.state();
+                let sys = match p.next() {
+                    Ok(Token::Ident(s)) => matches!(
+                        s.as_ref(),
+                        "caption"
+                            | "icon"
+                            | "menu"
+                            | "message-box"
+                            | "small-caption"
+                            | "status-bar"
+                    ),
+                    _ => false,
+                };
+                if sys {
+                    if !p.is_exhausted() {
+                        return Err(p.new_error_for_next_token());
+                    }
+                    return Ok(Some(vec![
+                        (
+                            P::FontStyle,
+                            DeclValue::FontStyle(crate::css::property::FontStyle::Normal),
+                        ),
+                        (
+                            P::FontVariantCaps,
+                            DeclValue::FontVariantCaps(FontVariantCapsKind::Normal),
+                        ),
+                        (P::FontWeight, DeclValue::Number(400.0)),
+                        (P::FontStretch, DeclValue::FontStretch(100.0)),
+                        (P::FontSize, DeclValue::Len(LengthPercentage::Px(16.0))),
+                        (P::LineHeight, DeclValue::LineHeight(LineHeight::Normal)),
+                        (
+                            P::FontFamily,
+                            DeclValue::FontFamily(FontFamilyList(smallvec::smallvec![
+                                FamilyName::SansSerif
+                            ])),
+                        ),
+                        (P::FontFeatures, DeclValue::FontFeatures(Vec::new())),
+                        (P::FontVariations, DeclValue::FontVariations(Vec::new())),
+                    ]));
+                }
+                p.reset(&save);
+            }
+            // 前导 `||` 组：style/variant/weight/width 任意序各至多一次。
+            // `normal` 三处文法均接受——幂等置初始，重复无害。
+            let mut style: Option<DeclValue> = None;
+            let mut variant: Option<DeclValue> = None;
+            let mut weight: Option<DeclValue> = None;
+            let mut stretch: Option<DeclValue> = None;
+            loop {
+                let save = p.state();
+                if let Ok(v) = p.try_parse(parse_font_style) {
+                    style = Some(v);
+                    continue;
+                }
+                p.reset(&save);
+                if let Ok(v) = p.try_parse(|p| -> ValResult<DeclValue> {
+                    let t = p.next()?.clone();
+                    match &t {
+                        Token::Ident(s) if s.eq_ignore_ascii_case("small-caps") => {
+                            Ok(DeclValue::FontVariantCaps(FontVariantCapsKind::SmallCaps))
+                        }
+                        Token::Ident(s) if s.eq_ignore_ascii_case("normal") => {
+                            Ok(DeclValue::FontVariantCaps(FontVariantCapsKind::Normal))
+                        }
+                        _ => Err(p.new_error_for_next_token()),
+                    }
+                }) {
+                    variant = Some(v);
+                    continue;
+                }
+                p.reset(&save);
+                if let Ok(v) = p.try_parse(parse_font_weight) {
+                    weight = Some(v);
+                    continue;
+                }
+                p.reset(&save);
+                if let Ok(v) = p.try_parse(parse_font_stretch_kw) {
+                    stretch = Some(v);
+                    continue;
+                }
+                p.reset(&save);
+                break;
+            }
+            // <'font-size'> 必需。
+            let size = p.try_parse(parse_font_size)?;
+            // [/ <'line-height'>]?
+            let line_height = p
+                .try_parse(|p| -> ValResult<DeclValue> {
+                    let t = p.next()?.clone();
+                    match &t {
+                        Token::Delim(d) if *d == '/' => parse_line_height(p),
+                        _ => Err(p.new_error_for_next_token()),
+                    }
+                })
+                .ok();
+            // <'font-family'> 必需。
+            let family = parse_font_family(p)?;
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            vec![
+                (
+                    P::FontStyle,
+                    style.unwrap_or(DeclValue::FontStyle(
+                        crate::css::property::FontStyle::Normal,
+                    )),
+                ),
+                (
+                    P::FontVariantCaps,
+                    variant.unwrap_or(DeclValue::FontVariantCaps(FontVariantCapsKind::Normal)),
+                ),
+                (P::FontWeight, weight.unwrap_or(DeclValue::Number(400.0))),
+                (
+                    P::FontStretch,
+                    stretch.unwrap_or(DeclValue::FontStretch(100.0)),
+                ),
+                (P::FontSize, size),
+                (
+                    P::LineHeight,
+                    line_height.unwrap_or(DeclValue::LineHeight(LineHeight::Normal)),
+                ),
+                (P::FontFamily, family),
+                (P::FontFeatures, DeclValue::FontFeatures(Vec::new())),
+                (P::FontVariations, DeclValue::FontVariations(Vec::new())),
+            ]
+        }
+        // P9-2（ADR-0040）：grid / grid-template 简写（css-grid-1
+        // §7.3/§7.6）。grid reset 集 = 十长手（模板三 + auto 三 + 放置四）；
+        // grid-template 仅模板三长手。dense 不支持（GridAutoFlowKind 无
+        // Dense，自动放置为稀疏算法）→ 含 dense 声明无效（与长手一致，
+        // B 级偏差 ADR-0040 D4）。
+        "grid" | "grid-template" => {
+            use crate::css::property::{
+                GridAreas, GridAutoFlowKind, GridLineSpec, GridTemplate, parse_template_areas_form,
+                parse_track_list_until_slash,
+            };
+            let is_grid = name.eq_ignore_ascii_case("grid");
+            // none：全部初始。
+            {
+                let save = p.state();
+                let none = matches!(
+                    p.next(),
+                    Ok(Token::Ident(s)) if s.eq_ignore_ascii_case("none")
+                );
+                if none && p.is_exhausted() {
+                    let tracks = || DeclValue::GridTracks(GridTemplate::default());
+                    let mut out = vec![
+                        (P::GridTemplateRows, tracks()),
+                        (P::GridTemplateColumns, tracks()),
+                        (
+                            P::GridTemplateAreas,
+                            DeclValue::GridAreas(GridAreas { rows: Vec::new() }),
+                        ),
+                    ];
+                    if is_grid {
+                        out.push((P::GridAutoRows, DeclValue::LenAuto(None)));
+                        out.push((P::GridAutoColumns, DeclValue::LenAuto(None)));
+                        out.push((
+                            P::GridAutoFlow,
+                            DeclValue::GridAutoFlow(GridAutoFlowKind::Row),
+                        ));
+                        for slot in [
+                            P::GridRowStart,
+                            P::GridRowEnd,
+                            P::GridColumnStart,
+                            P::GridColumnEnd,
+                        ] {
+                            out.push((slot, DeclValue::GridLine(GridLineSpec::Auto)));
+                        }
+                    }
+                    return Ok(Some(out));
+                }
+                p.reset(&save);
+            }
+            // auto-flow 先行形（仅 grid）：`auto-flow [dense]? <auto-cols>?
+            // / <template-columns>`（隐含 auto-flow: column）。
+            if is_grid {
+                let save = p.state();
+                let auto_flow_first = matches!(
+                    p.next(),
+                    Ok(Token::Ident(s)) if s.eq_ignore_ascii_case("auto-flow")
+                );
+                if auto_flow_first {
+                    // dense → 拒绝（声明无效）。
+                    let dense = {
+                        let save2 = p.state();
+                        let hit = matches!(
+                            p.next(),
+                            Ok(Token::Ident(s)) if s.eq_ignore_ascii_case("dense")
+                        );
+                        if !hit {
+                            p.reset(&save2);
+                        }
+                        hit
+                    };
+                    if dense {
+                        return Err(p.new_error_for_next_token());
+                    }
+                    // <auto-columns>?（可缺省）——至 '/' 停。
+                    let auto_cols = p.try_parse(parse_track_list_until_slash).ok();
+                    // 必需 '/'。
+                    let slash = {
+                        let save3 = p.state();
+                        let hit = matches!(p.next(), Ok(Token::Delim(d)) if *d == '/');
+                        if !hit {
+                            p.reset(&save3);
+                        }
+                        hit
+                    };
+                    if !slash {
+                        return Err(p.new_error_for_next_token());
+                    }
+                    let cols = parse_track_list_until_slash(p)?;
+                    if !p.is_exhausted() {
+                        return Err(p.new_error_for_next_token());
+                    }
+                    return Ok(Some(vec![
+                        (
+                            P::GridTemplateRows,
+                            DeclValue::GridTracks(GridTemplate::default()),
+                        ),
+                        (P::GridTemplateColumns, DeclValue::GridTracks(cols)),
+                        (
+                            P::GridTemplateAreas,
+                            DeclValue::GridAreas(GridAreas { rows: Vec::new() }),
+                        ),
+                        (P::GridAutoRows, DeclValue::LenAuto(None)),
+                        (
+                            P::GridAutoColumns,
+                            auto_cols
+                                .map(DeclValue::GridTracks)
+                                .unwrap_or(DeclValue::LenAuto(None)),
+                        ),
+                        (
+                            P::GridAutoFlow,
+                            DeclValue::GridAutoFlow(GridAutoFlowKind::Column),
+                        ),
+                        (P::GridRowStart, DeclValue::GridLine(GridLineSpec::Auto)),
+                        (P::GridRowEnd, DeclValue::GridLine(GridLineSpec::Auto)),
+                        (P::GridColumnStart, DeclValue::GridLine(GridLineSpec::Auto)),
+                        (P::GridColumnEnd, DeclValue::GridLine(GridLineSpec::Auto)),
+                    ]));
+                }
+                p.reset(&save);
+            }
+            // 模板形：
+            //  - areas 形：`[<line-names>? <string> <track-size>?
+            //    <line-names>?]+ [/ <explicit-track-list>]?`
+            //  - 轨道形：`<template-rows> / <template-columns>`（仅 grid 额外
+            //    支持 rows / auto-flow [dense]? <auto-rows>?，隐含 row）。
+            // areas 形优先尝试并回退：轨道形同样可由线名段 `[..]` 起始，
+            // 首 token 判别不可行；areas 文法要求 ≥1 字符串行，无字符串必
+            // Err → try_parse 复位后走轨道形。
+            let (rows_t, cols_t, areas_rows, auto_flow, auto_rows) =
+                if let Ok((rows_t, cols_t, rows)) = p.try_parse(parse_template_areas_form) {
+                    (rows_t, cols_t, rows, None, None)
+                } else {
+                    let rows_t = parse_track_list_until_slash(p)?;
+                    // 必需 '/'。
+                    let slash = {
+                        let save = p.state();
+                        let hit = matches!(p.next(), Ok(Token::Delim(d)) if *d == '/');
+                        if !hit {
+                            p.reset(&save);
+                        }
+                        hit
+                    };
+                    if !slash {
+                        return Err(p.new_error_for_next_token());
+                    }
+                    // rows / auto-flow [dense]? <auto-rows>? （仅 grid）。
+                    if is_grid {
+                        let save = p.state();
+                        let auto_flow = matches!(
+                            p.next(),
+                            Ok(Token::Ident(s)) if s.eq_ignore_ascii_case("auto-flow")
+                        );
+                        if auto_flow {
+                            let dense = {
+                                let save2 = p.state();
+                                let hit = matches!(
+                                    p.next(),
+                                    Ok(Token::Ident(s)) if s.eq_ignore_ascii_case("dense")
+                                );
+                                if !hit {
+                                    p.reset(&save2);
+                                }
+                                hit
+                            };
+                            if dense {
+                                return Err(p.new_error_for_next_token());
+                            }
+                            let auto_rows = p.try_parse(parse_track_list_until_slash).ok();
+                            if !p.is_exhausted() {
+                                return Err(p.new_error_for_next_token());
+                            }
+                            (
+                                rows_t,
+                                None,
+                                Vec::new(),
+                                Some(GridAutoFlowKind::Row),
+                                auto_rows,
+                            )
+                        } else {
+                            p.reset(&save);
+                            let cols = parse_track_list_until_slash(p)?;
+                            if !p.is_exhausted() {
+                                return Err(p.new_error_for_next_token());
+                            }
+                            (rows_t, Some(cols), Vec::new(), None, None)
+                        }
+                    } else {
+                        let cols = parse_track_list_until_slash(p)?;
+                        if !p.is_exhausted() {
+                            return Err(p.new_error_for_next_token());
+                        }
+                        (rows_t, Some(cols), Vec::new(), None, None)
+                    }
+                };
+            if !p.is_exhausted() {
+                return Err(p.new_error_for_next_token());
+            }
+            let empty_tracks = || DeclValue::GridTracks(GridTemplate::default());
+            let mut out = vec![
+                (P::GridTemplateRows, DeclValue::GridTracks(rows_t)),
+                (
+                    P::GridTemplateColumns,
+                    cols_t
+                        .map(DeclValue::GridTracks)
+                        .unwrap_or_else(empty_tracks),
+                ),
+            ];
+            // areas 形必有 ≥1 字符串行 → areas_rows 非空即 areas 形。
+            out.push((
+                P::GridTemplateAreas,
+                DeclValue::GridAreas(GridAreas { rows: areas_rows }),
+            ));
+            if is_grid {
+                out.push((P::GridAutoRows, DeclValue::LenAuto(None)));
+                out.push((P::GridAutoColumns, DeclValue::LenAuto(None)));
+                out.push((
+                    P::GridAutoFlow,
+                    DeclValue::GridAutoFlow(auto_flow.unwrap_or(GridAutoFlowKind::Row)),
+                ));
+                // form 3 的 auto-rows → GridAutoRows；否则初始。
+                if let Some(ar) = auto_rows {
+                    out[3] = (P::GridAutoRows, DeclValue::GridTracks(ar));
+                }
+                for slot in [
+                    P::GridRowStart,
+                    P::GridRowEnd,
+                    P::GridColumnStart,
+                    P::GridColumnEnd,
+                ] {
+                    out.push((slot, DeclValue::GridLine(GridLineSpec::Auto)));
+                }
+            }
+            out
+        }
         "border-radius" => {
             // 第五批⑪椭圆圆角：`<lp>{1,4} [ '/' <lp>{1,4} ]?`（tl tr br bl
             // 各按 CSS 1-4 展开）；无斜杠=圆形角（纵=横），带斜杠但纵组
@@ -2519,6 +2931,20 @@ mod tests {
             ),
             // G1（ADR-0032）transition 简写代表值（全组件覆盖）
             ("transition", "opacity 1s ease 0.2s allow-discrete"),
+            // P9-2（ADR-0040）font 简写代表值（全组件覆盖）
+            (
+                "font",
+                "italic small-caps bold condensed 48px / 2 Arial, serif",
+            ),
+            ("font", "12px serif"),
+            ("font", "bolder larger serif"),
+            ("font", "caption"),
+            // P9-2（ADR-0040）grid / grid-template 代表值（各形覆盖）
+            ("grid", "none"),
+            ("grid", "100px 1fr / auto 2fr"),
+            ("grid", "100px / auto-flow 150px"),
+            ("grid", "auto-flow / 200px"),
+            ("grid-template", "[r1] \"a a\" 40px [r2] / [c1] 1fr [c2]"),
         ];
         for (name, val) in cases {
             let mut p = cssparser::Parser::new(val);
@@ -2542,6 +2968,224 @@ mod tests {
         assert!(matches!(
             parsed(&b.decls[1]),
             DeclValue::BorderStyle(BorderStyle::None)
+        ));
+    }
+
+    // ---------- P9-2（ADR-0040）font / grid / grid-template 简写 ----------
+
+    fn decl_of(b: &DeclarationBlock, pid: PropertyId) -> &DeclValue {
+        b.decls
+            .iter()
+            .find(|d| d.id == pid)
+            .map(parsed)
+            .unwrap_or_else(|| panic!("{pid:?} 缺失"))
+    }
+
+    #[test]
+    fn font_shorthand_full_components_and_resets() {
+        // 全组件：style/variant/weight/width/size/line-height/family。
+        let (b, r) = block("font: italic small-caps bold condensed 48px/2 Arial, serif");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 9);
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontStyle),
+            DeclValue::FontStyle(crate::css::property::FontStyle::Italic)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontVariantCaps),
+            DeclValue::FontVariantCaps(crate::css::property::FontVariantCapsKind::SmallCaps)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontWeight),
+            DeclValue::Number(n) if *n == 700.0
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontStretch),
+            DeclValue::FontStretch(v) if (v - 75.0).abs() < f32::EPSILON
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontSize),
+            DeclValue::Len(LengthPercentage::Px(px)) if *px == 48.0
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::LineHeight),
+            DeclValue::LineHeight(crate::css::property::LineHeight::Number(n)) if *n == 2.0
+        ));
+        // 最小形：未指定部件回初始（css-fonts-4 reset 集）。
+        let (b, r) = block("font: 12px serif");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 9);
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontStyle),
+            DeclValue::FontStyle(crate::css::property::FontStyle::Normal)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontWeight),
+            DeclValue::Number(n) if *n == 400.0
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontStretch),
+            DeclValue::FontStretch(v) if *v == 100.0
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::LineHeight),
+            DeclValue::LineHeight(crate::css::property::LineHeight::Normal)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontFeatures),
+            DeclValue::FontFeatures(v) if v.is_empty()
+        ));
+        // 相对关键字随简写通过（物化在级联期）。
+        let (b, r) = block("font: bolder larger serif");
+        assert!(r.is_clean());
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontWeight),
+            DeclValue::RelativeFontWeight(true)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontSize),
+            DeclValue::RelativeFontSize(true)
+        ));
+        // 缺 family = 声明无效。
+        let (_, r) = block("font: 12px");
+        assert!(!r.is_clean());
+        // 尾随垃圾 = 无效（"serif bogus" 是合法多 ident 族名，须用非族名 token）。
+        let (_, r) = block("font: 12px serif 5px");
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn font_shorthand_system_keyword_resets_all() {
+        // 系统 UI 字体无 OS 映射（ADR-0040 D5）：全长手初始展开。
+        let (b, r) = block("font: caption");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 9);
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontSize),
+            DeclValue::Len(LengthPercentage::Px(px)) if *px == 16.0
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::FontFamily),
+            DeclValue::FontFamily(list) if matches!(list.0.first(), Some(crate::css::property::FamilyName::SansSerif))
+        ));
+        // 系统关键字后尾随 = 无效（caption 不是文法前缀）。
+        let (_, r) = block("font: caption serif");
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn grid_shorthand_track_and_auto_flow_forms() {
+        // 轨道形：rows / cols。
+        let (b, r) = block("grid: 100px 1fr / auto 2fr");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 10);
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridTemplateRows),
+            DeclValue::GridTracks(t) if t.tracks.len() == 2
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridTemplateColumns),
+            DeclValue::GridTracks(t) if t.tracks.len() == 2
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridAutoFlow),
+            DeclValue::GridAutoFlow(crate::css::property::GridAutoFlowKind::Row)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridRowStart),
+            DeclValue::GridLine(crate::css::property::GridLineSpec::Auto)
+        ));
+        // rows / auto-flow <auto-rows>（隐含 row）。
+        let (b, r) = block("grid: 100px / auto-flow 150px");
+        assert!(r.is_clean());
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridAutoFlow),
+            DeclValue::GridAutoFlow(crate::css::property::GridAutoFlowKind::Row)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridAutoRows),
+            DeclValue::GridTracks(t) if t.tracks.len() == 1
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridTemplateColumns),
+            DeclValue::GridTracks(t) if t.tracks.is_empty()
+        ));
+        // auto-flow <auto-cols> / cols（隐含 column）。
+        let (b, r) = block("grid: auto-flow 150px / 200px");
+        assert!(r.is_clean());
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridAutoFlow),
+            DeclValue::GridAutoFlow(crate::css::property::GridAutoFlowKind::Column)
+        ));
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridAutoColumns),
+            DeclValue::GridTracks(t) if t.tracks.len() == 1
+        ));
+        // dense = 声明无效（GridAutoFlowKind 无 Dense，稀疏放置算法）。
+        let (_, r) = block("grid: 100px / auto-flow dense 150px");
+        assert!(!r.is_clean());
+        let (_, r) = block("grid: auto-flow dense / 200px");
+        assert!(!r.is_clean());
+        // 裸轨道表（缺 '/'）= 无效。
+        let (_, r) = block("grid: 100px 1fr");
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn grid_shorthand_areas_form_and_none_reset() {
+        // areas 形：行前线名/行串/行轨尺寸/行后线名 + 列模板。
+        let (b, r) =
+            block("grid: [r1] \"a a\" 40px [r2] \"b b\" 40px [r3] / [c1] 1fr [c2] 1fr [c3]");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 10);
+        let rows = match decl_of(&b, PropertyId::GridTemplateRows) {
+            DeclValue::GridTracks(t) => t,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(rows.tracks.len(), 2);
+        assert_eq!(rows.line_names.len(), 3);
+        assert_eq!(rows.line_names[0], vec!["r1".to_string()]);
+        assert_eq!(rows.line_names[1], vec!["r2".to_string()]);
+        assert_eq!(rows.line_names[2], vec!["r3".to_string()]);
+        match decl_of(&b, PropertyId::GridTemplateAreas) {
+            DeclValue::GridAreas(a) => {
+                assert_eq!(
+                    a.rows,
+                    vec![
+                        vec!["a".to_string(), "a".to_string()],
+                        vec!["b".to_string(), "b".to_string()]
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let cols = match decl_of(&b, PropertyId::GridTemplateColumns) {
+            DeclValue::GridTracks(t) => t,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(cols.tracks.len(), 2);
+        assert_eq!(cols.line_names[0], vec!["c1".to_string()]);
+        // 非矩形 areas = 无效。
+        let (_, r) = block("grid: \"a a\" \"b\" 1fr");
+        assert!(!r.is_clean());
+        // none：grid 全十长手初始；grid-template 仅模板三长手。
+        let (b, r) = block("grid: none");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 10);
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridAutoFlow),
+            DeclValue::GridAutoFlow(crate::css::property::GridAutoFlowKind::Row)
+        ));
+        let (b, r) = block("grid-template: none");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 3);
+        // grid-template 轨道形：只重置模板三长手（§7.3）。
+        let (b, r) = block("grid-template: 100px 1fr / 50px");
+        assert!(r.is_clean());
+        assert_eq!(b.decls.len(), 3);
+        assert!(matches!(
+            decl_of(&b, PropertyId::GridTemplateColumns),
+            DeclValue::GridTracks(t) if t.tracks.len() == 1
         ));
     }
 

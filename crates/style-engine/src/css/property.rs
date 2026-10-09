@@ -4217,26 +4217,10 @@ pub fn parse_grid_tracks(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::GridTracks(GridTemplate { tracks, line_names }))
 }
 
-/// grid-template-areas（E5，ADR-0020）：引号串行；每行空白分词，
-/// `.` = 空格。校验：各行格数一致（矩形性）+ 同名格数 == 行跨度×列
-/// 跨度（逐名矩形——min/max 边界法漏对角格，必须计数）；违反 = 声明
-/// 无效（spec §8.5）。
-pub fn parse_grid_areas(p: &mut Parser<'_>) -> ValResult<DeclValue> {
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    loop {
-        let s = match p.next() {
-            Ok(Token::QuotedString(s)) => s.to_string(),
-            _ => return Err(p.new_error_for_next_token()),
-        };
-        let row: Vec<String> = s.split_ascii_whitespace().map(String::from).collect();
-        if row.is_empty() {
-            return Err(p.new_error_for_next_token());
-        }
-        rows.push(row);
-        if p.is_exhausted() {
-            break;
-        }
-    }
+/// 矩形性 + 逐名矩形校验（简写展开共用）：各行格数一致 + 同名格数 ==
+/// 行跨度×列跨度（min/max 边界法漏对角格，必须计数）；违反 = 声明无效
+///（spec §8.5）。
+pub(crate) fn validate_area_rows(p: &mut Parser<'_>, rows: &[Vec<String>]) -> ValResult<()> {
     let w = rows[0].len();
     if rows.iter().any(|r| r.len() != w) {
         return Err(p.new_error_for_next_token());
@@ -4270,7 +4254,134 @@ pub fn parse_grid_areas(p: &mut Parser<'_>) -> ValResult<DeclValue> {
             return Err(p.new_error_for_next_token());
         }
     }
+    Ok(())
+}
+
+/// grid-template-areas（E5，ADR-0020）：引号串行；每行空白分词，
+/// `.` = 空格。校验规则见 [`validate_area_rows`]。
+pub fn parse_grid_areas(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    loop {
+        let s = match p.next() {
+            Ok(Token::QuotedString(s)) => s.to_string(),
+            _ => return Err(p.new_error_for_next_token()),
+        };
+        let row: Vec<String> = s.split_ascii_whitespace().map(String::from).collect();
+        if row.is_empty() {
+            return Err(p.new_error_for_next_token());
+        }
+        rows.push(row);
+        if p.is_exhausted() {
+            break;
+        }
+    }
+    validate_area_rows(p, &rows)?;
     Ok(DeclValue::GridAreas(GridAreas { rows }))
+}
+
+/// 简写展开共用（P9-2，ADR-0040）：显式轨道表（css-grid-1 §7.3
+/// `<explicit-track-list>` = [`<line-names>`? `<track-size>`]+
+/// `<line-names>?`），**遇 `/` 或耗尽即停（不消费 `/`）**。至少一轨；
+/// 仅线名无轨 = Err。
+pub(crate) fn parse_track_list_until_slash(p: &mut Parser<'_>) -> ValResult<GridTemplate> {
+    let mut tracks = Vec::new();
+    let mut line_names: Vec<Vec<String>> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    loop {
+        while p.try_parse(bracket_open).is_ok() {
+            pending.extend(p.parse_nested_block(bracket_names)?);
+        }
+        // 耗尽或 `/`（回滚不消费）都终止——终止时 pending 归尾线名槽。
+        let at_slash = {
+            let save = p.state();
+            let hit = matches!(p.next(), Ok(Token::Delim(d)) if *d == '/');
+            p.reset(&save);
+            hit
+        };
+        if p.is_exhausted() || at_slash {
+            line_names.push(std::mem::take(&mut pending));
+            break;
+        }
+        line_names.push(std::mem::take(&mut pending));
+        tracks.push(parse_track_size(p)?);
+    }
+    if tracks.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    Ok(GridTemplate { tracks, line_names })
+}
+
+/// 简写展开共用（P9-2，ADR-0040）：grid-template 的 areas 形
+///（css-grid-1 §7.3 `[<line-names>? <string> <track-size>? <line-names>?]+
+/// [/ <explicit-track-list>]?`）。每串一行：逐行空白分词进
+/// grid-template-areas；行轨尺寸缺省 auto；行前线名段+行后线名段合并
+/// 归第 i 槽（后组行前线名并入同槽）。返回 (rows 模板, 可选 columns,
+/// areas 行)。
+pub(crate) fn parse_template_areas_form(
+    p: &mut Parser<'_>,
+) -> ValResult<(GridTemplate, Option<GridTemplate>, Vec<Vec<String>>)> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row_tracks: Vec<TrackSize> = Vec::new();
+    let mut line_names: Vec<Vec<String>> = Vec::new();
+    let mut slot: Vec<String> = Vec::new();
+    loop {
+        // 行前线名段（可多段）。
+        while p.try_parse(bracket_open).is_ok() {
+            slot.extend(p.parse_nested_block(bracket_names)?);
+        }
+        let at_slash = {
+            let save = p.state();
+            let hit = matches!(p.next(), Ok(Token::Delim(d)) if *d == '/');
+            p.reset(&save);
+            hit
+        };
+        if at_slash || p.is_exhausted() {
+            break;
+        }
+        let s = match p.next() {
+            Ok(Token::QuotedString(s)) => s.to_string(),
+            _ => return Err(p.new_error_for_next_token()),
+        };
+        let row: Vec<String> = s.split_ascii_whitespace().map(String::from).collect();
+        if row.is_empty() {
+            return Err(p.new_error_for_next_token());
+        }
+        line_names.push(std::mem::take(&mut slot));
+        rows.push(row);
+        // 行轨尺寸（缺省 auto；try_parse 失败自动回滚）。
+        row_tracks.push(p.try_parse(parse_track_size).unwrap_or(TrackSize::Auto));
+        // 行后线名段（归下一槽/尾槽）。
+        while p.try_parse(bracket_open).is_ok() {
+            slot.extend(p.parse_nested_block(bracket_names)?);
+        }
+        if p.is_exhausted() {
+            break;
+        }
+    }
+    if rows.is_empty() {
+        return Err(p.new_error_for_next_token());
+    }
+    line_names.push(slot);
+    validate_area_rows(p, &rows)?;
+    let cols = {
+        let save = p.state();
+        let at_slash = matches!(p.next(), Ok(Token::Delim(d)) if *d == '/');
+        p.reset(&save);
+        if at_slash {
+            p.next()?; // 消费 '/'
+            Some(parse_track_list_until_slash(p)?)
+        } else {
+            None
+        }
+    };
+    Ok((
+        GridTemplate {
+            tracks: row_tracks,
+            line_names,
+        },
+        cols,
+        rows,
+    ))
 }
 
 /// grid-{row,column}-{start,end}（E5，ADR-0020）：
@@ -5859,30 +5970,7 @@ pub fn parse_border_image_repeat(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 pub fn parse_font_stretch(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
     match &t {
-        Token::Ident(name) => {
-            let v = if name.eq_ignore_ascii_case("normal") {
-                100.0
-            } else if name.eq_ignore_ascii_case("ultra-condensed") {
-                50.0
-            } else if name.eq_ignore_ascii_case("extra-condensed") {
-                62.5
-            } else if name.eq_ignore_ascii_case("condensed") {
-                75.0
-            } else if name.eq_ignore_ascii_case("semi-condensed") {
-                87.5
-            } else if name.eq_ignore_ascii_case("semi-expanded") {
-                112.5
-            } else if name.eq_ignore_ascii_case("expanded") {
-                125.0
-            } else if name.eq_ignore_ascii_case("extra-expanded") {
-                150.0
-            } else if name.eq_ignore_ascii_case("ultra-expanded") {
-                200.0
-            } else {
-                return Err(p.new_error_for_next_token());
-            };
-            Ok(DeclValue::FontStretch(v))
-        }
+        Token::Ident(name) => parse_font_stretch_ident(p, name),
         Token::Percentage { unit_value, .. } => {
             // unit_value 是 f32 分数（1.25 = 125%），×100 归一到百分比刻度
             let v = *unit_value * 100.0;
@@ -5893,6 +5981,41 @@ pub fn parse_font_stretch(p: &mut Parser<'_>) -> ValResult<DeclValue> {
         }
         _ => Err(p.new_error_for_next_token()),
     }
+}
+
+/// 仅关键字形（P9-2 font 简写共用：css-fonts-4 `<font-width-css3>` 不含
+/// 百分比——简写字宽分量只接受九关键字）。
+pub fn parse_font_stretch_kw(p: &mut Parser<'_>) -> ValResult<DeclValue> {
+    let t = p.next()?.clone();
+    match &t {
+        Token::Ident(name) => parse_font_stretch_ident(p, name),
+        _ => Err(p.new_error_for_next_token()),
+    }
+}
+
+fn parse_font_stretch_ident(p: &mut Parser<'_>, name: &str) -> ValResult<DeclValue> {
+    let v = if name.eq_ignore_ascii_case("normal") {
+        100.0
+    } else if name.eq_ignore_ascii_case("ultra-condensed") {
+        50.0
+    } else if name.eq_ignore_ascii_case("extra-condensed") {
+        62.5
+    } else if name.eq_ignore_ascii_case("condensed") {
+        75.0
+    } else if name.eq_ignore_ascii_case("semi-condensed") {
+        87.5
+    } else if name.eq_ignore_ascii_case("semi-expanded") {
+        112.5
+    } else if name.eq_ignore_ascii_case("expanded") {
+        125.0
+    } else if name.eq_ignore_ascii_case("extra-expanded") {
+        150.0
+    } else if name.eq_ignore_ascii_case("ultra-expanded") {
+        200.0
+    } else {
+        return Err(p.new_error_for_next_token());
+    };
+    Ok(DeclValue::FontStretch(v))
 }
 
 /// font-feature-settings / font-variation-settings 的 OpenType 特性 tag：
