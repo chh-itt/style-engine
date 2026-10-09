@@ -28,7 +28,7 @@ pub enum PropertyId {
     Bottom,
     /// left — 左偏移（length-percentage|auto）。
     Left,
-    /// z-index — 层叠序（auto|<number>）。
+    /// z-index — 层叠序（auto|`<number>`）。
     ZIndex,
     // 动画（第五批⑰）：描述符属性——不可动画、不参与插值，仅驱动
     // @keyframes 采样
@@ -59,7 +59,7 @@ pub enum PropertyId {
     MaxWidth,
     /// max-height — 最大高度（length-percentage|auto）。
     MaxHeight,
-    /// aspect-ratio — 宽高比（auto|<ratio>）。
+    /// aspect-ratio — 宽高比（auto|`<ratio>`）。
     AspectRatio,
     // 布局：盒间距
     /// margin-top — 上外边距（length-percentage）。
@@ -89,9 +89,9 @@ pub enum PropertyId {
     FlexDirection,
     /// flex-wrap — 换行方式。
     FlexWrap,
-    /// flex-grow — 剩余空间放大因子（<number>）。
+    /// flex-grow — 剩余空间放大因子（`<number>`）。
     FlexGrow,
-    /// flex-shrink — 溢出收缩因子（<number>）。
+    /// flex-shrink — 溢出收缩因子（`<number>`）。
     FlexShrink,
     /// flex-basis — 主轴基础尺寸（length-percentage|auto）。
     FlexBasis,
@@ -139,10 +139,10 @@ pub enum PropertyId {
     TextDecorationThickness,
     /// text-shadow（F2，ADR-0022 D5）。
     TextShadow,
-    /// 二期③multi-column：显式列数（auto|<integer≥1>）；无 count 时
+    /// 二期③multi-column：显式列数（auto|`<integer≥1>`）；无 count 时
     /// column-width 声明即请求多列（列数布局期结算）。
     ColumnCount,
-    /// 二期③multi-column：列理想宽（auto|<length>）——width 模式列数
+    /// 二期③multi-column：列理想宽（auto|`<length>`）——width 模式列数
     /// n = max(1, ⌊(内容宽+gap)/(理想宽+gap)⌋)。
     ColumnWidth,
     /// 三期⑤a：css-break 断行控制（avoid|auto）——v1 所有块不可断，
@@ -185,7 +185,7 @@ pub enum PropertyId {
     BorderBottomRightRadius,
     /// border-bottom-left-radius — 左下圆角。
     BorderBottomLeftRadius,
-    /// border-top-width — 上边框宽（none|thin|medium|thick|<length>）。
+    /// border-top-width — 上边框宽（none|thin|medium|thick|`<length>`）。
     BorderTopWidth,
     /// border-right-width — 右边框宽。
     BorderRightWidth,
@@ -211,7 +211,7 @@ pub enum PropertyId {
     BorderLeftColor,
     /// box-shadow — 阴影列表（逗号分隔，支持 inset）。
     BoxShadow,
-    /// opacity — 不透明度（<number>，1 为不透明）。
+    /// opacity — 不透明度（`<number>`，1 为不透明）。
     Opacity,
     /// overflow-x — 水平溢出处理。
     OverflowX,
@@ -242,11 +242,11 @@ pub enum PropertyId {
     FontFamily,
     /// font-size — 字号（length-percentage 或绝对字号关键字）。
     FontSize,
-    /// font-weight — 字重（normal=400、bold=700 或 <number>）。
+    /// font-weight — 字重（normal=400、bold=700 或 `<number>`）。
     FontWeight,
     /// font-style — 字形（normal|italic）。
     FontStyle,
-    /// line-height — 行高（normal|<number>|<length-percentage>）。
+    /// line-height — 行高（normal|`<number>`|`<length-percentage>`）。
     LineHeight,
     /// text-align — 文本水平对齐。
     TextAlign,
@@ -277,13 +277,13 @@ pub enum PropertyId {
     AccentColor,
     // outline（A2）：不占布局的装饰描边（ink overflow，css-ui-4）——
     // 绘制复用 Border 基元（外扩矩形承载），布局零映射。
-    /// outline-width（thin|medium|thick|<length>）。
+    /// outline-width（thin|medium|thick|`<length>`）。
     OutlineWidth,
     /// outline-style（none|solid|dashed|dotted|double|groove|ridge|inset|outset|auto）。
     OutlineStyle,
-    /// outline-color（<color>；初始 currentcolor）。
+    /// outline-color（`<color>`；初始 currentcolor）。
     OutlineColor,
-    /// outline-offset（<length>，可负；描边带外扩量）。
+    /// outline-offset（`<length>`，可负；描边带外扩量）。
     OutlineOffset,
     // 逻辑属性（A8，css-logical-1）：独立槽位 + computed 期按元素
     // direction 与映射物理槽按级联序键定夺（规范正确：物理/逻辑同池
@@ -1110,7 +1110,7 @@ pub enum UnicodeBidiKind {
 pub enum ContentPiece {
     /// 字符串字面量。
     Str(String),
-    /// counter(<custom-ident>, <counter-style>?)——最内作用域值；style
+    /// counter(`<custom-ident>`, `<counter-style>`?)——最内作用域值；style
     /// 经文档级 @counter-style 登记表 + 内置样式渲染（css-counter-styles-3
     /// §2/§6，见 counter_format 切片），未知名 → decimal。
     Counter {
@@ -1119,7 +1119,7 @@ pub enum ContentPiece {
         /// 计数样式文法名（缺省 decimal；渲染语义见 counter_format）。
         style: String,
     },
-    /// counters(<custom-ident>, <string>, <counter-style>?)——全作用域
+    /// counters(`<custom-ident>`, `<string>`, `<counter-style>`?)——全作用域
     /// 自外向内逐帧按 style 格式化后 join。
     Counters {
         /// 计数器名。
@@ -1129,7 +1129,7 @@ pub enum ContentPiece {
         /// 计数样式文法名（缺省 decimal；渲染语义见 counter_format）。
         style: String,
     },
-    /// attr(<attr-name>)——宿主元素属性；伪元素上取 originating element。
+    /// attr(`<attr-name>`)——宿主元素属性；伪元素上取 originating element。
     Attr(String),
     /// open-quote——quotes 计算值按引用深度取对，深度 +1。
     OpenQuote,
@@ -1152,7 +1152,7 @@ pub enum ContentValue {
     Normal,
     /// 字符串字面量（单串；多串/混合用 Seq）。
     Str(String),
-    /// P5（ADR-0036 D1）：<content-list> 序列（字符串/counter()/counters()/
+    /// P5（ADR-0036 D1）：`<content-list>` 序列（字符串/counter()/counters()/
     /// attr()/引号关键字空格分隔；空序列拒绝）。
     Seq(Vec<ContentPiece>),
 }
@@ -1281,9 +1281,9 @@ pub enum ClearKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum BorderImageSliceComp {
-    /// <number [0,∞]> — 光栅源像素 / 渐变源 area 像素。
+    /// `<number [0,∞]>` — 光栅源像素 / 渐变源 area 像素。
     Number(f32),
-    /// <percentage [0,∞]> — 源尺寸百分比。
+    /// `<percentage [0,∞]>` — 源尺寸百分比。
     Percentage(f32),
 }
 
@@ -1302,9 +1302,9 @@ pub struct BorderImageSlice {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum BorderImageWidthComp {
-    /// <length-percentage> — 绝对/相对绘制域带宽。
+    /// `<length-percentage>` — 绝对/相对绘制域带宽。
     Length(LengthPercentage),
-    /// <number [0,∞]> — 对应边 border-width 的倍数。
+    /// `<number [0,∞]>` — 对应边 border-width 的倍数。
     Number(f32),
     /// auto — 使用切片自身尺寸。
     Auto,
@@ -1323,9 +1323,9 @@ pub struct BorderImageWidth {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum BorderImageOutsetComp {
-    /// <length [0,∞]> — 绝对外扩量。
+    /// `<length [0,∞]>` — 绝对外扩量。
     Length(LengthPercentage),
-    /// <number [0,∞]> — 对应边 border-width 的倍数。
+    /// `<number [0,∞]>` — 对应边 border-width 的倍数。
     Number(f32),
 }
 
@@ -1542,7 +1542,7 @@ pub enum DeclValue {
     /// z-index：auto → None（级联缺席等价；「有值且为 Some」是将来 ADR-0008
     /// 判定 stacking context 的依据），数字 → Some。
     ZIndex(Option<f32>),
-    /// column-count（二期③）：auto → None；<integer [1,∞]> → Some
+    /// column-count（二期③）：auto → None；`<integer [1,∞]>` → Some
     /// （0/负/非整数为非法声明，解析期丢弃）。
     ColumnCount(Option<u16>),
     /// break-inside（三期⑤a）：avoid → Some(true)、auto → Some(false)。
@@ -1948,25 +1948,25 @@ pub enum TransformFn {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FilterFn {
-    /// blur(<length>?)：高斯模糊，绘制层 σ = 参数/2。
+    /// blur(`<length>`?)：高斯模糊，绘制层 σ = 参数/2。
     Blur(LengthPercentage),
-    /// brightness(<number-percentage>?)：线性乘（1 = 原样），钳 ≥ 0。
+    /// brightness(`<number-percentage>`?)：线性乘（1 = 原样），钳 ≥ 0。
     Brightness(f32),
-    /// contrast(<number-percentage>?)：c·a+(0.5−0.5a) 仿射，钳 ≥ 0。
+    /// contrast(`<number-percentage>`?)：c·a+(0.5−0.5a) 仿射，钳 ≥ 0。
     Contrast(f32),
-    /// grayscale(<number-percentage>?)：sRGB 去饱和矩阵插值，钳 [0,1]。
+    /// grayscale(`<number-percentage>`?)：sRGB 去饱和矩阵插值，钳 \[0,1\]。
     Grayscale(f32),
-    /// sepia(<number-percentage>?)：sRGB 泛黄矩阵插值，钳 [0,1]。
+    /// sepia(`<number-percentage>`?)：sRGB 泛黄矩阵插值，钳 \[0,1\]。
     Sepia(f32),
-    /// saturate(<number-percentage>?)：sRGB 饱和矩阵插值，钳 ≥ 0。
+    /// saturate(`<number-percentage>`?)：sRGB 饱和矩阵插值，钳 ≥ 0。
     Saturate(f32),
-    /// invert(<number-percentage>?)：c'=(1−2a)c+a，钳 [0,1]。
+    /// invert(`<number-percentage>`?)：c'=(1−2a)c+a，钳 \[0,1\]。
     Invert(f32),
-    /// opacity(<number-percentage>?)：alpha 缩放，钳 [0,1]。
+    /// opacity(`<number-percentage>`?)：alpha 缩放，钳 \[0,1\]。
     Opacity(f32),
-    /// hue-rotate(<angle>?)：度（sRGB 线性近似矩阵，W3C §4 表）。
+    /// hue-rotate(`<angle>`?)：度（sRGB 线性近似矩阵，W3C §4 表）。
     HueRotate(f32),
-    /// drop-shadow(<length>{2,3} && <color>?)：偏移 + 可选模糊半径
+    /// drop-shadow(`<length>`{2,3} && `<color>`?)：偏移 + 可选模糊半径
     /// （spread 不存在，区别于 box-shadow）+ 颜色（缺省 currentcolor）。
     DropShadow {
         /// x 偏移。
@@ -2147,7 +2147,7 @@ pub enum TextDecoThickness {
     Auto,
     /// from-font — 字体首选厚度（缺度数→auto 退化）。
     FromFont,
-    /// <length-percentage> 声明值。
+    /// `<length-percentage>` 声明值。
     Length(crate::css::value::LengthPercentage),
 }
 
@@ -2204,7 +2204,7 @@ pub fn parse_text_decoration_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_td_style_component(p).map(DeclValue::TextDecorationStyle)
 }
 
-/// 厚度单部件（简写贪心共用；F2 D4）：auto | from-font | <length-percentage>。
+/// 厚度单部件（简写贪心共用；F2 D4）：auto | from-font | `<length-percentage>`。
 pub(crate) fn parse_td_thickness_component(p: &mut Parser<'_>) -> ValResult<TextDecoThickness> {
     let kw = p.try_parse(|p| -> ValResult<Option<TextDecoThickness>> {
         let t = p.next()?.clone();
@@ -2243,9 +2243,9 @@ pub(crate) fn parse_td_color_component(p: &mut Parser<'_>) -> ValResult<ColorVal
 /// text-shadow 单影（F2，ADR-0022 D5）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextShadowSpec {
-    /// 水平偏移（<length-percentage>）。
+    /// 水平偏移（`<length-percentage>`）。
     pub dx: crate::css::value::LengthPercentage,
-    /// 垂直偏移（<length-percentage>）。
+    /// 垂直偏移（`<length-percentage>`）。
     pub dy: crate::css::value::LengthPercentage,
     /// 模糊半径（缺省 0=锐利）。
     pub blur: Option<crate::css::value::LengthPercentage>,
@@ -2253,8 +2253,8 @@ pub struct TextShadowSpec {
     pub color: Option<ColorValue>,
 }
 
-/// text-shadow（F2，ADR-0022 D5）：none | [<color>? <dx> <dy> <blur>?
-/// <color>?]#（<color> 前后均可置——css-backgrounds-3 && 组合；逗号分隔
+/// text-shadow（F2，ADR-0022 D5）：none | [`<color>`? `<dx>` `<dy>` `<blur>`?
+/// `<color>`?]#（`<color>` 前后均可置——css-backgrounds-3 && 组合；逗号分隔
 /// 多影）。
 pub fn parse_text_shadow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     if let Ok(()) = p.try_parse(|p| -> ValResult<()> {
@@ -2322,7 +2322,7 @@ pub enum LineHeight {
     Normal,
     /// 无单位数字（倍数）。
     Number(f32),
-    /// <length-percentage> — 定值行高（百分比基准 font-size）。
+    /// `<length-percentage>` — 定值行高（百分比基准 font-size）。
     Len(LengthPercentage),
 }
 
@@ -2334,7 +2334,7 @@ pub struct FontFamilyList(pub SmallVec<[FamilyName; 2]>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FamilyName {
-    /// <family-name> — 具名字体族（大小写不敏感）。
+    /// `<family-name>` — 具名字体族（大小写不敏感）。
     Named(String),
     /// serif — 通用衬线族。
     Serif,
@@ -2355,7 +2355,7 @@ pub enum FamilyName {
 pub struct GridTemplate {
     /// 轨道尺寸序列（columns 或 rows，方向随属性）。
     pub tracks: Vec<TrackSize>,
-    /// 线名槽（E5，ADR-0020）：N 轨 N+1 槽——line_names[i] = 第 i 轨
+    /// 线名槽（E5，ADR-0020）：N 轨 N+1 槽——`line_names[i]` = 第 i 轨
     /// 之前的线名集，line_names[tracks.len()] = 尾线名；`[a b]` 括号段
     /// 解析产物（缺省 = 空）。
     pub line_names: Vec<Vec<String>>,
@@ -2365,9 +2365,9 @@ pub struct GridTemplate {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum TrackSize {
-    /// <length-percentage> — 定值轨道。
+    /// `<length-percentage>` — 定值轨道。
     Len(LengthPercentage),
-    /// <flex> — fr 弹性份数。
+    /// `<flex>` — fr 弹性份数。
     Fr(f32),
     /// auto — 随内容自动伸缩的轨道。
     Auto,
@@ -2384,7 +2384,7 @@ pub enum TrackSize {
     RepeatAuto(bool, Vec<TrackSize>),
 }
 
-/// grid-template-areas 值（E5，ADR-0020）：区域模板。rows[r][c] =
+/// grid-template-areas 值（E5，ADR-0020）：区域模板。`rows[r][c]` =
 /// 区域名或 `.`（空格）；矩形性 + 逐名矩形校验在解析期完成
 ///（违反 = 声明无效，spec §8.5）。
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -2401,13 +2401,13 @@ pub struct GridAreas {
 pub enum GridLineSpec {
     /// auto — 自动放置。
     Auto,
-    /// <integer> — 线号（1 基；0 非法解析拒绝；负数 = 自端计数）。
+    /// `<integer>` — 线号（1 基；0 非法解析拒绝；负数 = 自端计数）。
     Number(i16),
-    /// span <integer> — 跨 k 轨（k ≥ 1）。
+    /// span `<integer>` — 跨 k 轨（k ≥ 1）。
     Span(u16),
-    /// span <ident> — 跨至第 k 条名线（解析期解析，未知名 = Auto）。
+    /// span `<ident>` — 跨至第 k 条名线（解析期解析，未知名 = Auto）。
     SpanName(String),
-    /// <ident> — 区域边线或线名（解析期解析，未知名 = Auto）。
+    /// `<ident>` — 区域边线或线名（解析期解析，未知名 = Auto）。
     Name(String),
 }
 
@@ -2417,7 +2417,7 @@ pub enum GridLineSpec {
 pub enum BackgroundImage {
     /// none — 无背景图（默认）。
     None,
-    /// url(<string>) — 图片资源引用。
+    /// url(`<string>`) — 图片资源引用。
     Url(String),
     /// 渐变函数（linear/radial）。
     Gradient(Gradient),
@@ -2544,8 +2544,8 @@ pub struct BackgroundLayer {
     pub clip: BackgroundClip,
 }
 
-/// F3c（ADR-0025）：clip-path 裁剪形状。文法 `<basic-shape> ||
-/// <geometry-box>`（次序不限）| none。参考盒随形状平铺存储（百分比
+/// F3c（ADR-0025）：clip-path 裁剪形状。文法 `<basic-shape>` ||
+/// `<geometry-box>`（次序不限）| none。参考盒随形状平铺存储（百分比
 /// 半径/圆心/最近最远边均以参考盒解析）；geometry-box 单独出现 =
 /// inset(0) 基准该盒（语义等价，css-masking-1 §5.1）。url()/path()
 /// 收容为 Other（SVG 资源与 path 语法 = T2，绘制语义 none）。
@@ -2553,7 +2553,7 @@ pub struct BackgroundLayer {
 pub enum ClipShape {
     /// none — 不裁剪（初始值）。
     None,
-    /// inset( <lp>{1,4} [round <lp>{1,4} [ / <lp>{1,4} ]?]? ) —
+    /// inset( `<lp>`{1,4} [round `<lp>`{1,4} [ / `<lp>`{1,4} ]?]? ) —
     /// 内缩矩形（可选圆角，精确消费复用 PushClip radius 能力）。
     Inset {
         /// 四边内缩量（上右下左，解析期展开简写）。
@@ -2564,7 +2564,7 @@ pub enum ClipShape {
         /// 参考盒（默认 border-box）。
         reference: BackgroundBox,
     },
-    /// circle( <radius>? at <position>? ) — 正圆。
+    /// circle( `<radius>`? at `<position>`? ) — 正圆。
     Circle {
         /// 半径（缺省 closest-side）。
         radius: ClipRadius,
@@ -2573,7 +2573,7 @@ pub enum ClipShape {
         /// 参考盒（默认 border-box）。
         reference: BackgroundBox,
     },
-    /// ellipse( <rx>? <ry>? at <position>? ) — 椭圆。
+    /// ellipse( `<rx>`? `<ry>`? at `<position>`? ) — 椭圆。
     Ellipse {
         /// 水平半径（缺省 closest-side）。
         rx: ClipRadius,
@@ -2584,7 +2584,7 @@ pub enum ClipShape {
         /// 参考盒（默认 border-box）。
         reference: BackgroundBox,
     },
-    /// polygon( [nonzero|evenodd,]? <x> <y>, ... ) — 多边形（坐标对
+    /// polygon( [nonzero|evenodd,]? `<x>` `<y>`, ... ) — 多边形（坐标对
     /// <3 = 解析整条丢弃）。
     Polygon {
         /// 填充规则（默认 nonzero）。
@@ -2637,11 +2637,11 @@ pub struct Gradient {
 /// 渐变色彩提示（css-images-3；P9-1a ADR-0038）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GradientHint {
-    /// 提示位于该索引停点之前（即 stops[idx-1] 与 stops[idx] 之间）。
+    /// 提示位于该索引停点之前（即 `stops[idx-1]` 与 `stops[idx]` 之间）。
     /// 首停点之前（idx=0）与末停点之后（idx>=stops.len()）语法非法，
     /// 解析期拒绝。
     pub after_stop: usize,
-    /// 提示位置（沿渐变线；文法与停点位置同族 <length-percentage>）。
+    /// 提示位置（沿渐变线；文法与停点位置同族 `<length-percentage>`）。
     pub position: LengthPercentage,
 }
 
@@ -2702,9 +2702,9 @@ pub enum RadialSize {
     FarthestCorner,
     /// 显式半径（circle 一个、ellipse 两个；百分比分别基准宽/高）
     Explicit {
-        /// 水平半径（第一个 <length-percentage>）。
+        /// 水平半径（第一个 `<length-percentage>`）。
         rx: LengthPercentage,
-        /// 垂直半径（第二个 <length-percentage>；缺省 None）。
+        /// 垂直半径（第二个 `<length-percentage>`；缺省 None）。
         ry: Option<LengthPercentage>,
     },
 }
@@ -2722,7 +2722,7 @@ pub struct ColorStop {
 /// 首停缺位=0.0、末停缺位=1.0；中间缺位段在最近已知邻点间**均布**
 /// （span 含段后首个已知停点）；显式位置逆序时逐点抬升至前停位（单调化）。
 /// 输入为各 sink 完成单位归一化（px→沿线分数、%直取，无上下文单位=None）
-/// 并钳制 [0,1] 后的位置序列。
+/// 并钳制 \[0,1\] 后的位置序列。
 pub fn distribute_stop_positions(raw: &[Option<f32>]) -> Vec<f32> {
     let n = raw.len();
     if n == 0 {
@@ -2861,7 +2861,7 @@ fn len_auto_with(p: &mut Parser<'_>, autos: &[&str]) -> ValResult<Option<LengthP
 
 /// content 解析（C1，css-content-3 MVP）：none/normal/字符串字面量。
 /// attr()/url()/counter()/quotes 为 T2——解析期拒绝（调用方按 Dropped
-/// 告警丢弃声明）。P5（ADR-0036 D1）：升级为 <content-list> 序列——
+/// 告警丢弃声明）。P5（ADR-0036 D1）：升级为 `<content-list>` 序列——
 /// `none | normal | [ <string> | counter() | counters() | attr() |
 /// open-quote | close-quote | no-open-quote | no-close-quote ]+`；
 /// url() 仍拒绝（cssparser Token::Url 非函数/串）。
@@ -2988,7 +2988,7 @@ fn parse_content_fn_body(p: &mut Parser<'_>, name: &str) -> ValResult<ContentPie
     }
 }
 
-/// <custom-ident>（counter 名/attr 名；cssparser Token::Ident 直取）。
+/// `<custom-ident>`（counter 名/attr 名；cssparser Token::Ident 直取）。
 fn parse_content_ident(p: &mut Parser<'_>) -> ValResult<String> {
     p.skip_whitespace();
     let t = p.next()?.clone();
@@ -2998,7 +2998,7 @@ fn parse_content_ident(p: &mut Parser<'_>) -> ValResult<String> {
     }
 }
 
-/// <string>（counters 分隔符）。
+/// `<string>`（counters 分隔符）。
 fn parse_content_string(p: &mut Parser<'_>) -> ValResult<String> {
     p.skip_whitespace();
     let t = p.next()?.clone();
@@ -3008,7 +3008,7 @@ fn parse_content_string(p: &mut Parser<'_>) -> ValResult<String> {
     }
 }
 
-/// 可选尾参 <counter-style>（ident；文法名按源文本留存，渲染经
+/// 可选尾参 `<counter-style>`（ident；文法名按源文本留存，渲染经
 /// counter_format 切片：登记表 → 内置 → 未知名 decimal）。前置逗号
 /// 必需：`counter(x, style)`。
 fn parse_content_opt_style(p: &mut Parser<'_>) -> ValResult<Option<String>> {
@@ -3087,17 +3087,17 @@ pub fn parse_len_auto(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     len_auto_with(p, &["auto"]).map(DeclValue::LenAuto)
 }
 
-/// 长度族（<length-percentage>，含 calc）。
+/// 长度族（`<length-percentage>`，含 calc）。
 pub fn parse_len(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_length_percentage(p).map(DeclValue::Len)
 }
 
-/// 裸 <number>（opacity、flex-grow/shrink、aspect-ratio 等数值用途）。
+/// 裸 `<number>`（opacity、flex-grow/shrink、aspect-ratio 等数值用途）。
 pub fn parse_number_value(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_number(p).map(DeclValue::Number)
 }
 
-/// column-count（二期③）：auto → ColumnCount(None)；<integer [1,∞]> →
+/// column-count（二期③）：auto → ColumnCount(None)；`<integer [1,∞]>` →
 /// ColumnCount(Some(n))（0/负/非整数为非法声明 → Err 丢弃）。
 pub fn parse_column_count(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
@@ -3186,7 +3186,7 @@ pub(crate) fn parse_border_style_keywords(p: &mut Parser<'_>) -> ValResult<Borde
     })
 }
 
-/// column-rule-width（三期⑤c）：<length [0,∞]>|thin|medium|thick；关键字
+/// column-rule-width（三期⑤c）：`<length [0,∞]>`|thin|medium|thick；关键字
 /// 物化定值（thin=1/medium=3/thick=5px）。无 none 关键字（与 border-width
 /// 不同——列规的有无由 column-rule-style:none 表达）；负长度的钳制由
 /// 布局侧 max(0) 承担。
@@ -3234,12 +3234,12 @@ pub fn parse_z_index(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_number(p).map(|n| DeclValue::ZIndex(Some(n)))
 }
 
-/// 颜色值（<color>，含 currentcolor；颜色失配时由 lerp 侧处理）。
+/// 颜色值（`<color>`，含 currentcolor；颜色失配时由 lerp 侧处理）。
 pub fn parse_color(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_color_value(p).map(DeclValue::Color)
 }
 
-/// 边框宽：none→0、thin/medium/thick→1/3/5px 物化，或 <length>。
+/// 边框宽：none→0、thin/medium/thick→1/3/5px 物化，或 `<length>`。
 pub fn parse_border_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     // none（配合 style:none 才真正不画）与关键字宽度
     let kw = p.try_parse(|p| -> ValResult<LengthPercentage> {
@@ -3405,7 +3405,7 @@ pub fn parse_outline_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::OutlineStyle)
 }
 
-/// caret-color / accent-color（A1）：`auto | <color>` → Option<ColorValue>
+/// caret-color / accent-color（A1）：`auto | <color>` → `Option<ColorValue>`
 ///（None = auto；初始同型 None）。与背景色 `auto` 语义同 CSS UI 4。
 pub fn parse_caret_color(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_auto_or_color(p).map(DeclValue::CaretColor)
@@ -3677,7 +3677,7 @@ fn parse_filter_opt_angle(p: &mut Parser<'_>) -> ValResult<Option<f32>> {
     }
 }
 
-/// drop-shadow(<length>{2,3} && <color>?)：`&&` 任意序——color 前置或
+/// drop-shadow(`<length>`{2,3} && `<color>`?)：`&&` 任意序——color 前置或
 /// 后置两序均收；2 length = 无模糊，3 length = blur；color 缺省
 /// currentcolor（绘制期 pick_scheme 终结）。
 fn parse_filter_drop_shadow(p: &mut Parser<'_>) -> ValResult<FilterFn> {
@@ -3967,7 +3967,7 @@ pub fn parse_font_style(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::FontStyle)
 }
 
-/// line-height：normal | <number>（无单位倍数）| <length-percentage>。
+/// line-height：normal | `<number>`（无单位倍数）| `<length-percentage>`。
 pub fn parse_line_height(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     // normal | <number> | <length-percentage>（try_parse 失败自动回滚）
     let kw = p.try_parse(|p| -> ValResult<LineHeight> {
@@ -4105,7 +4105,7 @@ pub fn parse_font_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
-/// font-weight：normal→400、bold→700、1–1000 的 <number> 或相对关键字
+/// font-weight：normal→400、bold→700、1–1000 的 `<number>` 或相对关键字
 /// bolder/lighter（css-fonts-4 §2.2.1，物化规则见 [`relative_font_weight`]）。
 pub fn parse_font_weight(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
@@ -4130,7 +4130,7 @@ pub fn parse_font_weight(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     }
 }
 
-/// aspect-ratio: auto | <ratio>（<ratio> = number [/ number]）。
+/// aspect-ratio: auto | `<ratio>`（`<ratio>` = number [/ number]）。
 pub fn parse_aspect_ratio(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let auto = p.try_parse(|p| -> ValResult<()> {
         let t = p.next()?.clone();
@@ -4235,7 +4235,7 @@ fn bracket_open(p: &mut Parser<'_>) -> ValResult<()> {
 }
 
 /// 括号块内线名收集（SquareBracketBlock 内容 → 名表；块内耗尽即止）。
-/// 仅 <custom-ident> 合法（spec §8.3），其余 token = 声明无效。
+/// 仅 `<custom-ident>` 合法（spec §8.3），其余 token = 声明无效。
 fn bracket_names(p: &mut Parser<'_>) -> ValResult<Vec<String>> {
     let mut names = Vec::new();
     loop {
@@ -4318,7 +4318,7 @@ pub(crate) fn validate_area_rows(p: &mut Parser<'_>, rows: &[Vec<String>]) -> Va
 }
 
 /// grid-template-areas（E5，ADR-0020）：引号串行；每行空白分词，
-/// `.` = 空格。校验规则见 [`validate_area_rows`]。
+/// `.` = 空格。校验规则见 `validate_area_rows`。
 pub fn parse_grid_areas(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     loop {
@@ -4373,7 +4373,7 @@ pub(crate) fn parse_track_list_until_slash(p: &mut Parser<'_>) -> ValResult<Grid
 
 /// 简写展开共用（P9-2，ADR-0040）：grid-template 的 areas 形
 ///（css-grid-1 §7.3 `[<line-names>? <string> <track-size>? <line-names>?]+
-/// [/ <explicit-track-list>]?`）。每串一行：逐行空白分词进
+/// [/ `<explicit-track-list>`]?`）。每串一行：逐行空白分词进
 /// grid-template-areas；行轨尺寸缺省 auto；行前线名段+行后线名段合并
 /// 归第 i 槽（后组行前线名并入同槽）。返回 (rows 模板, 可选 columns,
 /// areas 行)。
@@ -4445,13 +4445,13 @@ pub(crate) fn parse_template_areas_form(
 }
 
 /// grid-{row,column}-{start,end}（E5，ADR-0020）：
-/// auto | <integer> | span <integer> | span <ident> | <ident>。
+/// auto | `<integer>` | span `<integer>` | span `<ident>` | `<ident>`。
 ///（0 线号非法；spec 混合形 `<integer> && <ident>` v1 偏差在案。）
 pub fn parse_grid_line_spec(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::GridLine(parse_line_spec_value(p)?))
 }
 
-/// <grid-line> 值解析（不含 DeclValue 包装；简写展开共用）。
+/// `<grid-line>` 值解析（不含 DeclValue 包装；简写展开共用）。
 pub(crate) fn parse_line_spec_value(p: &mut Parser<'_>) -> ValResult<GridLineSpec> {
     let t = p.next()?.clone();
     match &t {
@@ -4486,7 +4486,7 @@ fn parse_track_min(p: &mut Parser<'_>) -> ValResult<TrackSize> {
     parse_track_size(p)
 }
 
-/// 单个 <track-size>：长度优先（try_parse 失败自动回滚），再关键字/函数。
+/// 单个 `<track-size>`：长度优先（try_parse 失败自动回滚），再关键字/函数。
 fn parse_track_size(p: &mut Parser<'_>) -> ValResult<TrackSize> {
     if let Ok(len) = p.try_parse(|p| parse_length_percentage(p)) {
         return Ok(TrackSize::Len(len));
@@ -4904,7 +4904,7 @@ fn parse_lpor_auto(p: &mut Parser<'_>) -> ValResult<LPorAuto> {
     }
 }
 
-/// bg-size 单分量：auto | cover | contain | [<LP> | auto]{1,2}
+/// bg-size 单分量：auto | cover | contain | [`<LP>` | auto]{1,2}
 /// （单值 = 宽给值高 auto）。pub(crate)：background 简写复用（ADR-0024）。
 pub(crate) fn parse_bg_size_one(p: &mut Parser<'_>) -> ValResult<BgSize> {
     // 关键字三项先试（try_parse 失败回滚）。
@@ -4932,7 +4932,7 @@ pub(crate) fn parse_bg_size_one(p: &mut Parser<'_>) -> ValResult<BgSize> {
 }
 
 /// background-size：`<bg-size>#` = auto | cover | contain |
-/// [<length-percentage> | auto]{1,2}（单值 = 宽给值高 auto；F3b ADR-0024）。
+/// [`<length-percentage>` | auto]{1,2}（单值 = 宽给值高 auto；F3b ADR-0024）。
 pub fn parse_background_size(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let mut layers = Vec::new();
     loop {
@@ -5608,7 +5608,7 @@ pub fn parse_clear(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     .map(DeclValue::Clear)
 }
 
-/// object-position 值解析（C3，css-images-3）：两分量 <position> (x, y)。
+/// object-position 值解析（C3，css-images-3）：两分量 `<position>` (x, y)。
 /// 分量文法与 radial `at <position>` 同一（parse_position_component）。
 pub fn parse_object_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let x = parse_position_component(p)?;
@@ -5616,7 +5616,7 @@ pub fn parse_object_position(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::ObjectPosition(x, y))
 }
 
-/// 位置分量：<length-percentage> | left | center | right | top | bottom。
+/// 位置分量：`<length-percentage>` | left | center | right | top | bottom。
 fn parse_position_component(p: &mut Parser<'_>) -> ValResult<LengthPercentage> {
     if let Ok(lp) = p.try_parse(parse_length_percentage) {
         return Ok(lp);
@@ -5794,7 +5794,7 @@ pub fn parse_box_shadow(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 // border-image 源图直接复用 parse_background_image_one（dispatch 与简写
 // 均引用之，无独立别名）。
 
-/// border-image-slice 分量：<number [0,∞]> | <percentage [0,∞]>（负值拒绝）。
+/// border-image-slice 分量：`<number [0,∞]>` | `<percentage [0,∞]>`（负值拒绝）。
 fn parse_bi_slice_comp(p: &mut Parser<'_>) -> ValResult<BorderImageSliceComp> {
     let t = p.next()?.clone();
     match &t {
@@ -5878,7 +5878,7 @@ fn lp_reject_negative(p: &mut Parser<'_>, lp: &LengthPercentage) -> ValResult<()
     }
 }
 
-/// border-image-width 分量：auto | <number [0,∞]> | <length-percentage>。
+/// border-image-width 分量：auto | `<number [0,∞]>` | `<length-percentage>`。
 fn parse_bi_width_comp(p: &mut Parser<'_>) -> ValResult<BorderImageWidthComp> {
     // auto（try_parse 回滚语义，避免预消费后重复 next）
     let auto = p.try_parse(|p| -> ValResult<()> {
@@ -5933,7 +5933,7 @@ pub fn parse_border_image_width(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_bi_width_value(p).map(DeclValue::BorderImageWidth)
 }
 
-/// border-image-outset 分量：<length [0,∞]> | <number [0,∞]>（负拒绝；
+/// border-image-outset 分量：`<length [0,∞]>` | `<number [0,∞]>`（负拒绝；
 /// 百分比非法——spec 仅 length|number；calc 收容）。
 fn parse_bi_outset_comp(p: &mut Parser<'_>) -> ValResult<BorderImageOutsetComp> {
     // <number [0,∞]>
@@ -6026,7 +6026,7 @@ pub fn parse_border_image_repeat(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     parse_bi_repeat_value(p).map(DeclValue::BorderImageRepeat)
 }
 
-/// font-stretch：normal | <percentage [50,200]> | 九关键字（css-fonts-4）。
+/// font-stretch：normal | `<percentage [50,200]>` | 九关键字（css-fonts-4）。
 pub fn parse_font_stretch(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
     match &t {
@@ -6079,7 +6079,7 @@ fn parse_font_stretch_ident(p: &mut Parser<'_>, name: &str) -> ValResult<DeclVal
 }
 
 /// font-feature-settings / font-variation-settings 的 OpenType 特性 tag：
-/// 必须 <string>（css-fonts-4 严格式，Chromium 同拒 ident），恰 4 字符。
+/// 必须 `<string>`（css-fonts-4 严格式，Chromium 同拒 ident），恰 4 字符。
 fn parse_feature_tag(p: &mut Parser<'_>) -> ValResult<[u8; 4]> {
     let t = p.next()?.clone();
     match &t {
@@ -6095,7 +6095,7 @@ fn parse_feature_tag(p: &mut Parser<'_>) -> ValResult<[u8; 4]> {
 }
 
 /// font-feature-settings：`normal | <feature-tag-value>#`，value =
-/// on|off|<integer [0,65535]>（缺省 on=1）。
+/// on|off|`<integer [0,65535]>`（缺省 on=1）。
 pub fn parse_font_features(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let t = p.next()?.clone();
     if let Token::Ident(name) = &t {
@@ -6477,7 +6477,7 @@ pub enum TimingFn {
 }
 
 impl TimingFn {
-    /// 缓动求值：t ∈ [0,1] → 进度 ∈ [0,1]。
+    /// 缓动求值：t ∈ \[0,1\] → 进度 ∈ \[0,1\]。
     pub fn sample(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match self {
@@ -6614,7 +6614,7 @@ pub enum VerticalAlignKind {
     Length(LengthPercentage),
 }
 
-/// vertical-align（P3，ADR-0034 D3）：关键字全族 | <length-percentage>。
+/// vertical-align（P3，ADR-0034 D3）：关键字全族 | `<length-percentage>`。
 pub fn parse_vertical_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     // 关键字先行
     if let Ok(v) = p.try_parse(|p| {
@@ -6637,7 +6637,7 @@ pub fn parse_vertical_align(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::VerticalAlign(VerticalAlignKind::Length(lp)))
 }
 
-/// quotes 值族（P5，ADR-0036 D3）：auto | none | [<string> <string>]#。
+/// quotes 值族（P5，ADR-0036 D3）：auto | none | [`<string>` `<string>`]#。
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum QuotesValue {
@@ -6905,7 +6905,7 @@ fn parse_timing_fn(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::AnimationTimingList(list))
 }
 
-/// <easing-function>（第五批⑰ 文法，G1 transition-timing-function 复用）：
+/// `<easing-function>`（第五批⑰ 文法，G1 transition-timing-function 复用）：
 /// steps(n[, start|end]) 函数形优先，否则 linear/ease 系关键字。
 /// 返回裸 TimingFn（简写/列表解析复用同一入口）。
 pub(crate) fn parse_timing_fn_one(p: &mut Parser<'_>) -> ValResult<TimingFn> {
@@ -7019,7 +7019,7 @@ fn parse_anim_fill_mode(p: &mut Parser<'_>) -> ValResult<DeclValue> {
 
 // ---------- transition（G1，ADR-0032）：五长手解析 ----------
 
-/// transition-property：none | all | <custom-ident>（逗号多组）。
+/// transition-property：none | all | `<custom-ident>`（逗号多组）。
 fn parse_transition_property(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let mut list = SmallVec::new();
     loop {
@@ -7053,7 +7053,7 @@ fn parse_transition_property(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     Ok(DeclValue::TransitionProperty(TransitionPropertyList(list)))
 }
 
-/// transition-duration / transition-delay 共用 <time>#：s/ms → 秒。
+/// transition-duration / transition-delay 共用 `<time>`#：s/ms → 秒。
 /// duration 拒负（t∈[0,∞)）；delay 允负（快进语义）。
 fn parse_transition_time(p: &mut Parser<'_>, allow_negative: bool) -> ValResult<DeclValue> {
     let mut list = SmallVec::new();
@@ -7086,7 +7086,7 @@ fn parse_transition_time(p: &mut Parser<'_>, allow_negative: bool) -> ValResult<
     Ok(DeclValue::TransitionTime(TransitionTimeList(list)))
 }
 
-/// transition-timing-function：<easing-function>#（复用 animation 文法）。
+/// transition-timing-function：`<easing-function>`#（复用 animation 文法）。
 fn parse_transition_timing(p: &mut Parser<'_>) -> ValResult<DeclValue> {
     let mut list = SmallVec::new();
     loop {

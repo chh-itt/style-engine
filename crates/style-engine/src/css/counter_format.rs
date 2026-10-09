@@ -1,7 +1,7 @@
 //! E 计数器样式格式化（css-counter-styles-3 §2 生成算法 + §3 描述符 +
 //! §6 内置样式子集）。
 //!
-//! 入口 [`format_counter_with`]：name + 计数值 + 文档级 @counter-style
+//! 入口 `format_counter_with`：name + 计数值 + 文档级 @counter-style
 //! 登记表（ua → user → 主表 → 附加表合并序，同名后写胜）→ 表示串。
 //! 登记表可整体覆盖内置样式（css-counter-styles-3 §3：predefined 在
 //! UA 表中，任何 author 定义后写胜）。
@@ -44,7 +44,7 @@ const MAX_REP_CODEPOINTS: usize = 60;
 
 /// P9-3（css-lists-3 §3.2 ③）：::marker 内容 = list-item 计数表示 +
 /// prefix + suffix（css-counter-styles-3 §2 注：affixes 仅由 ::marker
-/// 内容算法追加——counter()/counters() 不含，故 [`format_counter_with`]
+/// 内容算法追加——counter()/counters() 不含，故 `format_counter_with`
 /// 不拼接）。`none` → 空串（调用方据以抑制成盒）；未知名按 decimal
 /// 生成（缺省 suffix ". "）。
 pub fn marker_text(name: &str, value: i64, registry: &[CounterStyleRule]) -> String {

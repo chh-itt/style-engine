@@ -46,7 +46,7 @@
 //! # API 冻结策略（C3）
 //!
 //! - 公共枚举全量 `#[non_exhaustive]`（变体集=演进面，宿主 `match` 必带
-//!   通配臂）；结构体按宿主构造面决策——[`StyleNode`](crate::tree::StyleNode)
+//!   通配臂）；结构体按宿主构造面决策——[`StyleNode`]
 //!   等宿主可构造类型保持穷举。
 //! - `#![deny(missing_docs)]`：公共项无文档即编译失败。
 //! - 线程承诺：`StyleEngine`/`Frame`/`ComputedStyle`/`DisplayList` 均

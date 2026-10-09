@@ -334,7 +334,7 @@ pub struct Angle(pub f32);
 pub enum ColorValue {
     /// currentcolor 关键字（继承 color 属性计算值）。
     CurrentColor,
-    /// 绝对颜色（已转 sRGB，分量 [0,1] 编码值）。
+    /// 绝对颜色（已转 sRGB，分量 \[0,1\] 编码值）。
     Absolute(AlphaColor<Srgb>),
     /// MVP 偏差：参数仅存绝对色（currentcolor/嵌套 light-dark 走容错丢弃）。
     LightDark(AlphaColor<Srgb>, AlphaColor<Srgb>),

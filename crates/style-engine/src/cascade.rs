@@ -105,7 +105,7 @@ pub struct CustomCandidate<'a> {
 /// 族需要次名候选回滚）。
 #[derive(Debug, Default)]
 pub struct CascadeOutput<'a> {
-    /// 每属性候选列表（末位不保证是冠军——冠军经 [`cascade_winner`]）。
+    /// 每属性候选列表（末位不保证是冠军——冠军经 `cascade_winner`）。
     pub winners: Vec<(PropertyId, Vec<Candidate<'a>>)>,
     /// 胜出自定义属性候选列表（按名升序）。
     pub custom_winners: Vec<(String, Vec<CustomCandidate<'a>>)>,

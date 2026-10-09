@@ -969,7 +969,7 @@ impl ComputedStyle {
     }
 
     /// mix-blend-mode 计算值（P1-2）：缺席或 normal →
-    /// [`BlendMode::Normal`]。
+    /// `BlendMode::Normal`。
     pub fn mix_blend(&self) -> crate::css::property::BlendMode {
         match self.get(PropertyId::MixBlendMode) {
             Some(crate::css::property::DeclValue::BlendMode(m)) => *m,

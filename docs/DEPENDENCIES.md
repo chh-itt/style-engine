@@ -31,7 +31,7 @@
 vello 0.11.0 的 wgpu 依赖为 `^30`（optional feature `wgpu`）。wgpu 大版本间 semver 不兼容：若 sink/宿主声明与 vello 不同的 wgpu 大版本，应用会同时编译两份 wgpu（或无法统一）。因此：
 
 - sink 与宿主统一使用 vello 传递的 wgpu 30.x，sink crate 显式声明同版本（其测试代码直接使用 wgpu API；**公有 API 不暴露任何 wgpu 类型，无需 re-export**——阶段4 审计修正，此前的 `pub use wgpu` 计划未落地也不再需要）。
-- **P9-8（2026-10-08）升级已执行**：vello 0.10→0.11 + wgpu 29→30（30.0.1）+ naga 29→30。实际 breaking 面与升级前核实一致（仅 wgpu/naga 升 30，vello Scene/Renderer/peniko/kurbo 使用面零变化）：我方代码共 5 处适配——vello sink 2 处（`RequestAdapterOptions` 新字段 `apply_limit_buckets: bool` 填 false=旧默认、`get_mapped_range` 改返回 `Result<BufferView, MapRangeError>` 补 expect/map_err）+ demo main 3 处（同上 adapter 字段、`SurfaceTexture::present()` → `Queue::present(tex)` 消费式、`SurfaceConfiguration` 新字段 `color_space: SurfaceColorSpace` 填 `Auto`=后端按格式选择复现历史行为）+ demo snapshot 示例 2 处（同款）。`SurfaceColorSpace::Auto` 为 #[default] 且文档明言复现历史行为——行为零漂移，conformance 像素腿（WARP）全绿佐证。
+- **P9-8（2026-10-10）升级已执行**：vello 0.10→0.11 + wgpu 29→30（30.0.1）+ naga 29→30。实际 breaking 面与升级前核实一致（仅 wgpu/naga 升 30，vello Scene/Renderer/peniko/kurbo 使用面零变化）：我方代码共 7 处适配——vello sink 2 处（`RequestAdapterOptions` 新字段 `apply_limit_buckets: bool` 填 false=旧默认、`get_mapped_range` 改返回 `Result<BufferView, MapRangeError>` 补 expect/map_err）+ demo main 3 处（同上 adapter 字段、`SurfaceTexture::present()` → `Queue::present(tex)` 消费式、`SurfaceConfiguration` 新字段 `color_space: SurfaceColorSpace` 填 `Auto`=后端按格式选择复现历史行为）+ demo snapshot 示例 2 处（同款）。`SurfaceColorSpace::Auto` 为 #[default] 且文档明言复现历史行为——行为零漂移，conformance 像素腿（WARP）全绿佐证。
 - 重估条件更新：追高 vello 0.12+/wgpu 31 时仍按"一次升级整条 linebender 链"规则执行。
 - winit 0.31-beta 与 wgpu 的对接走 raw-window-handle，不受此影响。
 

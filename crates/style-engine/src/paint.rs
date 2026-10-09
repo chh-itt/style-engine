@@ -170,23 +170,23 @@ fn text_shadows(style: &ComputedStyle, env: &MediaEnv) -> Vec<TextShadowPaint> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FilterEffect {
-    /// blur(<length>)：模糊半径 px（sink 换算 σ = 半径/2，css-filters-1 §3）。
+    /// blur(`<length>`)：模糊半径 px（sink 换算 σ = 半径/2，css-filters-1 §3）。
     Blur(f32),
-    /// brightness(<number-percentage>)：线性乘。
+    /// brightness(`<number-percentage>`)：线性乘。
     Brightness(f32),
-    /// contrast(<number-percentage>)：仿射对比。
+    /// contrast(`<number-percentage>`)：仿射对比。
     Contrast(f32),
-    /// grayscale(<number-percentage>)。
+    /// grayscale(`<number-percentage>`)。
     Grayscale(f32),
-    /// sepia(<number-percentage>)。
+    /// sepia(`<number-percentage>`)。
     Sepia(f32),
-    /// saturate(<number-percentage>)。
+    /// saturate(`<number-percentage>`)。
     Saturate(f32),
-    /// invert(<number-percentage>)。
+    /// invert(`<number-percentage>`)。
     Invert(f32),
-    /// opacity(<number-percentage>)：alpha 缩放。
+    /// opacity(`<number-percentage>`)：alpha 缩放。
     Opacity(f32),
-    /// hue-rotate(<angle>)：度。
+    /// hue-rotate(`<angle>`)：度。
     HueRotate(f32),
     /// drop-shadow：偏移/模糊半径 px + 终结色。
     DropShadow {
@@ -291,13 +291,13 @@ pub enum PaintOp {
         height: f32,
         /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
         radius: [f32; 8],
-        /// 阴影颜色（box-shadow <color>，绝对 sRGBA）。
+        /// 阴影颜色（box-shadow `<color>`，绝对 sRGBA）。
         color: AlphaColor<Srgb>,
-        /// 水平偏移 px（box-shadow <offset-x>，右为正）。
+        /// 水平偏移 px（box-shadow `<offset-x>`，右为正）。
         offset_x: f32,
-        /// 垂直偏移 px（box-shadow <offset-y>，下为正）。
+        /// 垂直偏移 px（box-shadow `<offset-y>`，下为正）。
         offset_y: f32,
-        /// 模糊半径 px（box-shadow <blur-radius>）。
+        /// 模糊半径 px（box-shadow `<blur-radius>`）。
         blur: f32,
         /// 外扩/内缩（px）。
         spread: f32,

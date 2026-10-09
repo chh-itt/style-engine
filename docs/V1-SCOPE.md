@@ -36,7 +36,7 @@ v1.0 = **框架无关 CSS 语义层的行为可信点**：在桌面 GUI 尺度�
   css_margin_collapse 探针锁；perf_gate 四场景余量 ≥2.7×。
 
 ### L3 显示列表与双 sink
-- 中立 DisplayList（21 PaintOp 变体）+ soft 真值参照 sink（纯 std、
+- 中立 DisplayList（20 PaintOp 变体）+ soft 真值参照 sink（纯 std、
   blend 18/18、filter 全函数、逐像素边框）+ vello GPU 投影 sink（上游
   能力边界内的全部消费）；SINK-MATRIX 政策（parity 分级+禁静默忽略
   门禁）。

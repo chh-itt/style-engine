@@ -2456,7 +2456,7 @@ mod tests {
     use style_engine::paint::DisplayList;
     use style_engine::smallvec::smallvec;
 
-    /// 测试辅助：f32 分量 → PaintOp 所用的 AlphaColor<Srgb>。
+    /// 测试辅助：f32 分量 → PaintOp 所用的 `AlphaColor<Srgb>`。
     fn rgba(color: [f32; 4]) -> AlphaColor<Srgb> {
         AlphaColor::new(color)
     }

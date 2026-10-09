@@ -20,7 +20,7 @@ cargo add style-engine style-engine-vello
 use style_engine::{StyleEngine, StyleNode};
 
 let mut engine = StyleEngine::new();
-engine.set_stylesheet(".btn { background-color: #3366cc; padding: 8px 16px; }")?;
+engine.set_stylesheet(".btn { background-color: #3366cc; padding: 8px 16px; }");
 
 // 宿主树镜像：根 1 → 按钮 2（K 为宿主自己的 Copy + Eq + Hash 键）
 engine.insert(None, 1, StyleNode::default())?;

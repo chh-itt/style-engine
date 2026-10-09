@@ -12,12 +12,16 @@
 
 - **发布决策（docs）**：废止早期「不发布 crates.io」约定（契约 C4/C7）——README/BREAKING-POLICY/CHANGELOG 头注同步改写；本 crate 即将发布 crates.io（版本号维持 0.1.0，0.x 语义不变）。
 - **文档数字修正**：README 属性槽位 94→183、calc 槽位 15→17（CalcAxis 实测 17 轴）；INVALIDATION.md styles 缓存槽位 94→183；V1-SCOPE 槽位 180→183（ALL 176 + 7 动画描述符）、简写 36→40；list-style 简写序数「第 37」→「第 40」（FEATURES/CHANGELOG/ADR-0041，ADR-0040 时期口径漏加 font/grid/grid-template 三项所致）。
+- **发布前文档审计修正**：V1-SCOPE「21 PaintOp 变体」→20（paint.rs 实测）；DEPENDENCIES.md P9-8 日期与「适配 5 处」→7 处；CHANGELOG wgpu 30 差分「5 项 API 变化」→「4 项变化 + 1 项沿用确认」、css_images.rs 锁定测试 9 件→10 件（FEATURES 同步）；README 快速上手 `set_stylesheet` 去错误 `?`（返回 ParseReport 非 Result）；补记 P9-1d 工程小修节；Cargo.toml 注释 vello 依赖链 rust-version 1.88→1.89。
+- **rustdoc 告警清零（126→0）**：全仓文档注释清理——CSS 文法 token 包反引号（`<length-percentage>` 等）、区间/下标方括号转义（`\[0,1\]`/`line_names[i]`）、不可解析链接去链接化（私有项、泛型直名）、悬空 code span 修复；`cargo doc --workspace --all-features` 零告警。
+- **CI 修复**：golden-drift job 平台一致性钉定——golden 重生成协议固定为本地 Windows（文本度量 subpixel 步进与 linux fontconfig 整数量化差最大 1.125px 超容差），job `runs-on` 改 `windows-latest`、playwright 去 `--with-deps`、加 `core.autocrlf true` 行尾钉定步。
+- **feature-powerset 修复**：表格 auto 列文本测量依赖 `feature = "text"`——layout-only 组合下退化为仅内缩宽度（`cargo hack --feature-powerset` 曾在 P7 批引入的潜伏破坏，首次推送 CI 暴露）。
 
 ### 1.0 对齐 — 渲染栈升级 vello 0.11 / wgpu 30（P9-8）
 
 - **依赖升级（feat）**：vello 0.10→0.11.0（2026-10-02，唯一 breaking=wgpu/naga 升 30）、wgpu 29→30.0.1、naga 29→30.0.1——升级前核实与实测一致，vello Scene/Renderer/peniko/kurbo 使用面零变化、peniko 维持 ^0.6.1、parley 已在 0.11.1（版本配对铁律：wgpu 跟 vello 锁定走）。MSRV 地板不变（仍 ordered-float 5.5.0 的 1.90 最高）。
 - **适配面（7 处）**：vello sink 2 处（`RequestAdapterOptions.apply_limit_buckets: bool` 新字段填 `false`；`get_mapped_range` 改返回 `Result<BufferView, MapRangeError>`）+ demo main 3 处（同款 adapter 字段、`SurfaceTexture::present()` → `Queue::present(tex)` 消费式、`SurfaceConfiguration.color_space` 新字段填 `SurfaceColorSpace::Auto`=复现历史行为零漂移）+ demo snapshot 示例 2 处（同款）。行为零漂移：conformance 像素腿（WARP）与 blend 探针全绿。
-- **文档**：DEPENDENCIES.md 版本配对节改「已执行」态并记录差分；T7-API-NOTES.md 增 wgpu 30 相对 29 实测差分节（5 项 API 变化）；FEATURES.md 能力性版本表述随 0.11 复核（纯 2D 仿射/无内置高斯不变）。
+- **文档**：DEPENDENCIES.md 版本配对节改「已执行」态并记录差分；T7-API-NOTES.md 增 wgpu 30 相对 29 实测差分节（4 项 API 变化 + 1 项沿用确认）；FEATURES.md 能力性版本表述随 0.11 复核（纯 2D 仿射/无内置高斯不变）。
 
 ### 1.0 对齐 — v1.0 验收基准文档化（P9-6）
 
@@ -63,9 +67,15 @@
 - **相对字重关键字（feat，css-fonts-4 §2.2.1，ADR-0039）**：`font-weight: bolder|lighter` 入文法（旧仅 normal/bold/number，相对关键字整条 IACVT）。`DeclValue::RelativeFontWeight(bool)` 存活至级联物化期，按父计算权重经核心单源 `relative_font_weight` 按规范图表（w<100→400/不变 … 900≤w→不变/700）终结为绝对 `Number`——计算值恒绝对，访问器/过渡/Text 通道零感知；根节点以 400 为基；继承链每层重复解析（子代继承父已解析绝对值）。锁定测试 +4：图表逐行边界、bolder/lighter 链式物化、垃圾值拒绝、UA 语义与 author 覆盖。
 - **UA 表语义修正（fix，行为变化）**：`b, strong { font-weight: bold }` 改为 `bolder`（400 父下等值；h1 内 b 700→900、100 父下 700→400 = 规范正确）。ADR-0033 登记的该 B 级偏差消除。
 
+### 1.0 对齐 — 工程小修（P9-1d）
+
+- **性能（perf）**：`PropertyId::from_css_name` 由线性扫描改静态有序表 + 二分查找——属性名解析热路径 O(n)→O(log n)。
+- **单源化（refactor）**：CSS 宽关键字集合双处重复声明（property_rule.rs 与 counter_style.rs 各自维护）合并为 `css` 模块单一常量。
+- **健壮性（fix）**：`parse_quotes` 去 unreachable，防御性回退替代 panic 路径。
+
 ### 1.0 对齐 — 渐变停点文法补齐与双 sink 均布统一（P9-1a）
 
-- **停点文法（feat，css-images-3/4，ADR-0038）**：色彩提示（`linear-gradient(red, 50%, blue)`）与任意序位置（`25% red`）入文法（旧文法强制色前位置，此类声明整条 IACVT）；css-images-4 双位置（`red 10% 90%`）按同色两停点 desugar。`Gradient` 增 `hints: Vec<GradientHint>`（`after_stop`/`position`），ComputedStyle→PaintOp::Gradient→serde dump/load 全链透传（旧 dump 缺字段经 `#[serde(default)]` 兼容）。解析拒绝：首停点前提示、尾随提示、双位置缺色、单停点。新增锁定测试 9 件（css_images.rs）。
+- **停点文法（feat，css-images-3/4，ADR-0038）**：色彩提示（`linear-gradient(red, 50%, blue)`）与任意序位置（`25% red`）入文法（旧文法强制色前位置，此类声明整条 IACVT）；css-images-4 双位置（`red 10% 90%`）按同色两停点 desugar。`Gradient` 增 `hints: Vec<GradientHint>`（`after_stop`/`position`），ComputedStyle→PaintOp::Gradient→serde dump/load 全链透传（旧 dump 缺字段经 `#[serde(default)]` 兼容）。解析拒绝：首停点前提示、尾随提示、双位置缺色、单停点。新增锁定测试 10 件（css_images.rs）。
 - **均布单源（fix）**：停点缺省位置均布上移核心 `distribute_stop_positions`（首 0 末 1、缺位段邻点间均布、css-images-3 §4.5.2 逆序抬升）；修复 soft sink 旧前向填充把中段无位停点塌缩到前一停位的偏差（red,yellow,blue 曾渲染为黄→蓝、红带消失），vello 删本地重复实现同源接入。soft 均布修复像素锁 + vello 表测试。
 - **色彩提示展开（feat）**：sink 侧经核心共享 `apply_gradient_hints` 把提示展开为「位置=提示点、色=前后停点色中点」的合成停点（css-images-3 提示语义的精确等价形，非近似）；提示位置经邻域 clamp 保单调；em/rem/cq 等无上下文单位提示整体丢弃=线性回退（B·豁免，与 em 停点同约定）。
 - **防御分支统一（fix）**：停点非 Absolute 色两 sink 统一为不透明黑（旧 soft=透明黑、vello=不透明黑相反；引擎契约=绘制发射前 `resolve_color` 已终结全部停点色，该分支为防御路径）。

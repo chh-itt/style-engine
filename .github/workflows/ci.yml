@@ -108,15 +108,25 @@ jobs:
     # 重生成全部 golden，git diff 判漂移——防「本地重生成、仓库滞旧」静默
     # 偏差。playwright 版本与本地重生成环境一致（1.63.0，chromium 内嵌版
     # 随 playwright 钉死 → golden browser_version 确定性一致）。
-    runs-on: ubuntu-latest
+    # 平台必须与 golden 重生成环境一致（Windows）：文本用例的字符步进与
+    # 字形栅格化绑定平台文本栈——linux fontconfig 提示把步进整数量化
+    # （实测 203.125→202、42.390625→43，最大差 1.125px 超出 numeric 0.5px
+    # 容差），PNG 字形 AA 亦逐字节不同；字节等价检查只能钉单一平台，
+    # 引擎侧跨平台一致性由 numeric/pixel 通道的容差预算保证。
+    # 重生成协议 = 本地（Windows）重跑 tools/dump_rects.py 并提交。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - run: pip install playwright==1.63.0
-      - run: playwright install --with-deps chromium
+      - run: playwright install chromium
       - run: python crates/style-engine-conformance/tools/dump_rects.py
+      # 显式钉行尾归一（windows 镜像默认值可能变动）：dump 以文本模式写
+      # CRLF，autocrlf=true 时 clean 过滤归一 LF 后与索引逐字节相等。
+      - name: Pin line-ending normalization
+        run: git config core.autocrlf true
       - name: Fail on golden drift
         run: |
           git diff --exit-code -- crates/style-engine-conformance/cases || {

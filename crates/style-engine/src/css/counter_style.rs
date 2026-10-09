@@ -29,7 +29,7 @@ pub enum CounterStyleSystem {
     Symbolic,
     /// `additive`。
     Additive,
-    /// `fixed <integer>?`（`<integer>` 缺省 = 1——spec: fixed <integer>?
+    /// `fixed <integer>?`（`<integer>` 缺省 = 1——spec: fixed `<integer>`?
     /// 计数起点缺省 1）。
     Fixed(i32),
     /// `extends <counter-style-name>`（名称按源文本原样登记；查询匹配
@@ -238,7 +238,7 @@ fn parse_one_symbol(v: &mut Parser<'_>) -> Option<String> {
 }
 
 /// `system`：`cyclic | numeric | alphabetic | symbolic | additive |
-/// [fixed <integer>?] | [extends <counter-style-name>]`。
+/// [fixed `<integer>`?] | [extends `<counter-style-name>`]`。
 fn parse_system(v: &mut Parser<'_>, out: &mut CounterStyleSystem) -> bool {
     v.skip_whitespace();
     let id = match v.next() {

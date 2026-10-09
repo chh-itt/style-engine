@@ -1,7 +1,7 @@
 //! F3a2（ADR-0023）：DisplayList 可序列化投影（feature = "serde" 门控）。
 //!
-//! PaintOp 全 16 变体的 typed tagged-enum 镜像（serde derive；色=[f32;4]
-//! sRGBA 分量、ImageRes 像素=Vec<u8> 直序列）；枚举值以 canonical 名字符
+//! PaintOp 全 16 变体的 typed tagged-enum 镜像（serde derive；色=\[f32;4\]
+//! sRGBA 分量、ImageRes 像素=`Vec<u8>` 直序列）；枚举值以 canonical 名字符
 //! 串承载（重建=名匹配+缺省回退——non_exhaustive 值族演进的诚实边界：
 //! 未知 op/单位/枚举名降级或跳过，不 panic）。
 //!
@@ -267,7 +267,7 @@ impl BlendModeDump {
     }
 }
 
-/// 滤镜效果投影（P2，ADR-0031 D6）：绘制域 [`FilterEffect`] 的 serde
+/// 滤镜效果投影（P2，ADR-0031 D6）：绘制域 `FilterEffect` 的 serde
 /// 形态（tag = `fn`，kebab-case 函数名与 CSS 文法对应；数值语义同核心）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "fn", rename_all = "kebab-case")]
@@ -813,7 +813,7 @@ pub enum OpDump {
         /// 内阴影。
         inset: bool,
     },
-    /// Image（像素直序列 Vec<u8>）。
+    /// Image（像素直序列 `Vec<u8>`）。
     #[serde(rename = "image")]
     Image {
         /// 盒 x。

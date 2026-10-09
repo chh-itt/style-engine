@@ -75,7 +75,7 @@ pub struct StyleNode {
     /// 预注册的引用名；None = 非替换元素。绘制期按 object-fit/object-position
     /// 适配内容盒；固有尺寸自动注入（未手动 set_leaf_intrinsic 时）。
     pub image: Option<String>,
-    /// 属性表（第五批⑮属性选择器数据源）：宿主供 [attr]/[attr=value] 匹配；
+    /// 属性表（第五批⑮属性选择器数据源）：宿主供 \[attr\]/\[attr=value\] 匹配；
     /// BTreeMap 保证遍历序确定。GUI 树无命名空间、值大小写敏感。
     pub attrs: std::collections::BTreeMap<String, String>,
     /// 富文本 span（T5c）：声明覆盖文本的字节区间 [range.0, range.1)。

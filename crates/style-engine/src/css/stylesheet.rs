@@ -126,7 +126,7 @@ pub struct KeyframesRule {
     pub frames: Vec<Keyframe>,
 }
 
-/// 单帧：offset ∈ [0,1]（from=0、to=1、百分比/100）+ 声明块。
+/// 单帧：offset ∈ \[0,1\]（from=0、to=1、百分比/100）+ 声明块。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keyframe {
     /// 帧位置 0.0–1.0（from=0、to=1、百分比/100）。
@@ -152,7 +152,7 @@ pub struct FontFaceSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FontFaceSourceKind {
-    /// url(...) 引号参数或 <url> 未引号裸 token（原文）。
+    /// url(...) 引号参数或 `<url>` 未引号裸 token（原文）。
     Url(String),
     /// local(...) 本机字体名（ident 序列/引号串，空格拼接）。
     Local(String),
@@ -172,7 +172,7 @@ pub struct FontFaceRule {
     /// font-style 描述符（小写原样："italic"/"oblique"/"oblique 14deg"；
     /// None = 未写 = normal）。
     pub style: Option<String>,
-    /// font-weight 描述符区间 [min,max]（normal=400、bold=700；单值 =
+    /// font-weight 描述符区间 \[min,max\]（normal=400、bold=700；单值 =
     /// 等值区间；None = 未写）。
     pub weight: Option<(f32, f32)>,
     /// font-stretch 描述符归一百分比（50–200；关键字映射、百分比钳制；
@@ -759,7 +759,7 @@ fn parse_colon_value(
     }
 }
 
-/// 媒体查询长度换算（<length> → px：em/rem 按 16px 初始字号；vw/vh 与
+/// 媒体查询长度换算（`<length>` → px：em/rem 按 16px 初始字号；vw/vh 与
 /// 百分比依赖视口（解析期未知）→ 按 0 处理（偏差记录））。
 fn parse_px_len(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
     let lp = parse_length_percentage(p)?;
@@ -776,7 +776,7 @@ fn parse_px_len(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> 
     .ok_or_else(|| p.new_error_for_next_token())
 }
 
-/// `<ratio>`（A7）：<number> | <number> / <number>。
+/// `<ratio>`（A7）：`<number>` | `<number>` / `<number>`。
 fn parse_ratio(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
     let t = p.next()?.clone();
     let Token::Number { value: a, .. } = &t else {
@@ -2522,7 +2522,7 @@ fn parse_font_face_override(v: &mut Parser<'_>, set: impl FnOnce(Option<f32>)) -
     }
 }
 
-/// <urange> 字符文法（css-fonts-4）：`U+XXXX` | `U+XXXX-YYYY` | `U+X??`
+/// `<urange>` 字符文法（css-fonts-4）：`U+XXXX` | `U+XXXX-YYYY` | `U+X??`
 ///（'?' 通配 nibble——单段以 0/F 填充成区间；两段均可含通配）。
 /// 非法 = None。
 fn parse_urange_token(text: &str) -> Option<(u32, u32)> {
@@ -2814,10 +2814,10 @@ pub fn parse_stylesheet_in_layer(source: &str, current_layer: Vec<String>) -> St
 
 // ---------- B2：@supports 求值器 + @import prelude ----------
 
-/// @supports 条件解析期求值：<supports-condition> = <supports-in-parens>
-/// [ and | or <supports-in-parens> ]*（同级运算符不得混用，与浏览器一致）；
-/// <supports-in-parens> = 'not' <…> | '(' <decl 或嵌套条件> ')' |
-/// selector( <选择器> )。求值器 = 构建期静态能力：属性文法试探（自定义
+/// @supports 条件解析期求值：`<supports-condition>` = `<supports-in-parens>`
+/// [ and | or `<supports-in-parens>` ]*（同级运算符不得混用，与浏览器一致）；
+/// `<supports-in-parens>` = 'not' `<…>` | '(' `<decl 或嵌套条件>` ')' |
+/// selector( `<选择器>` )。求值器 = 构建期静态能力：属性文法试探（自定义
 /// 属性恒真）+ 选择器文法试探。None = 条件语法无效。
 fn parse_supports_condition(input: &mut Parser<'_>) -> Option<bool> {
     let mut value = parse_supports_in_parens(input)?;
@@ -2845,7 +2845,7 @@ fn parse_supports_condition(input: &mut Parser<'_>) -> Option<bool> {
     Some(value)
 }
 
-/// <supports-in-parens>：not 前缀 / 括号块 / selector() 函数。
+/// `<supports-in-parens>`：not 前缀 / 括号块 / selector() 函数。
 fn parse_supports_in_parens(input: &mut Parser<'_>) -> Option<bool> {
     input.skip_whitespace();
     let save = input.state();
@@ -2871,8 +2871,8 @@ fn parse_supports_in_parens(input: &mut Parser<'_>) -> Option<bool> {
     }
 }
 
-/// '(' 嵌套块内内容：嵌套条件（not / '(' / 函数）或声明测试（<ident> ':'
-/// <值序列>）。
+/// '(' 嵌套块内内容：嵌套条件（not / '(' / 函数）或声明测试（`<ident>` ':'
+/// `<值序列>`）。
 fn parse_supports_inner(p: &mut Parser<'_>) -> Result<Option<bool>, ParseError<()>> {
     p.skip_whitespace();
     let probe = p.state();
@@ -2936,7 +2936,7 @@ fn capture_remaining_source(p: &mut Parser<'_>) -> String {
 }
 
 /// @import prelude（B2，css-cascade-5 §3）：`@import [ <string> | url() ]
-/// [ layer | layer(<name>) ]? [ supports(<condition>) ]? <media-query>?`。
+/// [ layer | layer(`<name>`) ]? [ supports(`<condition>`) ]? `<media-query>`?`。
 /// 仅消费自身 prelude（不触 ';' 终止符）；语法失败 = Err（调用方告警）。
 fn parse_import_prelude(input: &mut Parser<'_>) -> Result<ImportPrelude, ParseError<()>> {
     input.skip_whitespace();

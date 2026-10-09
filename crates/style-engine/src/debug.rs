@@ -7,7 +7,7 @@
 //! 删通配臂」同一纪律），措辞零重复维护。
 //!
 //! 三视图（ADR-0027 D1）：
-//! 1. [`display_list_dump`] —— DisplayList 树视图（Push/Pop 缩进）；
+//! 1. `display_list_dump` —— DisplayList 树视图（Push/Pop 缩进）；
 //! 2. [`ComputedStyle::debug_dump`](crate::computed::ComputedStyle::debug_dump)
 //!    —— 显式物化槽位 + custom properties（computed.rs，同类内聚）；
 //! 3. [`crate::StyleEngine::layout_tree_dump`] /

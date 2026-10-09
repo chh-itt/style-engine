@@ -49,7 +49,7 @@ impl fmt::Display for DiffClass {
     }
 }
 
-/// manifest [pixel] 预算。
+/// manifest \[pixel\] 预算。
 #[derive(Deserialize, Debug, Clone)]
 pub struct PixelBudget {
     /// 差异像素占画布比例上限（Class 1/2 的池）。
@@ -187,7 +187,7 @@ pub fn classify_components(w: u32, h: u32, mask: &[u8]) -> Vec<Component> {
     out
 }
 
-/// 预算校验（manifest [pixel]）：差异占比 + Class 白名单 + 3–5 零容忍。
+/// 预算校验（manifest \[pixel\]）：差异占比 + Class 白名单 + 3–5 零容忍。
 pub fn check_budget(w: u32, h: u32, mask: &[u8], budget: &PixelBudget) -> PixelReport {
     let canvas = u64::from(w) * u64::from(h);
     let diff_px = mask.iter().filter(|&&m| m == 1).count() as u64;

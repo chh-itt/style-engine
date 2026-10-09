@@ -1367,16 +1367,21 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         while let Some(s) = sub.pop() {
             if let Some(text) = self.tree.node(s).text.clone()
                 && !text.is_empty()
-                && let Some(cs) = self.styles.get(&s).cloned()
+                && let Some(_cs) = self.styles.get(&s).cloned()
             {
-                let owned = self.span_styles.get(&s).cloned().unwrap_or_default();
-                let span_refs: Vec<(u32, u32, &ComputedStyle)> =
-                    owned.iter().map(|(a, b, sc)| (*a, *b, sc)).collect();
-                let (lw, _lh) =
-                    self.text
-                        .measure_rich(&text, &cs, &span_refs, None, &self.map_env());
-                if lw > w {
-                    w = lw;
+                // 文本测量依赖 TextSystem（feature = "text"）；layout-only
+                // 组合下 auto 列退化为仅内缩宽度（无文本语义可测）。
+                #[cfg(feature = "text")]
+                {
+                    let owned = self.span_styles.get(&s).cloned().unwrap_or_default();
+                    let span_refs: Vec<(u32, u32, &ComputedStyle)> =
+                        owned.iter().map(|(a, b, sc)| (*a, *b, sc)).collect();
+                    let (lw, _lh) =
+                        self.text
+                            .measure_rich(&text, &_cs, &span_refs, None, &self.map_env());
+                    if lw > w {
+                        w = lw;
+                    }
                 }
             }
             for g in self.tree.children(s).iter().copied() {
@@ -1657,8 +1662,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
 
     /// ADR-0010：把 overlay 根移入/移出 top-layer（弹窗层）。有效绘制序 =
     /// 文档根 → 非 top overlay（插入序）→ top 层根（进层序）。文档根不可
-    /// 进层（报 [`ContractError::NotOverlayRoot`]）；未知 key 报
-    /// [`ContractError::UnknownNode`]。重复移入幂等。
+    /// 进层（报 `ContractError::NotOverlayRoot`）；未知 key 报
+    /// `ContractError::UnknownNode`。重复移入幂等。
     pub fn set_top_layer(&mut self, key: K, on: bool) -> Result<(), crate::error::ContractError> {
         if Some(key) == self.root_key {
             return Err(crate::error::ContractError::NotOverlayRoot);
@@ -6294,7 +6299,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// 矩形 → 子放置数字线号），挂点 = seed_image_leaves 之后、
     /// compute_layout 之前（无布局依赖 → 无额外重排；每帧幂等 =
     /// restyle 的 map_style 重置放置 + 本 pass 重施）。
-    /// 解析序（<custom-ident>）：区域名 → 全名线 → strip `-start`/`-end`
+    /// 解析序（`<custom-ident>`）：区域名 → 全名线 → strip `-start`/`-end`
     /// 裸名线 → 未知名 = Auto（spec：不存在的名视作 auto）。
     /// v1 边界：线名仅支持模板顶层（repeat 内括号 = 解析失败声明无效）。
     fn apply_grid_placements(&mut self) {
