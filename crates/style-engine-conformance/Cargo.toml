@@ -18,3 +18,6 @@ image = { workspace = true }
 # vello 像素回归（Phase 0 前置⑤）：GPU sink 从未有过像素级保护，先于
 # 一切绘制特性建立；仅测试面消费（wgpu 不进主依赖树）。
 style-engine-vello = { path = "../style-engine-vello" }
+# tiny 像素回归（P10）：第三 sink 与 GPU sink 同级质检——同一 [pixel]
+# 用例集、同一预算放松政策；CPU 确定性渲染，无 GPU 跳过逻辑。
+style-engine-tiny = { path = "../style-engine-tiny" }
