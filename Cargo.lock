@@ -2235,6 +2235,7 @@ dependencies = [
  "serde_json",
  "style-engine",
  "style-engine-soft",
+ "style-engine-tiny",
  "style-engine-vello",
  "toml",
 ]
@@ -2258,6 +2259,17 @@ version = "0.1.0"
 dependencies = [
  "peniko",
  "style-engine",
+]
+
+[[package]]
+name = "style-engine-tiny"
+version = "0.1.0"
+dependencies = [
+ "parley",
+ "skrifa",
+ "style-engine",
+ "style-engine-soft",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -2395,6 +2407,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
+ "png",
  "tiny-skia-path",
 ]
 

@@ -1,0 +1,21 @@
+[package]
+name = "style-engine-tiny"
+description = "tiny-skia CPU paint sink for style-engine display lists: real-blur shadows/filters, full W3C blend set, software text via parley + skrifa."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+style-engine = { path = "../style-engine", version = "0.1.0" }
+# 滤镜/盒模糊基建单一事实源（ADR-0043 D2）：soft 的 filter.rs（滤镜链、
+# effects_pad）与 blur_alpha_u8/blend_pixel 直接复用，防止双实现漂移。
+style-engine-soft = { path = "../style-engine-soft", version = "0.1.0" }
+parley = { workspace = true }
+tiny-skia = { workspace = true }
+skrifa = { workspace = true }
+
+[lints]
+workspace = true

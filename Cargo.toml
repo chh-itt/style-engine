@@ -4,6 +4,7 @@ members = [
     "crates/style-engine",
     "crates/style-engine-vello",
     "crates/style-engine-soft",
+    "crates/style-engine-tiny",
     "crates/style-engine-demo",
     "crates/style-engine-conformance",
 ]
@@ -50,6 +51,10 @@ vello = "0.11.0"
 # wgpu 必须跟随 vello 的锁定走（vello 0.11 = ^30）——版本配对铁律见 docs/DEPENDENCIES.md。
 wgpu = "30.0.1"
 winit = "=0.31.0-beta.3"
+# P10（style-engine-tiny）：CPU 后端——tiny-skia 0.12（BSD-3，resvg 同款
+# 光栅器）+ skrifa 0.44（字形轮廓）。均已在 deny.toml 许可白名单内。
+tiny-skia = "0.12"
+skrifa = "0.44"
 
 # --- 基础设施 ---
 slotmap = "1.1.1"

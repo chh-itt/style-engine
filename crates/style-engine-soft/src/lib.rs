@@ -339,7 +339,11 @@ fn blend_non_separable(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] 
 }
 
 /// 单像素混合合成（css-compositing-1 §5.1 全式；直排 RGBA，返回 4 分量）。
-fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
+///
+/// pub 语义（P10）：soft 是 CPU 合成/滤镜基建的单一事实源，
+/// style-engine-tiny 的 PlusLighter/PlusDarker 组合成（tiny-skia 无该
+/// 两种模式）逐像素复用本函数——公式单源，防双实现漂移。
+pub fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
     let (cb, ab) = (back, back[3]);
     let (cs, a_s) = (src, src[3]);
     let ao = (a_s + ab * (1.0 - a_s)).clamp(0.0, 1.0);
@@ -1698,7 +1702,10 @@ type MaskBound = (f32, f32, f32, f32, [f32; 8]);
 
 /// 三遍盒模糊的盒宽（逼近高斯 σ：单遍均匀盒方差 (w²−1)/12，三遍合计
 /// (w²−1)/4 = σ² → w=√(4σ²+1)，取奇数、下限 1）。
-pub(crate) fn box_width_for_sigma(sigma: f32) -> usize {
+///
+/// pub 语义（P10）：soft 是 CPU 滤镜/模糊基建的单一事实源，
+/// style-engine-tiny 复用本组原语（SINK-MATRIX parity 文化）。
+pub fn box_width_for_sigma(sigma: f32) -> usize {
     if sigma <= 0.0 {
         return 1;
     }
@@ -1710,7 +1717,9 @@ pub(crate) fn box_width_for_sigma(sigma: f32) -> usize {
 /// 累加、`(sum + len/2)/len` 取整——全程整数运算、固定遍历序，逐位
 /// 确定）。边界=钳位延拓（遮罩 pad=⌈3σ⌉，边缘邻域值≈0，钳位影响
 /// 可忽略）。
-pub(crate) fn blur_alpha_u8(mask: &mut [u8], mw: usize, mh: usize, sigma: f32) {
+///
+/// pub 语义（P10）：tiny sink 复用（见 [`box_width_for_sigma`]）。
+pub fn blur_alpha_u8(mask: &mut [u8], mw: usize, mh: usize, sigma: f32) {
     let bw = box_width_for_sigma(sigma);
     if bw <= 1 || mw == 0 || mh == 0 {
         return;
