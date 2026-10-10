@@ -115,18 +115,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: pkg
-      - name: Package dry-run (4 publishable crates, LICENSE in manifest)
+      - name: Package manifest gate (4 publishable crates, LICENSE in manifest)
         run: |
           set -euo pipefail
+          # --list 不做依赖解析（未发布的内部 path 依赖也能打包），校验打
+          # 包清单完整性：LICENSE 必须在场——防「文件漏提交/路径漂移」导
+          # 致发布缺件（crates.io 页面无许可证原文）。
           for c in style-engine style-engine-vello style-engine-soft style-engine-tiny; do
-            cargo package --locked --no-verify -p "$c"
+            cargo package --list --locked --allow-dirty -p "$c" > /dev/null
             for lic in LICENSE-MIT LICENSE-APACHE; do
-              if ! cargo package --list --allow-dirty -p "$c" | grep -q "^${lic}$"; then
+              if ! cargo package --list --locked --allow-dirty -p "$c" | grep -q "^${lic}$"; then
                 echo "::error::$c package manifest is missing ${lic}"
                 exit 1
               fi
             done
           done
+          # 全量打包干跑仅对无内部依赖的根 crate 可行：依赖型 crate 的
+          # path 依赖在打包期被改写为 registry 依赖，对未发布的 crates.io
+          # 解析必败（no matching package named `style-engine`）。重估条件：
+          # 四 crate 首版发布后，将全量干跑扩展到全部四个。
+          cargo package --locked --no-verify -p style-engine
 
   golden-drift:
     # 黄金标准漂移门禁（块 A）：CI 里以钉死版本的 Playwright Chromium 重放
