@@ -185,7 +185,7 @@ struct ClipRect {
     h: f32,
     radius: [f32; 8],
     /// Device→clip-source space mapping (the inverse of the matrix at push time;
-/// singular = always invisible).
+    /// singular = always invisible).
     inv: Option<Mat>,
 }
 
