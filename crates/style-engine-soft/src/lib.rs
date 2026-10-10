@@ -1,31 +1,37 @@
-//! `style-engine-soft` — DisplayList 的纯软件绘制后端（第二 Sink，第五批㉛）。
+//! `style-engine-soft` — the pure-software drawing backend for the
+//! DisplayList (second Sink, batch ㉛).
 //!
-//! 职责：验证 DisplayList 契约的 **sink 无关性**——零 GPU、零第三方依赖
-//! （纯 Rust 标准库软件光栅化），像素确定性可作 CI 级绘制断言的参照实现。
+//! Purpose: to verify the **sink independence** of the DisplayList contract —
+//! zero GPU, zero third-party dependencies (pure Rust standard-library
+//! software rasterization) — with pixel determinism, serving as the
+//! reference implementation for CI-level drawing assertions.
 //!
-//! 合成语义（与 ㉕ 探针实测对齐）：sRGB 编码值直接 src-over（=vello 0.10
-//! 探针时值，0.11 复核零漂移——Rgba8Unorm 路径与 Chromium/CSS 默认一致）；
-//! 渐变停点 sRGB 插值（CSS 默认插值空间）。
+//! Compositing semantics (aligned with the ㉕ probe measurements): sRGB
+//! encoded values go straight through src-over (= the vello 0.10 probe
+//! value, re-verified at zero drift on 0.11 — the Rgba8Unorm path matches
+//! Chromium/CSS defaults); gradient stops interpolate in sRGB (the CSS
+//! default interpolation space).
 //!
-//! ⑦ 转正覆盖矩阵：
+//! ⑦ Promotion coverage matrix:
 //!
-//! | op | 支持 | 备注 |
+//! | op | Support | Notes |
 //! |---|---|---|
-//! | FillRect | ✓ | 椭圆圆角逐像素覆盖测试 |
-//! | Gradient | ✓ | linear（CSS 角度）+ radial（RadialGeom 椭圆）+ conic（ConicGeom 扫角，C3）；停点位置（Px/Percent/None 自动均布，P9-1a 共享核心 `distribute_stop_positions`）+ 色彩提示展开（`apply_gradient_hints`，em/rem/cq 提示无上下文单位丢弃）；停点色仅 Absolute（其余防御性视作不透明黑，与 vello sink 统一） |
-//! | Shadow | ✓ blur 路径 | blur=0：外扩/内缩平移矩形（原路径）；blur>0：真形状遮罩（圆角矩形 out/inset）+ 3×盒模糊≈高斯（σ=blur/2、pad=⌈3σ⌉、整数滑动窗确定性）——仅纯平移矩阵，旋转/缩放回退平移矩形（记录偏差） |
-//! | Image | ✓ | 最近邻采样（缩放无滤波） |
-//! | Border | ✓ P8 | 圆角弧逐像素（css-backgrounds §5.5 缩放 + 内缩内半径孔洞）+ 角域外角→内角对角线二分（方角=vello fill_tri 同法同含界）+ 角域实线（vello 虚线相位穿弧近似，记录）+ 直段 Dashed=3w/3w、Dotted=点径 w 间距 2w（vello 同参）|
-//! | PushClip/PopClip | ✓ | 矩形+圆角裁剪栈（裁剪矩节点随所在变换层） |
-//! | PushClipPath/PopClip | ✓ | 多边形裁剪（nonzero/evenodd 射线法，F3c） |
-//! | PushOpacity/PopOpacity | ✓ | 有界组 alpha（快照回混，ADR-0008；bbox 随变换层） |
-//! | PushBlend/PopBlend | ✓ | 混合组全 18 种模式（快照底 + 清区累积，pop 按模式合成；P1-2，css-compositing-1；plus-lighter/darker=预乘加法惯例） |
-//! | PushScroll/PopScroll | ✓ | 平移折叠进变换矩阵（嵌套累加） |
-//! | PushTransform/PopTransform | ✓ | 逆映射逐像素反解 + 4×4 子采样覆盖；无旋转缩放时走中心采样快路径（与整数盒逐位一致）；斜向边缘为锯齿（无 AA，记录） |
-//! | Text | ✓ 近似 | 最小 TrueType（cmap4/glyf 简单+复合字形）折线扫描线 16 级覆盖；基线 = Chromium 同法（hhea 取整 + 半行距）；无 kerning/GSUB、无合成粗斜体、max_advance 不折行（记录）；span 覆盖消费（P7）；对齐 Center/Right/End 单行偏移消费（P8，parley 同语义：溢出钳起始、无约束宽=不偏移；尾随空白不悬挂记偏差）；text-shadow blur>0=字形+装饰线+span 形状全遮罩真模糊（P8）、blur=0=平移重发 |
+//! | FillRect | ✓ | Per-pixel coverage test with elliptical rounded corners |
+//! | Gradient | ✓ | linear (CSS angle) + radial (RadialGeom ellipse) + conic (ConicGeom sweep angle, C3); stop positions (Px/Percent/None evenly spaced automatically, P9-1a shared core `distribute_stop_positions`) + color hint expansion (`apply_gradient_hints`, em/rem/cq hints with context-free units dropped); stop colors Absolute only (anything else defensively treated as opaque black, unified with the vello sink) |
+//! | Shadow | ✓ blur path | blur=0: outset/inset translated rect (original path); blur>0: true shape mask (rounded-rect out/inset) + 3× box blur ≈ Gaussian (σ=blur/2, pad=⌈3σ⌉, integer sliding-window determinism) — pure-translation matrices only; rotation/scaling falls back to the translated rect (documented deviation) |
+//! | Image | ✓ | Nearest-neighbor sampling (no filtering when scaling) |
+//! | Border | ✓ P8 | Rounded-corner arcs per pixel (css-backgrounds §5.5 scaling + inset inner-radius hole) + corner-region outer→inner diagonal bisection (square corners = vello fill_tri, same method, same boundary inclusion) + corner-region solid line (vello approximates dash phase crossing the arc, documented) + straight segments Dashed=3w/3w, Dotted=dot diameter w with 2w gaps (same parameters as vello) |
+//! | PushClip/PopClip | ✓ | Rect + rounded-corner clip stack (a clip rect follows the transform layer it is pushed under) |
+//! | PushClipPath/PopClip | ✓ | Polygon clipping (nonzero/evenodd ray casting, F3c) |
+//! | PushOpacity/PopOpacity | ✓ | Bounded group alpha (snapshot blended back, ADR-0008; bbox follows the transform layer) |
+//! | PushBlend/PopBlend | ✓ | Blend group with all 18 modes (snapshot backdrop + cleared-region accumulation, composited per mode on pop; P1-2, css-compositing-1; plus-lighter/darker = premultiplied-addition convention) |
+//! | PushScroll/PopScroll | ✓ | Translation folded into the transform matrix (nested accumulation) |
+//! | PushTransform/PopTransform | ✓ | Per-pixel inverse-mapping solve + 4×4 subsampled coverage; center-sampling fast path when there is no rotation/scaling (bit-identical to the integer box); slanted edges are aliased (no AA, documented) |
+//! | Text | ✓ approximate | Minimal TrueType (cmap4/glyf simple + composite glyphs) polygon scanline with 16-level coverage; baseline = Chromium's method (hhea rounding + half leading); no kerning/GSUB, no synthetic bold/italic, max_advance does not wrap (documented); span coverage consumption (P7); Center/Right/End alignment consumed as single-line offsets (P8, parley semantics: overflow clamps to the start, unconstrained width = no offset; trailing whitespace does not hang — recorded deviation); text-shadow blur>0 = true blur of the full glyph + decoration + span-shape coverage mask (P8), blur=0 = translated re-emission |
 //!
-//! 字节零副作用：字体由宿主经 [`FontBank`] 提供（族名 → TTF 字节）；
-//! `render` 不带字体库时跳过 Text（v0 行为）。
+//! Zero side effects from bytes: fonts are provided by the host via
+//! [`FontBank`] (family name → TTF bytes); `render` without a font bank
+//! skips Text (v0 behavior).
 
 // 阶段3 API 冻结：公共项文档强制（C3 契约）。
 #![deny(missing_docs)]
@@ -41,35 +47,38 @@ use style_engine::css::value::{ColorValue, LengthPercentage};
 use style_engine::paint::{ConicGeom, FilterEffect, RadialGeom};
 use style_engine::{AlphaColor, DisplayList, PaintOp, Srgb};
 
-/// 纯软件画布：RGBA8 直 alpha、sRGB 编码值（与 DisplayList 色彩语义一致）。
+/// Pure-software canvas: RGBA8 straight alpha with sRGB encoded values
+/// (matching DisplayList color semantics).
 pub struct SoftCanvas {
-    /// 画布宽度 px。
+    /// Canvas width in px.
     pub width: u32,
-    /// 画布高度 px。
+    /// Canvas height in px.
     pub height: u32,
-    /// 行主序 RGBA8，`pixels.len() == width * height * 4`。
+    /// Row-major RGBA8, `pixels.len() == width * height * 4`.
     pub pixels: Vec<u8>,
 }
 
-/// 宿主字体库（零副作用：TTF 字节由宿主提供；族名 → 字节）。
-/// Text op 的 `font_family` 按声明顺序取首个命中库的 Named 族。
+/// Host font bank (zero side effects: TTF bytes are provided by the host;
+/// family name → bytes). A Text op's `font_family` takes the first Named
+/// family found in the bank, in declaration order.
 #[derive(Default)]
 pub struct FontBank {
     entries: Vec<(String, Vec<u8>)>,
 }
 
 impl FontBank {
-    /// 创建空字体库。
+    /// Creates an empty font bank.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 注册字体：family 名 + 完整字体文件字节（重复 family 后注册者优先）。
+    /// Registers a font: family name + full font file bytes (for duplicate
+    /// families, the later registration wins).
     pub fn add(&mut self, family: &str, data: Vec<u8>) {
         self.entries.push((family.to_string(), data));
     }
 
-    /// 按 family 名取字体文件字节；未注册返回 None。
+    /// Returns the font file bytes for a family name; None if not registered.
     pub fn get(&self, family: &str) -> Option<&[u8]> {
         self.entries
             .iter()
@@ -77,13 +86,13 @@ impl FontBank {
             .map(|(_, data)| data.as_slice())
     }
 
-    /// 是否未注册任何字体。
+    /// Whether no fonts are registered.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }
 
-/// 2D 仿射 [a, b, c, d, e, f]（列向量：x' = a·x + c·y + e）。
+/// 2D affine [a, b, c, d, e, f] (column-vector convention: x' = a·x + c·y + e).
 #[derive(Clone, Copy, Debug)]
 struct Mat {
     a: f32,
@@ -117,7 +126,7 @@ impl Mat {
         }
     }
 
-    /// self ∘ n（先应用 n）——与 paint.rs mul_affine 同块乘。
+    /// self ∘ n (n applied first) — same block multiplication as paint.rs mul_affine.
     fn mul(self, n: Self) -> Self {
         Self {
             a: self.a * n.a + self.c * n.b,
@@ -152,19 +161,20 @@ impl Mat {
     }
 }
 
-/// 多边形裁剪（F3c，ADR-0025）：nonzero winding / evenodd 射线法内含测试；
-/// 设备→源空间映射同 ClipRect（push 时刻矩阵之逆；奇异 = 恒不可见）。
+/// Polygon clipping (F3c, ADR-0025): containment test via nonzero winding /
+/// evenodd ray casting; device→source mapping is the same as ClipRect (the
+/// inverse of the matrix at push time; singular = always invisible).
 struct ClipPoly {
     pts: Vec<(f32, f32)>,
     nonzero: bool,
     inv: Option<Mat>,
 }
 
-/// 活跃裁剪项（PushClip 矩形 / PushClipPath 多边形；单一 LIFO 栈）。
+/// Active clip entry (PushClip rect / PushClipPath polygon; a single LIFO stack).
 enum Clip {
-    /// 矩形+圆角。
+    /// Rect + rounded corners.
     Rect(ClipRect),
-    /// 多边形。
+    /// Polygon.
     Poly(ClipPoly),
 }
 
@@ -174,7 +184,8 @@ struct ClipRect {
     w: f32,
     h: f32,
     radius: [f32; 8],
-    /// 设备→裁剪源空间映射（push 时刻矩阵之逆；奇异 = 恒不可见）。
+    /// Device→clip-source space mapping (the inverse of the matrix at push time;
+/// singular = always invisible).
     inv: Option<Mat>,
 }
 
@@ -187,9 +198,11 @@ struct OpacityLayer {
     h: u32,
 }
 
-/// 混合层（P1-2，css-compositing-1）：push 时刻快照底图，pop 时刻按
-/// [`BlendMode`] 将层内容与底图逐像素合成。全 18 种模式原生实现
-/// （含 vello Mix 枚举没有的 plus-lighter/plus-darker）。
+/// Blend layer (P1-2, css-compositing-1): the backdrop is snapshotted at
+/// push time; at pop time the layer content is composited onto the backdrop
+/// per pixel according to [`BlendMode`]. All 18 modes are implemented
+/// natively (including plus-lighter/plus-darker, absent from vello's Mix
+/// enum).
 struct BlendLayer {
     snapshot: Vec<u8>,
     mode: BlendMode,
@@ -199,9 +212,12 @@ struct BlendLayer {
     h: u32,
 }
 
-/// 滤镜层（P2，ADR-0031 D4）：push 时刻快照底图并清空 **padded** 区域
-/// （bbox 外扩模糊/阴影溢出量）——子树内容累积在透明底；pop 时刻对区域
-/// 内容依序应用效果链后与快照 src-over 合成（filter 输出叠在背后画布上）。
+/// Filter layer (P2, ADR-0031 D4): the backdrop is snapshotted at push time
+/// and the **padded** region is cleared (bbox outset by the blur/shadow
+/// overflow) — subtree content accumulates on a transparent base; at pop
+/// time the effect chain is applied to the region content in order, then
+/// composited src-over onto the snapshot (the filter output is layered on
+/// top of the canvas behind it).
 struct FilterLayer {
     snapshot: Vec<u8>,
     filters: Vec<FilterEffect>,
@@ -213,7 +229,7 @@ struct FilterLayer {
 
 // ===== 混合模式数学（css-compositing-1 §4；直排 sRGB RGBA，分量 [0,1]）=====
 
-/// 逐通道可分离混合函数 B(Cb,Cs)。
+/// Per-channel separable blend function B(Cb,Cs).
 fn blend_separable(mode: BlendMode, cb: f32, cs: f32) -> f32 {
     match mode {
         BlendMode::Multiply => cb * cs,
@@ -274,12 +290,12 @@ fn blend_separable(mode: BlendMode, cb: f32, cs: f32) -> f32 {
     }
 }
 
-/// 亮度（W3C 系数）。
+/// Luminance (W3C coefficients).
 fn blend_lum(c: [f32; 3]) -> f32 {
     0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
 }
 
-/// 夹取 RGB 到单位立方（沿亮度线投影）。
+/// Clamps RGB into the unit cube (projected along the luminance line).
 fn blend_clip_color(mut c: [f32; 3]) -> [f32; 3] {
     let l = blend_lum(c);
     let n = c[0].min(c[1]).min(c[2]);
@@ -297,7 +313,7 @@ fn blend_clip_color(mut c: [f32; 3]) -> [f32; 3] {
     c
 }
 
-/// 设定亮度。
+/// Sets the luminance.
 fn blend_set_lum(mut c: [f32; 3], l: f32) -> [f32; 3] {
     let d = l - blend_lum(c);
     for v in &mut c {
@@ -306,12 +322,12 @@ fn blend_set_lum(mut c: [f32; 3], l: f32) -> [f32; 3] {
     blend_clip_color(c)
 }
 
-/// 饱和度 = max − min。
+/// Saturation = max − min.
 fn blend_sat(c: [f32; 3]) -> f32 {
     c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
 }
 
-/// 设定饱和度（max/mid/min 通道重标定）。
+/// Sets the saturation (rescales the max/mid/min channels).
 fn blend_set_sat(mut c: [f32; 3], s: f32) -> [f32; 3] {
     let mut idx = [0usize, 1, 2];
     idx.sort_by(|&a, &b| c[a].total_cmp(&c[b]));
@@ -327,7 +343,7 @@ fn blend_set_sat(mut c: [f32; 3], s: f32) -> [f32; 3] {
     c
 }
 
-/// 非可分离混合函数 B(Cb,Cs)（Hue/Saturation/Color/Luminosity）。
+/// Non-separable blend function B(Cb,Cs) (Hue/Saturation/Color/Luminosity).
 fn blend_non_separable(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     match mode {
         BlendMode::Hue => blend_set_lum(blend_set_sat(cs, blend_sat(cb)), blend_lum(cb)),
@@ -338,11 +354,14 @@ fn blend_non_separable(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] 
     }
 }
 
-/// 单像素混合合成（css-compositing-1 §5.1 全式；直排 RGBA，返回 4 分量）。
+/// Single-pixel blend compositing (full formula from css-compositing-1
+/// §5.1; straight RGBA in, 4 components out).
 ///
-/// pub 语义（P10）：soft 是 CPU 合成/滤镜基建的单一事实源，
-/// style-engine-tiny 的 PlusLighter/PlusDarker 组合成（tiny-skia 无该
-/// 两种模式）逐像素复用本函数——公式单源，防双实现漂移。
+/// Why `pub` (P10): soft is the single source of truth for CPU
+/// compositing/filter infrastructure; style-engine-tiny's PlusLighter/
+/// PlusDarker group compositing (tiny-skia lacks both modes) reuses this
+/// function per pixel — one formula source, guarding against drift between
+/// dual implementations.
 pub fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
     let (cb, ab) = (back, back[3]);
     let (cs, a_s) = (src, src[3]);
@@ -398,16 +417,17 @@ pub fn blend_pixel(mode: BlendMode, back: [f32; 4], src: [f32; 4]) -> [f32; 4] {
     }
 }
 
-/// 4×4 子采样偏移（像素内 16 点网格中心）。
+/// 4×4 subsample offsets (centers of a 16-point grid within a pixel).
 const SUBS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
 
-/// 将绘制清单光栅化到 `width×height` 画布（`base` 为初始底色；无字体库，
-/// Text op 跳过——与 v0 行为一致）。
+/// Rasterizes the paint list onto a `width×height` canvas (`base` is the
+/// initial backdrop; with no font bank, Text ops are skipped — matching the
+/// v0 behavior).
 pub fn render(list: &DisplayList, width: u32, height: u32, base: [u8; 4]) -> SoftCanvas {
     render_with_fonts(list, width, height, base, &FontBank::new())
 }
 
-/// 光栅化（带宿主字体库）：Text op 经 [`FontBank`] 取字形。
+/// Rasterization (with a host font bank): Text ops fetch glyphs via [`FontBank`].
 pub fn render_with_fonts(
     list: &DisplayList,
     width: u32,
@@ -445,8 +465,9 @@ pub fn render_with_fonts(
     canvas
 }
 
-/// 画布区域拷贝（行主序 RGBA，越界行/列钳制画布）——滤镜层提取与
-/// backdrop 采样共用。
+/// Copies a canvas region (row-major RGBA; out-of-range rows/columns are
+/// clamped to the canvas) — shared by filter-layer extraction and backdrop
+/// sampling.
 fn region_copy(canvas: &SoftCanvas, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
     let cw = canvas.width as usize;
     let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
@@ -1323,12 +1344,13 @@ fn apply_op(
     }
 }
 
-/// AlphaColor 分量 → (r, g, b, a) f32 元组。
+/// AlphaColor components → the (r, g, b, a) f32 tuple.
 fn components_of_color(c: [f32; 4]) -> [f32; 4] {
     c
 }
 
-/// 椭圆圆角覆盖测试：像素位于某角方内时按归一椭圆距离判定。
+/// Elliptical rounded-corner coverage test: when a pixel falls inside a
+/// corner square, decide by the normalized ellipse distance.
 fn corner_ok(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> bool {
     let corners = [
         (
@@ -1370,14 +1392,15 @@ fn corner_ok(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> 
     true
 }
 
-/// 源空间矩形内含测试（含圆角）。
+/// Source-space rectangle containment test (rounded corners included).
 fn src_inside(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> bool {
     px >= x && px < x + w && py >= y && py < y + h && corner_ok(px, py, x, y, w, h, r)
 }
 
-/// P8 边框：css-backgrounds §5.5 角半径缩放系数——相邻角半径之和超出
-/// 边长时全角缩放 f = min(Li/Si)（仅 Si > Li 参与；f ∈ (0,1]，和为零或
-/// 不超边则不缩放）。
+/// P8 border: css-backgrounds §5.5 corner-radius scaling factor — when the
+/// sum of adjacent corner radii exceeds an edge length, all corners scale by
+/// f = min(Li/Si) (only Si > Li participates; f ∈ (0,1]; no scaling when a
+/// sum is zero or within the edge).
 fn border_radius_scale(w: f32, h: f32, r: &[f32; 8]) -> f32 {
     let mut f = 1.0f32;
     for (len, sum) in [
@@ -1393,11 +1416,16 @@ fn border_radius_scale(w: f32, h: f32, r: &[f32; 8]) -> f32 {
     f
 }
 
-/// P8 边框：角域/直段分类。角域（TL→TR→BR/BL 先者优先——盒小于角方的
-/// 退化重叠按序单归属，vello 同形叠绘不同）内按外角→内角对角线二分，
-/// 含界归 owner（vello fill_tri owner 三角含对角边同法）；角域外为四直
-/// 段互补划分（上下先行仅可达于角域未覆盖处）。返回 (边序, 角序)：
-/// top/right/bottom/left = 0..3，角 TL/TR/BR/BL = 0..3。
+/// P8 border: corner-region/straight-segment classification. Within a
+/// corner region (TL→TR→BR/BL first-wins priority — degenerate overlap when
+/// the box is smaller than a corner square belongs to a single owner by
+/// order, unlike vello's same-shape layered painting) the outer→inner
+/// diagonal bisects, boundary-inclusive toward the owner (same method as the
+/// vello fill_tri owner triangle including its diagonal edge); outside the
+/// corner regions the four straight segments partition the rest
+/// complementarily (top/bottom checked first, reachable only where corner
+/// regions did not cover). Returns (edge index, corner index):
+/// top/right/bottom/left = 0..3, corners TL/TR/BR/BL = 0..3.
 #[allow(clippy::too_many_arguments)]
 fn border_classify(
     sx: f32,
@@ -1444,9 +1472,10 @@ fn border_classify(
     }
 }
 
-/// 源空间多边形内含测试（F3c ADR-0025；nonzero = 环数 ≠ 0，evenodd =
-/// 射线穿越奇偶；半开边规则 yi ≤ py < yj 仅计上穿，顶点重合不双计；
-/// <3 顶点 = 空区域恒不可见）。
+/// Source-space polygon containment test (F3c ADR-0025; nonzero = winding
+/// number ≠ 0, evenodd = ray-crossing parity; the half-open edge rule
+/// yi ≤ py < yj counts only upward crossings so coincident vertices are not
+/// double-counted; <3 vertices = empty region, always invisible).
 fn poly_inside(px: f32, py: f32, pts: &[(f32, f32)], nonzero: bool) -> bool {
     let n = pts.len();
     if n < 3 {
@@ -1493,7 +1522,8 @@ fn clips_ok(clips: &[Clip], px: f32, py: f32) -> bool {
     clips.iter().all(|c| clip_ok(px, py, c))
 }
 
-/// sRGB 编码值直接 src-over（㉕ 实测语义；alpha 直 alpha 合成）。
+/// sRGB encoded values straight through src-over (measured semantics from
+/// probe ㉕; straight-alpha compositing).
 fn blend(dst: &mut [u8], src: [f32; 4]) {
     let a = src[3].clamp(0.0, 1.0);
     for i in 0..3 {
@@ -1505,9 +1535,12 @@ fn blend(dst: &mut [u8], src: [f32; 4]) {
     dst[3] = ((a + da * (1.0 - a)) * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
-/// 矩形区域逐像素填充（源空间几何 + 矩阵逆映射到设备；像素光栅器签名
-/// 天然多参——圆角/裁剪/取色闭包）。无旋转缩放（a=d=1, b=c=0）走单中心
-/// 采样快路径（与整数盒逐位一致）；否则 4×4 子采样累积覆盖做边缘近似。
+/// Per-pixel fill of a rectangular region (source-space geometry +
+/// matrix inverse-mapped to device; the pixel-rasterizer signature naturally
+/// carries extra parameters — rounded corners/clips/color closure). With no
+/// rotation or scaling (a=d=1, b=c=0) a single center-sample fast path is
+/// taken (bit-identical to the integer box); otherwise 4×4 subsampling
+/// accumulates coverage as an edge approximation.
 #[allow(clippy::too_many_arguments)]
 fn fill_rect(
     canvas: &mut SoftCanvas,
@@ -1582,7 +1615,8 @@ fn fill_rect(
     }
 }
 
-/// 字形折线扫描线填充（设备空间折线 + 4×4 子行 16 级覆盖；非零环绕）。
+/// Glyph polyline scanline fill (device-space polylines + 4×4 sub-rows with
+/// 16-level coverage; nonzero winding).
 fn fill_polygons(
     canvas: &mut SoftCanvas,
     clips: &[Clip],
@@ -1672,7 +1706,8 @@ fn fill_polygons(
     }
 }
 
-/// 半开区间 [xa, xb) 的覆盖累加（每子行权重 0.25）。
+/// Coverage accumulation over the half-open interval [xa, xb) (weight 0.25
+/// per sub-row).
 fn add_span(cov: &mut [f32], base_x: f32, xa: f32, xb: f32) {
     if xb <= xa {
         return;
@@ -1693,18 +1728,23 @@ fn add_span(cov: &mut [f32], base_x: f32, xa: f32, xb: f32) {
 
 // ===== P1c：真 blur 基建（形状 alpha 遮罩 + 3×可分离盒模糊）=====
 
-/// 字形组：每字符一组轮廓（保持逐字符 fill_polygons 粒度）。
+/// Glyph group: one set of outlines per character (preserves the
+/// per-character fill_polygons granularity).
 type GlyphGroups = Vec<([f32; 4], Vec<Vec<(f32, f32)>>)>;
-/// 装饰线组：附色矩形折线（填充序=原实现）。
+/// Decoration group: color-tagged rectangle polylines (fill order = original
+/// implementation).
 type DecoGroups = Vec<([f32; 4], Vec<(f32, f32)>)>;
-/// 遮罩合成的额外钳位域（inset=盒矩形 x/y/w/h + 圆角）。
+/// Extra clamp domain for mask compositing (inset = the box rect x/y/w/h +
+/// corner radii).
 type MaskBound = (f32, f32, f32, f32, [f32; 8]);
 
-/// 三遍盒模糊的盒宽（逼近高斯 σ：单遍均匀盒方差 (w²−1)/12，三遍合计
-/// (w²−1)/4 = σ² → w=√(4σ²+1)，取奇数、下限 1）。
+/// Box width for the 3-pass box blur (approximating a Gaussian σ: one pass
+/// of a uniform box has variance (w²−1)/12, three passes total (w²−1)/4 =
+/// σ² → w=√(4σ²+1), rounded to an odd value with a floor of 1).
 ///
-/// pub 语义（P10）：soft 是 CPU 滤镜/模糊基建的单一事实源，
-/// style-engine-tiny 复用本组原语（SINK-MATRIX parity 文化）。
+/// Why `pub` (P10): soft is the single source of truth for CPU filter/blur
+/// infrastructure; style-engine-tiny reuses this primitive set (the
+/// SINK-MATRIX parity culture).
 pub fn box_width_for_sigma(sigma: f32) -> usize {
     if sigma <= 0.0 {
         return 1;
@@ -1713,12 +1753,14 @@ pub fn box_width_for_sigma(sigma: f32) -> usize {
     (w.max(1) as usize) | 1
 }
 
-/// u8 alpha 遮罩 3×可分离盒模糊（水平/垂直交替三遍；逐像素窗口 u32
-/// 累加、`(sum + len/2)/len` 取整——全程整数运算、固定遍历序，逐位
-/// 确定）。边界=钳位延拓（遮罩 pad=⌈3σ⌉，边缘邻域值≈0，钳位影响
-/// 可忽略）。
+/// 3× separable box blur over a u8 alpha mask (three alternating
+/// horizontal/vertical passes; per-pixel window accumulated in u32 and
+/// rounded via `(sum + len/2)/len` — integer arithmetic throughout with a
+/// fixed traversal order, bit-deterministic). Edges use clamped extension
+/// (the mask pad is ⌈3σ⌉ so edge-neighborhood values are ≈0 and clamping
+/// has negligible effect).
 ///
-/// pub 语义（P10）：tiny sink 复用（见 [`box_width_for_sigma`]）。
+/// Why `pub` (P10): the tiny sink reuses this (see [`box_width_for_sigma`]).
 pub fn blur_alpha_u8(mask: &mut [u8], mw: usize, mh: usize, sigma: f32) {
     let bw = box_width_for_sigma(sigma);
     if bw <= 1 || mw == 0 || mh == 0 {
@@ -1753,8 +1795,9 @@ pub fn blur_alpha_u8(mask: &mut [u8], mw: usize, mh: usize, sigma: f32) {
     }
 }
 
-/// 设备空间圆角矩形 → u8 遮罩（像素中心采样；`clear=true` 时矩形内
-/// 清零——inset 内影的"洞"，否则矩形内置 255）。
+/// Device-space rounded rect → u8 mask (pixel-center sampling; with
+/// `clear=true` the rectangle interior is zeroed — the "hole" of an inset
+/// inner shadow — otherwise the interior is set to 255).
 #[allow(clippy::too_many_arguments)]
 fn mask_rect(
     mask: &mut [u8],
@@ -1781,9 +1824,10 @@ fn mask_rect(
     }
 }
 
-/// 字形折线 → u8 遮罩（与 [`fill_polygons`] 同扫描线算法：4×4 子行
-/// 16 级覆盖、nonzero 环绕；写入取 max——重叠字形不叠加）。区域以
-/// 遮罩缓冲为界（设备坐标 (ox, oy) 起，尺寸 mw×mh）。
+/// Glyph polylines → u8 mask (same scanline algorithm as [`fill_polygons`]:
+/// 4×4 sub-rows with 16-level coverage, nonzero winding; writes take the
+/// max — overlapping glyphs do not accumulate). The region is bounded by the
+/// mask buffer (starting at device coords (ox, oy), size mw×mh).
 fn fill_polygons_mask(
     mask: &mut [u8],
     mw: i64,
@@ -1874,8 +1918,9 @@ fn fill_polygons_mask(
     }
 }
 
-/// 遮罩着色合成：`alpha = color.a × mask/255`，逐像素 src-over；clips
-/// 之外或 `bound`（inset=盒矩形，含圆角）之外跳过。
+/// Mask tinting composite: `alpha = color.a × mask/255`, per-pixel
+/// src-over; pixels outside `clips` or outside `bound` (inset = the box
+/// rect, corners included) are skipped.
 #[allow(clippy::too_many_arguments)]
 fn composite_mask(
     canvas: &mut SoftCanvas,
@@ -1917,11 +1962,14 @@ fn composite_mask(
     }
 }
 
-/// 真模糊盒阴影（P1c）：设备空间形状 alpha 遮罩 + [`blur_alpha_u8`]
-/// （σ=blur/2）+ [`composite_mask`]。outset=外扩 spread 的圆角矩形
-/// （圆角随 spread 增缩、钳半宽防退化椭圆）；inset=盒内减平移扩展
-/// 矩形（合成期钳回盒内）。遮罩区域=形状盒 ± ⌈3σ⌉ ∩ 画布。仅纯
-/// 平移矩阵调用（旋转/缩放回退平移矩形近似——模块表记录偏差）。
+/// True-blur box shadow (P1c): a device-space shape alpha mask +
+/// [`blur_alpha_u8`] (σ=blur/2) + [`composite_mask`]. outset = the rounded
+/// rect outset by spread (corners grow/shrink with spread, half-widths
+/// clamped to avoid a degenerate ellipse); inset = the box shrunk by the
+/// translated expanded rect (clamped back into the box at composite time).
+/// Mask region = the shape box ± ⌈3σ⌉ ∩ canvas. Called only with pure
+/// translation matrices (rotation/scaling falls back to the translated-rect
+/// approximation — deviation recorded in the module table).
 #[allow(clippy::too_many_arguments)]
 fn draw_blurred_shadow(
     canvas: &mut SoftCanvas,
@@ -2038,10 +2086,12 @@ fn draw_blurred_shadow(
     composite_mask(canvas, clips, &mask, mw as i64, mx0, my0, color, bound);
 }
 
-/// text-shadow blur>0：字形+装饰线+span 形状覆盖折线 → 遮罩
-/// （[`fill_polygons_mask`]）→ [`blur_alpha_u8`]（σ=blur/2）→ 着色合成。
-/// P8：装饰线与 span 形状覆盖均投影（原「装饰线不投影」改为全形状投
-/// 影——与 blur=0 平移重发路径一致）；offset 已由调用方计入 x/y。
+/// text-shadow blur>0: glyph + decoration + span-shape coverage polylines →
+/// mask ([`fill_polygons_mask`]) → [`blur_alpha_u8`] (σ=blur/2) → tinted
+/// composite. P8: both decoration and span shape coverage are projected
+/// (the original "decorations are not projected" became full-shape
+/// projection — consistent with the blur=0 translated re-emission path);
+/// the offset has already been folded into x/y by the caller.
 #[allow(clippy::too_many_arguments)]
 fn draw_text_shadow_blur(
     canvas: &mut SoftCanvas,
@@ -2117,12 +2167,15 @@ fn draw_text_shadow_blur(
     composite_mask(canvas, clips, &mask, mw as i64, mx0, my0, color, None);
 }
 
-/// Text 设备空间折线提取：字形（每字符一组轮廓——保持原逐字符
-/// fill_polygons 粒度，重叠字形逐次 src-over）+ 装饰线矩形（附色，
-/// 填充序与原实现一致）。字体未命中 → 空组。供 [`draw_text`] 与
-/// [`draw_text_shadow_blur`] 共用（P1c 重构，光栅输出逐位不变）。
-/// 第三返回值 = 行宽（末 pen − x；span 字号/字距覆盖感知——P8 对齐
-/// 测量与绘制同源，避免重复步进逻辑）。
+/// Text device-space polyline extraction: glyphs (one outline set per
+/// character — preserving the original per-character fill_polygons
+/// granularity, overlapping glyphs composited src-over one at a time) +
+/// decoration rectangles (color-tagged, fill order matches the original
+/// implementation). Font miss → empty groups. Shared by [`draw_text`] and
+/// [`draw_text_shadow_blur`] (P1c refactor, raster output bit-identical).
+/// The third return value is the line width (last pen − x; aware of span
+/// font-size/letter-spacing overrides — P8 alignment measures from the same
+/// source as drawing, avoiding duplicated stepping logic).
 #[allow(clippy::too_many_arguments)]
 fn text_device_polys(
     mat: Mat,
@@ -2320,12 +2373,15 @@ fn text_device_polys(
     (glyph_groups, deco_groups, pen - x)
 }
 
-/// Text op 光栅化：家族命中 [`FontBank`] → 最小 TrueType → 折线 → 扫描线。
-/// 基线与 Chromium 同法：hhea asc/desc 取整，行盒内半行距居中；
-/// normal（None）= round(asc)+round(desc)（与引擎 ㉔ 同式）。
-/// F3d（ADR-0026 D5）：font-stretch 伪合成（字形轮廓与步进同比 x 向
-/// 缩放 fw=stretch/100——DejaVu 无 width 轴，B 级在案）；
-/// word-spacing = 每空格字形后追加像素；features/variations 无消费点。
+/// Text op rasterization: family hit in [`FontBank`] → minimal TrueType →
+/// polylines → scanline. Baseline follows Chromium's method: hhea asc/desc
+/// rounded, half-leading centered within the line box;
+/// normal (None) = round(asc)+round(desc) (same formula as engine ㉔).
+/// F3d (ADR-0026 D5): font-stretch pseudo-synthesis (glyph outlines and
+/// stepping scaled in x by the same ratio fw=stretch/100 — DejaVu has no
+/// width axis, Tier B, documented in FEATURES.md);
+/// word-spacing = extra pixels appended after each space glyph;
+/// features/variations have no consumption point.
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
     canvas: &mut SoftCanvas,
@@ -2369,10 +2425,13 @@ fn draw_text(
     }
 }
 
-/// 渐变停点：位置 Px（沿渐变线 px）/Percent（线长分数）直接解析，
-/// 其余与 None 交核心共享均布算法（`distribute_stop_positions`，
-/// P9-1a：首 0 末 1、缺位段邻点间均布、逆序单调化——修复旧前向填充
-/// 把中间无位停点塌缩到前一停位的偏差）。
+/// Gradient stops: positions Px (px along the gradient line) / Percent
+/// (fraction of the line length) parse directly; the rest, together with
+/// None, go through the shared core even-spacing algorithm
+/// (`distribute_stop_positions`, P9-1a: first 0, last 1, positionless runs
+/// evenly spaced between neighbors, monotonicized in reverse — fixing the
+/// old forward-fill deviation that collapsed intermediate positionless
+/// stops onto the previous stop).
 fn stop_positions(stops: &[ColorStop], line_len: f32) -> Vec<f32> {
     let raw: Vec<Option<f32>> = stops
         .iter()
@@ -2389,13 +2448,17 @@ fn stop_positions(stops: &[ColorStop], line_len: f32) -> Vec<f32> {
     style_engine::css::property::distribute_stop_positions(&raw)
 }
 
-/// 停点采样表（P9-1a）：停点 → (归一 offset, sRGBA)，随后展开色彩提示
-/// （css-images-3：提示 = 前后停点色中点合成停点，核心共享
-/// `apply_gradient_hints`；线性近似曲线，偏差在案 SINK-MATRIX）。
-/// 提示位置归一化：Percent 直取、Px/线长；em/rem/cq 等 sink 无上下文
-/// 单位整体丢弃提示（线性 = 无提示行为）。非 Absolute 停点色视为
-/// 不透明黑（与 vello sink 一致；引擎契约=绘制期已终结 Absolute，
-/// 本分支为防御路径）。
+/// Gradient stop sample table (P9-1a): stops → (normalized offset, sRGBA),
+/// then color hints are expanded (css-images-3: a hint = a synthetic stop at
+/// the midpoint of the surrounding stop colors, shared core
+/// `apply_gradient_hints`; curves approximated linearly, deviation
+/// documented in SINK-MATRIX).
+/// Hint position normalization: Percent taken directly, Px divided by the
+/// line length; em/rem/cq and other units with no sink context drop the
+/// hint entirely (linear = hint-free behavior). Non-Absolute stop colors
+/// are treated as opaque black (consistent with the vello sink; the engine
+/// contract terminates to Absolute by paint time, so this branch is a
+/// defensive path).
 fn build_stop_table(
     stops: &[ColorStop],
     hints: &[GradientHint],
@@ -2432,7 +2495,8 @@ fn build_stop_table(
         .collect()
 }
 
-/// t 处采样表颜色（sRGB 分段线性插值；t 越界夹取端点色）。
+/// Samples the table color at t (piecewise-linear interpolation in sRGB; t
+/// out of range clamps to the endpoint colors).
 fn sample_table(table: &[(f32, [f32; 4])], t: f32) -> [f32; 4] {
     if table.is_empty() {
         return [0.0, 0.0, 0.0, 0.0];
@@ -2465,7 +2529,7 @@ mod tests {
     use style_engine::paint::DisplayList;
     use style_engine::smallvec::smallvec;
 
-    /// 测试辅助：f32 分量 → PaintOp 所用的 `AlphaColor<Srgb>`。
+    /// Test helper: f32 components → the `AlphaColor<Srgb>` used by PaintOp.
     fn rgba(color: [f32; 4]) -> AlphaColor<Srgb> {
         AlphaColor::new(color)
     }
@@ -2512,7 +2576,7 @@ mod tests {
         }
     }
 
-    /// DejaVu Sans（demo 资产，与 conformance 用例同源字节）。
+    /// DejaVu Sans (demo asset, same bytes as the conformance cases).
     const TEST_FONT: &[u8] = include_bytes!("../../style-engine-demo/assets/fonts/DejaVuSans.ttf");
 
     fn font_bank() -> FontBank {
@@ -2521,7 +2585,7 @@ mod tests {
         b
     }
 
-    /// 墨迹包围盒 (min_x, min_y, max_x, max_y)（亮度 < 128 视为墨迹）。
+    /// Ink bounding box (min_x, min_y, max_x, max_y) (luminance < 128 counts as ink).
     fn ink_bbox(c: &SoftCanvas) -> Option<(u32, u32, u32, u32)> {
         let mut r: Option<(u32, u32, u32, u32)> = None;
         for y in 0..c.height {
@@ -2540,7 +2604,7 @@ mod tests {
 
     // ===== P1c：真 blur =====
 
-    /// P7：带 span 覆盖的文本 op（spans 直传）。
+    /// P7: text op with span overrides (spans passed through directly).
     fn op_text_spans(
         x: f32,
         y: f32,
@@ -2554,7 +2618,7 @@ mod tests {
         op
     }
 
-    /// 文本 op 带单条装饰线（P4 D3 测试用；t=厚度）。
+    /// Text op with a single decoration (for the P4 D3 tests; t = thickness).
     fn op_text_deco_t(
         style_kind: style_engine::css::property::TextDecoStyleKind,
         t: f32,
@@ -2571,7 +2635,7 @@ mod tests {
         op
     }
 
-    /// 文本 op 带单条装饰线（默认厚度 2px）。
+    /// Text op with a single decoration (default thickness 2px).
     fn op_text_deco(style_kind: style_engine::css::property::TextDecoStyleKind) -> PaintOp {
         op_text_deco_t(style_kind, 2.0)
     }
@@ -3544,7 +3608,8 @@ mod tests {
         assert_eq!(px(&eo, 30, 10), [255, 0, 0, 255], "角臂两规则均填");
     }
 
-    /// P1-2 测试辅助：全画布混合层 + 单个不透明填充，返回首像素 RGBA。
+    /// P1-2 test helper: full-canvas blend layer + a single opaque fill,
+    /// returns the first pixel RGBA.
     fn blend_pixel_of(mode: BlendMode, base: [u8; 4], src: [f32; 4]) -> [u8; 4] {
         let mut list = DisplayList::default();
         list.ops.push(PaintOp::PushBlend {
@@ -3736,7 +3801,8 @@ mod tests {
 
     // ===== P7：span 富文本消费（T5c soft 补齐）=====
 
-    /// span 颜色分段：基色黑 + 第二字符 span 红——左字黑右字红。
+    /// span color segmentation: base black + second-character span red —
+    /// left glyph black, right glyph red.
     #[test]
     fn text_span_color_segments() {
         let op = op_text_spans(
@@ -3778,7 +3844,8 @@ mod tests {
         assert!(red > 0, "span 红字符应有墨");
     }
 
-    /// span 字号覆盖：第二字符 32px → 整体 bbox 高于双 16px 基线版本。
+    /// span font-size override: the second character at 32px → the overall
+    /// bbox is taller than the dual-16px baseline version.
     #[test]
     fn text_span_font_size_growth() {
         let base = DisplayList {
@@ -3817,7 +3884,7 @@ mod tests {
     use style_engine::css::property::BorderStyle;
     use style_engine::paint::BorderSide;
 
-    /// 边框边速构（P8 测试用）。
+    /// Quick border-side constructor (for the P8 tests).
     fn bside(width: f32, style: BorderStyle, color: [f32; 4]) -> BorderSide {
         BorderSide {
             width,
@@ -3844,7 +3911,7 @@ mod tests {
         }
     }
 
-    /// 红边墨迹判定（g 通道：红边 g≈0，白底 g=255）。
+    /// Red-edge ink test (g channel: a red edge has g≈0, the white backdrop g=255).
     fn border_ink(c: &SoftCanvas, x: u32, y: u32) -> bool {
         pixel(c, x, y)[1] < 128
     }
@@ -3981,7 +4048,7 @@ mod tests {
 
     // ===== P8：文本对齐 =====
 
-    /// 文本 op 变体：指定对齐与对齐宽（P8 测试用）。
+    /// Text op variant: explicit alignment and align width (for the P8 tests).
     fn op_text_align(
         x: f32,
         y: f32,

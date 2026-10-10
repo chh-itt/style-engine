@@ -1,18 +1,24 @@
-//! CSS filter 函数族逐像素管线（P2 批，ADR-0031 D4）。
+//! Per-pixel pipeline for the CSS filter function family (P2 batch,
+//! ADR-0031 D4).
 //!
-//! 运算域：函数滤镜在 **sRGB 非预乘**域（css-filters-1 §3；画布存储
-//! 即非预乘 RGBA，颜色矩阵直接作用 RGB、alpha 行恒等）。模糊在
-//! **预乘域**执行（透明区颜色不渗入），un-premultiply 进出。
-//! 复用 P1-4 盒模糊基建（三遍可分离、u32 窗口取整、逐位确定）。
-//! 接线（`PaintOp::PushFilter`/`BackdropFilter`）随 P2 批落地。
+//! Working domain: function filters operate in the **sRGB non-premultiplied**
+//! domain (css-filters-1 §3; the canvas itself stores non-premultiplied RGBA,
+//! color matrices act on RGB directly, and their alpha row stays identity).
+//! Blur executes in the **premultiplied domain** (colors from transparent
+//! regions do not bleed in), un-premultiplying on the way in and out. Reuses
+//! the P1-4 box blur infrastructure (three-pass separable, u32 window
+//! rounding, bit-exact deterministic). Wiring into
+//! `PaintOp::PushFilter`/`BackdropFilter` landed with the P2 batch.
 
 use style_engine::paint::FilterEffect;
 
 use crate::{blur_alpha_u8, box_width_for_sigma};
 
-/// 效果链逐效果应用到整幅 RGBA（非预乘 sRGB）缓冲——声明序（链序即
-/// 语义序）。blur/drop-shadow 的半径→σ 换算在此（css-filters-1 §3：
-/// σ = 半径/2）；矩阵族效果在非预乘域，模糊/阴影内部预乘。
+/// Applies an effect chain, one effect at a time, to a whole RGBA
+/// (non-premultiplied sRGB) buffer — in declaration order (the chain order is
+/// the semantic order). The blur/drop-shadow radius→σ conversion happens here
+/// (css-filters-1 §3: σ = radius/2); matrix-family effects run in the
+/// non-premultiplied domain, while blur/shadow premultiply internally.
 pub fn apply_effects(buf: &mut [u8], w: usize, h: usize, effects: &[FilterEffect]) {
     for f in effects {
         match f {
@@ -45,15 +51,17 @@ pub fn apply_effects(buf: &mut [u8], w: usize, h: usize, effects: &[FilterEffect
     }
 }
 
-/// opacity(a)：alpha 缩放矩阵（RGB 恒等）。
+/// `opacity(a)`: alpha scaling matrix (RGB identity).
 pub fn matrix_opacity(a: f32) -> ColorMatrix {
     let mut m = matrix_identity();
     m[18] = a.clamp(0.0, 1.0);
     m
 }
 
-/// 效果链所需四周外扩 px：blur 3σ = 1.5·半径；drop-shadow 偏移 + 1.5·
-/// 模糊半径。pad 用于离屏层与 backdrop 采样（区域外取样本参与模糊）。
+/// Outset padding in px required on all four sides for an effect chain:
+/// blur 3σ = 1.5·radius; drop-shadow offset + 1.5·blur radius. The pad is
+/// used for the offscreen layer and backdrop sampling (samples outside the
+/// region participate in the blur).
 pub fn effects_pad(effects: &[FilterEffect]) -> f32 {
     let mut pad = 0.0f32;
     for f in effects {
@@ -69,12 +77,14 @@ pub fn effects_pad(effects: &[FilterEffect]) -> f32 {
     pad
 }
 
-/// feColorMatrix 5×4 行主序（20 值）：每输出通道 = 4 输入通道线性组合
-/// 加偏置。非预乘 sRGB 域逐像素应用；矩阵族 alpha 行恒等
-/// （css-filters-1 §4 各函数矩阵 alpha 行均为 `0 0 0 1 0`）。
+/// feColorMatrix, 5×4 row-major (20 values): each output channel is a linear
+/// combination of the 4 input channels plus an offset. Applied per pixel in
+/// the non-premultiplied sRGB domain; matrix-family alpha rows are identity
+/// (in css-filters-1 §4 every function matrix has the alpha row `0 0 0 1 0`).
 pub type ColorMatrix = [f32; 20];
 
-/// 逐像素应用颜色矩阵（非预乘域；RGB+A 全通道，矩阵族 alpha 行恒等）。
+/// Applies a color matrix per pixel (non-premultiplied domain; all RGB+A
+/// channels; matrix-family alpha row is identity).
 pub fn apply_matrix(buf: &mut [u8], m: &ColorMatrix) {
     for px in buf.as_chunks_mut::<4>().0 {
         let i = [
@@ -95,7 +105,7 @@ fn row_start(c: usize) -> usize {
     c * 5
 }
 
-/// 单位矩阵（恒等滤镜）。
+/// Identity matrix (identity filter).
 pub fn matrix_identity() -> ColorMatrix {
     let mut m = [0.0; 20];
     m[0] = 1.0;
@@ -105,18 +115,18 @@ pub fn matrix_identity() -> ColorMatrix {
     m
 }
 
-/// grayscale(amount)：恒等→亮度矩阵线性插值（css-filters-1 §4；
-/// sRGB 亮度系数 0.2126/0.7152/0.0722）。
+/// `grayscale(amount)`: linear interpolation from identity to the luminance
+/// matrix (css-filters-1 §4; sRGB luminance coefficients 0.2126/0.7152/0.0722).
 pub fn matrix_grayscale(s: f32) -> ColorMatrix {
     interpolate(&matrix_identity(), &raw_grayscale(), s)
 }
 
-/// sepia(amount)：恒等→棕褐矩阵线性插值。
+/// `sepia(amount)`: linear interpolation from identity to the sepia matrix.
 pub fn matrix_sepia(s: f32) -> ColorMatrix {
     interpolate(&matrix_identity(), &raw_sepia(), s)
 }
 
-/// saturate(s)：css-filters-1 §4 参数化矩阵。
+/// `saturate(s)`: parameterized matrix from css-filters-1 §4.
 pub fn matrix_saturate(s: f32) -> ColorMatrix {
     let mut m = [0.0; 20];
     let (r, g, b) = (0.213, 0.715, 0.072);
@@ -133,8 +143,8 @@ pub fn matrix_saturate(s: f32) -> ColorMatrix {
     m
 }
 
-/// hue-rotate(deg)：css-filters-1 §4 余弦/正弦参数化矩阵
-/// （sRGB 线性近似元——规范矩阵原样实现）。
+/// `hue-rotate(deg)`: cosine/sine parameterized matrix from css-filters-1 §4
+/// (a linear approximation in sRGB — the spec matrix is implemented as-is).
 pub fn matrix_hue_rotate(deg: f32) -> ColorMatrix {
     let rad = deg.to_radians();
     let (cos, sin) = (rad.cos(), rad.sin());
@@ -155,8 +165,8 @@ pub fn matrix_hue_rotate(deg: f32) -> ColorMatrix {
     m
 }
 
-/// invert(amount)：`c' = (1−2a)·c + a`（a=0 恒等、a=1 全反）；
-/// alpha 恒等。
+/// `invert(amount)`: `c' = (1−2a)·c + a` (a=0 identity, a=1 full inversion);
+/// alpha is untouched.
 pub fn matrix_invert(a: f32) -> ColorMatrix {
     let mut m = [0.0; 20];
     let d = 1.0 - 2.0 * a;
@@ -170,7 +180,7 @@ pub fn matrix_invert(a: f32) -> ColorMatrix {
     m
 }
 
-/// brightness(amount)：`c' = amount·c`（RGB 对角缩放）。
+/// `brightness(amount)`: `c' = amount·c` (diagonal scaling of RGB).
 pub fn matrix_brightness(a: f32) -> ColorMatrix {
     let mut m = [0.0; 20];
     m[0] = a;
@@ -180,7 +190,7 @@ pub fn matrix_brightness(a: f32) -> ColorMatrix {
     m
 }
 
-/// contrast(amount)：`c' = amount·(c − 0.5) + 0.5`。
+/// `contrast(amount)`: `c' = amount·(c − 0.5) + 0.5`.
 pub fn matrix_contrast(a: f32) -> ColorMatrix {
     let mut m = [0.0; 20];
     m[0] = a;
@@ -220,7 +230,8 @@ fn raw_sepia() -> ColorMatrix {
     m
 }
 
-/// 恒等→目标矩阵线性插值（css-filters-1 grayscale/sepia 语义）。
+/// Linear interpolation from identity to a target matrix (css-filters-1
+/// grayscale/sepia semantics).
 fn interpolate(i: &ColorMatrix, t: &ColorMatrix, s: f32) -> ColorMatrix {
     let mut m = [0.0; 20];
     for k in 0..20 {
@@ -229,9 +240,11 @@ fn interpolate(i: &ColorMatrix, t: &ColorMatrix, s: f32) -> ColorMatrix {
     m
 }
 
-/// 整幅 RGBA（非预乘）盒模糊：预乘平面化 → 每平面三遍可分离盒模糊
-/// → un-premultiply 写回。透明区颜色不渗入（模糊在预乘域）。
-/// 调用方负责 pad（区域外扩 ⌈3σ⌉ 后传入，P1-4 同款）。
+/// Box blur of a whole RGBA (non-premultiplied) buffer: planes are flattened
+/// to premultiplied form → three-pass separable box blur per plane →
+/// un-premultiplied on write-back. Colors from transparent regions do not
+/// bleed in (the blur runs in the premultiplied domain). The caller is
+/// responsible for padding (pass in the region outset by ⌈3σ⌉, as in P1-4).
 pub fn blur_rgba(buf: &mut [u8], w: usize, h: usize, sigma: f32) {
     if sigma <= 0.0 || w == 0 || h == 0 || box_width_for_sigma(sigma) <= 1 {
         return;
@@ -266,10 +279,11 @@ pub fn blur_rgba(buf: &mut [u8], w: usize, h: usize, sigma: f32) {
     }
 }
 
-/// drop-shadow（css-filters-1）：影 = 源 alpha 遮罩 → 盒模糊（σ=blur/2
-/// 由调用方换算）→ 平移 (dx, dy) → 着色 → **先影后源**合成
-/// （out = source over shadow，影画在源之下）。`color` 为非预乘 sRGB
-/// 0..1。调用方负责 bbox 外扩（dx/dy/3σ）。
+/// `drop-shadow` (css-filters-1): the shadow = source alpha mask → box blur
+/// (σ=blur/2, converted by the caller) → translate (dx, dy) → tint → composite
+/// **shadow first, then source** (out = source over shadow; the shadow is
+/// painted beneath the source). `color` is non-premultiplied sRGB in 0..1.
+/// The caller is responsible for the bbox outset (dx/dy/3σ).
 pub fn drop_shadow(
     buf: &mut [u8],
     w: usize,

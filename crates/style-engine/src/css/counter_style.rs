@@ -1,78 +1,87 @@
-//! E @counter-style（css-counter-styles-3 子集）：规则解析与登记。
+//! E @counter-style (css-counter-styles-3 subset): rule parsing and
+//! registration.
 //!
-//! 本切片仅解析与登记（`Vec` 来源序 + 同名后写胜查询）；渲染由
-//! counter_format 切片承担（engine.rs eval_pseudo_content 消费）。宽容
-//! 语义与 @font-face 对齐：条件组/嵌套体内
-//! 照常登记；已知描述符值非法 = 该描述符忽略、规则存活；未知描述符 =
-//! ParseReport 告警（任务要求，与 @font-face 的静默跳过刻意不对称）。
+//! This slice only parses and registers (source-ordered `Vec` +
+//! last-write-wins lookup on equal names); rendering lives in the
+//! counter_format slice (consumed by engine.rs eval_pseudo_content). The
+//! lenient semantics align with @font-face: registration proceeds normally
+//! inside conditional groups/nested blocks; an invalid value for a known
+//! descriptor = that descriptor is ignored and the rule survives; an unknown
+//! descriptor = a ParseReport warning (per task requirements, deliberately
+//! asymmetric with @font-face's silent skip).
 //!
-//! 在案简化（B 级，有意为之）：
-//! - 跨描述符约束不校验（如 `system: additive` 未给 `additive-symbols`、
-//!   `range` 组内上下界次序）——解析存储层不做语义完备性检查；
-//! - `<symbol>` 取 `<string> | <ident>`（spec 另含组合形，罕见，未收）；
-//! - `fallback` 不拒绝 `none`（宽容接受，登记原样保留）。
+//! Documented simplifications (Tier B, intentional):
+//! - Cross-descriptor constraints are not validated (e.g. `system: additive`
+//!   without `additive-symbols`, or bound ordering within a `range` group) —
+//!   the parse/storage layer performs no semantic completeness checks;
+//! - `<symbol>` is `<string> | <ident>` (the spec also has composite forms;
+//!   rare, not included);
+//! - `fallback` does not reject `none` (accepted leniently, registered as-is).
 
 use crate::error::{ParseReport, ParseSeverity};
 use cssparser::{Delimiter, ParseError, Parser, Token};
 
-/// `system` 描述符值（css-counter-styles-3 §3.2）。
+/// `system` descriptor value (css-counter-styles-3 §3.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CounterStyleSystem {
-    /// `cyclic`。
+    /// `cyclic`.
     Cyclic,
-    /// `numeric`。
+    /// `numeric`.
     Numeric,
-    /// `alphabetic`。
+    /// `alphabetic`.
     Alphabetic,
-    /// `symbolic`（描述符缺省时的初始值——css-counter-styles-3 §3.2
-    /// Initial: symbolic）。
+    /// `symbolic` (initial value when the descriptor is absent —
+    /// css-counter-styles-3 §3.2 Initial: symbolic).
     Symbolic,
-    /// `additive`。
+    /// `additive`.
     Additive,
-    /// `fixed <integer>?`（`<integer>` 缺省 = 1——spec: fixed `<integer>`?
-    /// 计数起点缺省 1）。
+    /// `fixed <integer>?` (`<integer>` defaults to 1 — spec: fixed
+    /// `<integer>`? counts from 1 by default).
     Fixed(i32),
-    /// `extends <counter-style-name>`（名称按源文本原样登记；查询匹配
-    /// 不在此处展开）。
+    /// `extends <counter-style-name>` (the name is registered verbatim from
+    /// the source text; lookup matching does not expand it here).
     Extends(String),
 }
 
-/// `range` 描述符值（css-counter-styles-3 §3.7）：`auto` 或
-/// `[ <integer> | infinite ]{2}#`（`infinite` = 界开、None）。
+/// `range` descriptor value (css-counter-styles-3 §3.7): `auto` or
+/// `[ <integer> | infinite ]{2}#` (`infinite` = open bound, None).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum CounterStyleRange {
-    /// `auto`（缺省）。
+    /// `auto` (default).
     #[default]
     Auto,
-    /// 闭区间组列表（每组恰两界；None = infinite）。
+    /// List of closed interval groups (exactly two bounds per group;
+    /// None = infinite).
     Ranges(Vec<(Option<i32>, Option<i32>)>),
 }
 
-/// E @counter-style 登记规则（css-counter-styles-3 子集）。
+/// A registered E @counter-style rule (css-counter-styles-3 subset).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct CounterStyleRule {
-    /// 计数样式名（prelude custom-ident；`none` 为保留字无效）。匹配
-    /// 区分大小写（spec counter-style-name 大小写敏感）。
+    /// Counter style name (prelude custom-ident; `none` is reserved and
+    /// invalid). Matching is case-sensitive (the spec's counter-style-name is
+    /// case-sensitive).
     pub name: String,
-    /// `system`（缺省 Symbolic）。
+    /// `system` (defaults to Symbolic).
     pub system: CounterStyleSystem,
-    /// `symbols`：`<symbol>#`（`<symbol>` = `<string> | <ident>`）。
+    /// `symbols`: `<symbol>#` (`<symbol>` = `<string> | <ident>`).
     pub symbols: Vec<String>,
-    /// `additive-symbols`：`[ <integer [0,∞]> && <symbol> ]#`（解析期
-    /// 强制严格递减——css-counter-styles-3 §3.6）。
+    /// `additive-symbols`: `[ <integer [0,∞]> && <symbol> ]#` (strictly
+    /// decreasing enforced at parse time — css-counter-styles-3 §3.6).
     pub additive_symbols: Vec<(i32, String)>,
-    /// `prefix`：`<symbol>`（None = 未写）。
+    /// `prefix`: `<symbol>` (None = not written).
     pub prefix: Option<String>,
-    /// `suffix`：`<symbol>`（初始值 `". "`——css-counter-styles-3 §3.4）。
+    /// `suffix`: `<symbol>` (initial value `". "` — css-counter-styles-3 §3.4).
     pub suffix: String,
-    /// `range`：`auto | [ <integer> | infinite ]{2}#`（缺省 Auto）。
+    /// `range`: `auto | [ <integer> | infinite ]{2}#` (defaults to Auto).
     pub range: CounterStyleRange,
-    /// `pad`：`<integer [0,∞]> && <symbol>`（None = 未写）。
+    /// `pad`: `<integer [0,∞]> && <symbol>` (None = not written).
     pub pad: Option<(u32, String)>,
-    /// `negative`：`<symbol>{1,2}`。
+    /// `negative`: `<symbol>{1,2}`.
     pub negative: Vec<String>,
-    /// `fallback`：`<counter-style-name>`（None = 未写；`none` 宽容接受）。
+    /// `fallback`: `<counter-style-name>` (None = not written; `none` is
+    /// accepted leniently).
     pub fallback: Option<String>,
 }
 
@@ -94,13 +103,15 @@ impl Default for CounterStyleRule {
     }
 }
 
-/// CSS 全局关键字（css-cascade）：描述符值含之 = 该描述符无效。
-/// 单源见 css/mod.rs `CSS_WIDE_KEYWORDS`。
+/// CSS-wide keywords (css-cascade): a descriptor value containing one
+/// invalidates that descriptor. Single source: `CSS_WIDE_KEYWORDS` in
+/// css/mod.rs.
 use crate::css::CSS_WIDE_KEYWORDS;
 
-/// @counter-style 规则解析：name（prelude 已验证 custom-ident）+ 块体
-/// 描述符循环（模板 = parse_font_face_block + report 线程）。None =
-/// 规则无效（调用方 Dropped 告警 + 整块消费）。
+/// Parses an @counter-style rule: name (prelude already validated as
+/// custom-ident) + descriptor loop over the block body (template =
+/// parse_font_face_block + report threading). None = invalid rule (the caller
+/// emits a Dropped warning and consumes the whole block).
 pub(crate) fn parse_counter_style_rule(
     name: &str,
     input: &mut Parser<'_>,
@@ -190,8 +201,9 @@ pub(crate) fn parse_counter_style_rule(
     Some(rule)
 }
 
-/// 单个描述符值段解析（子解析器域 = 至 ';' 或块尾）。false = 值语法
-/// 无效（该描述符忽略、规则存活）。
+/// Parses one descriptor value segment (sub-parser scope = up to ';' or the
+/// end of the block). false = the value is syntactically invalid (that
+/// descriptor is ignored; the rule survives).
 fn parse_counter_style_descriptor(
     name: &str,
     v: &mut Parser<'_>,
@@ -227,7 +239,7 @@ fn parse_counter_style_descriptor(
     }
 }
 
-/// `<symbol>` = `<string> | <ident>`（子集，见模块文档）。None = 不匹配。
+/// `<symbol>` = `<string> | <ident>` (subset; see module docs). None = no match.
 fn parse_one_symbol(v: &mut Parser<'_>) -> Option<String> {
     v.skip_whitespace();
     match v.next() {
@@ -237,8 +249,8 @@ fn parse_one_symbol(v: &mut Parser<'_>) -> Option<String> {
     }
 }
 
-/// `system`：`cyclic | numeric | alphabetic | symbolic | additive |
-/// [fixed `<integer>`?] | [extends `<counter-style-name>`]`。
+/// `system`: `cyclic | numeric | alphabetic | symbolic | additive |
+/// [fixed `<integer>`?] | [extends `<counter-style-name>`]`.
 fn parse_system(v: &mut Parser<'_>, out: &mut CounterStyleSystem) -> bool {
     v.skip_whitespace();
     let id = match v.next() {
@@ -297,8 +309,8 @@ fn parse_system(v: &mut Parser<'_>, out: &mut CounterStyleSystem) -> bool {
     }
 }
 
-/// `symbols`：`<symbol>+`（**空格**分隔，css-counter-styles-3 §3.5——与
-/// additive-symbols 的 `#`（逗号）不同）。
+/// `symbols`: `<symbol>+` (**space**-separated, css-counter-styles-3 §3.5 —
+/// unlike additive-symbols' `#` (comma)).
 fn parse_symbols(v: &mut Parser<'_>, out: &mut Vec<String>) -> bool {
     let mut got: Vec<String> = Vec::new();
     while let Some(s) = parse_one_symbol(v) {
@@ -311,8 +323,9 @@ fn parse_symbols(v: &mut Parser<'_>, out: &mut Vec<String>) -> bool {
     true
 }
 
-/// `additive-symbols`：`[ <integer [0,∞]> && <symbol> ]#`，权重严格递减
-///（css-counter-styles-3 §3.6：&& 两序皆容——整数在前或符号在前）。
+/// `additive-symbols`: `[ <integer [0,∞]> && <symbol> ]#` with strictly
+/// decreasing weights (css-counter-styles-3 §3.6: `&&` accepts both orders —
+/// integer first or symbol first).
 fn parse_additive_symbols(v: &mut Parser<'_>, out: &mut Vec<(i32, String)>) -> bool {
     let mut got: Vec<(i32, String)> = Vec::new();
     loop {
@@ -354,7 +367,7 @@ fn parse_additive_symbols(v: &mut Parser<'_>, out: &mut Vec<(i32, String)>) -> b
     true
 }
 
-/// `<integer [0,∞]>`（u32 语义经 i32 非负通道）。
+/// `<integer [0,∞]>` (u32 semantics via a non-negative i32 channel).
 fn next_nonneg_int(v: &mut Parser<'_>) -> Option<i32> {
     match v.next() {
         Ok(Token::Number {
@@ -364,7 +377,7 @@ fn next_nonneg_int(v: &mut Parser<'_>) -> Option<i32> {
     }
 }
 
-/// `range`：`auto | [ <integer> | infinite ]{2}#`。
+/// `range`: `auto | [ <integer> | infinite ]{2}#`.
 fn parse_range(v: &mut Parser<'_>, out: &mut CounterStyleRange) -> bool {
     v.skip_whitespace();
     // `auto` 短路（先试，try_parse 失败自动回退）。
@@ -405,7 +418,7 @@ fn parse_range(v: &mut Parser<'_>, out: &mut CounterStyleRange) -> bool {
     true
 }
 
-/// range 单界：`<integer> | infinite`（None 内层 = infinite）。
+/// One range bound: `<integer> | infinite` (inner None = infinite).
 fn parse_range_bound(v: &mut Parser<'_>) -> Option<Option<i32>> {
     v.skip_whitespace();
     match v.next() {
@@ -417,7 +430,8 @@ fn parse_range_bound(v: &mut Parser<'_>) -> Option<Option<i32>> {
     }
 }
 
-/// `pad`：`<integer [0,∞]> && <symbol>`（两序皆容，同 additive-symbols）。
+/// `pad`: `<integer [0,∞]> && <symbol>` (both orders accepted, like
+/// additive-symbols).
 fn parse_pad(v: &mut Parser<'_>, out: &mut Option<(u32, String)>) -> bool {
     v.skip_whitespace();
     let save = v.state();
@@ -445,7 +459,7 @@ fn parse_pad(v: &mut Parser<'_>, out: &mut Option<(u32, String)>) -> bool {
     }
 }
 
-/// `negative`：`<symbol>{1,2}`。
+/// `negative`: `<symbol>{1,2}`.
 fn parse_negative(v: &mut Parser<'_>, out: &mut Vec<String>) -> bool {
     let Some(first) = parse_one_symbol(v) else {
         return false;
@@ -462,7 +476,8 @@ fn parse_negative(v: &mut Parser<'_>, out: &mut Vec<String>) -> bool {
     true
 }
 
-/// `fallback`：`<counter-style-name>`（`none` 宽容接受，见模块文档）。
+/// `fallback`: `<counter-style-name>` (`none` accepted leniently; see module
+/// docs).
 fn parse_fallback(v: &mut Parser<'_>, out: &mut Option<String>) -> bool {
     v.skip_whitespace();
     match v.next() {
@@ -474,7 +489,8 @@ fn parse_fallback(v: &mut Parser<'_>, out: &mut Option<String>) -> bool {
     }
 }
 
-/// 值段残留排干至 ';'（含消费 ';'；块尾/EOF 终止）。
+/// Drains the remainder of the value segment up to ';' (consuming the ';';
+/// end of block/EOF terminates).
 fn drain_value_segment(input: &mut Parser<'_>) {
     loop {
         match input.next() {

@@ -1,45 +1,57 @@
-//! CSS 值类型与文法：T0 特性集（FEATURES.md）所需的值解析。
+//! CSS value types and grammars: value parsing for the T0 feature set
+//! (FEATURES.md).
 //!
-//! 约定：`Percent` 一律存小数（50% → 0.5，与 cssparser 的 `unit_value`
-//! 一致）；角度一律归一为度（deg）。`calc()` 允许 px/em/rem/%/vw/vh 与
-//! 数字混合，数字仅可作为乘除系数出现（解析期校验）；按 MVP 宽容策略，
-//! 不强制 `+`/`-` 两侧空格（超集接受；conformance 用例使用规范形式）。
+//! Conventions: `Percent` always stores a fraction (50% → 0.5, matching
+//! cssparser's `unit_value`); angles are always normalized to degrees (deg).
+//! `calc()` allows px/em/rem/%/vw/vh mixed with numbers, where numbers may
+//! only appear as multiplication/division factors (validated at parse time).
+//! Per the MVP lenient policy, spaces around `+`/`-` are not enforced
+//! (accepted superset; conformance cases use the canonical form).
 
 use cssparser::{BasicParseError, ParseError, Parser, ToCss, Token, TokenSerializationType};
 use peniko::color::{self, AlphaColor, Srgb};
 
-/// 值解析错误（cssparser 0.38 的 `ParseError` 已无输入生命周期参数）。
+/// Value parsing error (cssparser 0.38's `ParseError` no longer carries an
+/// input lifetime parameter).
 pub type ValError = ParseError<BasicParseError>;
-/// 带值解析错误的 `Result` 别名。
+/// `Result` alias carrying the value parsing error.
 pub type ValResult<T> = Result<T, ValError>;
 
-/// 值定值上下文：字号、根字号、视口与容器/字体度量（全部由引擎/宿主提供，
-/// crate 无副作用）。
+/// Value resolution context: font size, root font size, viewport, and
+/// container/font metrics (all supplied by the engine/host; the crate has no
+/// side effects).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolveCtx {
-    /// 当前节点字号（em 基准）。
+    /// Current node font size (em basis).
     pub em: f32,
-    /// 根节点字号（rem 基准）。
+    /// Root node font size (rem basis).
     pub rem: f32,
-    /// 视口宽度（vw 基准）。
+    /// Viewport width (vw basis).
     pub viewport_w: f32,
-    /// 视口高度（vh 基准）。
+    /// Viewport height (vh basis).
     pub viewport_h: f32,
-    /// 容器查询基准宽（cqw/cqi；无容器祖先=small viewport 回落）。
+    /// Container query basis width (cqw/cqi; falls back to the small
+    /// viewport when there is no container ancestor).
     pub cq_w: f32,
-    /// 容器查询基准高（cqh/cqb；无容器祖先=small viewport 回落）。
+    /// Container query basis height (cqh/cqb; falls back to the small
+    /// viewport when there is no container ancestor).
     pub cq_h: f32,
-    /// ch 基准：数字 0 字形 advance（每 em；未注册字体=0.5 近似）。
+    /// ch basis: advance of the digit 0 glyph (per em; 0.5 approximation
+    /// when the font is unregistered).
     pub ch_per_em: f32,
-    /// ex 基准：x 字形 yMax（每 em；未注册字体=0.5 近似）。
+    /// ex basis: yMax of the x glyph (per em; 0.5 approximation when the
+    /// font is unregistered).
     pub ex_per_em: f32,
-    /// ic 基准：表意字 U+6C34 advance（每 em；缺字=1.0）。
+    /// ic basis: advance of the ideograph U+6C34 (per em; 1.0 when the glyph
+    /// is missing).
     pub ic_per_em: f32,
 }
 
 impl ResolveCtx {
-    /// 基础上下文（容器查询回落视口、字体度量近似缺省）——既有调用点的
-    /// 便捷构造；引擎在拥有容器/字体信息处以字段覆写。
+    /// Base context (container queries fall back to the viewport; font
+    /// metrics use approximation defaults) — a convenience constructor for
+    /// existing call sites; the engine overrides fields where it has
+    /// container/font information.
     pub fn base(em: f32, rem: f32, viewport_w: f32, viewport_h: f32) -> Self {
         Self {
             em,
@@ -55,21 +67,23 @@ impl ResolveCtx {
     }
 }
 
-/// 字体相对单位度量（每 em 归一；A9）。真实值由引擎在注册字体时探测
-///（css::fontprobe）；未注册族按 CSS 近似惯例回落（ch=0.5em、ex=0.5em、
-/// ic=1em，偏差在案 FEATURES.md）。
+/// Font-relative unit metrics (normalized per em; A9). Real values are
+/// probed by the engine when a font is registered (css::fontprobe);
+/// unregistered families fall back to the CSS approximation conventions
+/// (ch=0.5em, ex=0.5em, ic=1em; deviation documented in FEATURES.md).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FontMetrics {
-    /// 数字 0 字形 advance（ch 基准）。
+    /// Advance of the digit 0 glyph (ch basis).
     pub ch_per_em: f32,
-    /// x 字形 yMax（ex 基准）。
+    /// yMax of the x glyph (ex basis).
     pub ex_per_em: f32,
-    /// 表意字 U+6C34 advance（ic 基准；缺字=1.0）。
+    /// Advance of the ideograph U+6C34 (ic basis; 1.0 when the glyph is
+    /// missing).
     pub ic_per_em: f32,
-    /// hhea ascender（P3，ADR-0034 D3：vertical-align text-top/bottom 与
-    /// middle 的 strut 度量；未注册回退 0.8em）。
+    /// hhea ascender (P3, ADR-0034 D3: strut metric for vertical-align
+    /// text-top/bottom and middle; 0.8em fallback when unregistered).
     pub ascent_per_em: f32,
-    /// hhea descender（恒正；未注册回退 0.2em）。
+    /// hhea descender (always positive; 0.2em fallback when unregistered).
     pub descent_per_em: f32,
 }
 
@@ -85,47 +99,51 @@ impl Default for FontMetrics {
     }
 }
 
-/// `<length-percentage>`：px/em/rem/%/vw/vh/calc()。
+/// `<length-percentage>`: px/em/rem/%/vw/vh/calc().
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum LengthPercentage {
-    /// 绝对像素值（px）。
+    /// Absolute pixel value (px).
     Px(f32),
-    /// 相对当前节点字号（em）。
+    /// Relative to the current node font size (em).
     Em(f32),
-    /// 相对根节点字号（rem）。
+    /// Relative to the root node font size (rem).
     Rem(f32),
-    /// 小数（50% → 0.5）。
+    /// Fraction (50% → 0.5).
     Percent(f32),
-    /// 视口宽度小数（50vw → 0.5）。
+    /// Viewport width fraction (50vw → 0.5).
     Vw(f32),
-    /// 视口高度小数（50vh → 0.5）。
+    /// Viewport height fraction (50vh → 0.5).
     Vh(f32),
-    /// 容器查询宽小数（50cqw → 0.5；A9）。
+    /// Container query width fraction (50cqw → 0.5; A9).
     Cqw(f32),
-    /// 容器查询高小数（50cqh → 0.5；A9）。
+    /// Container query height fraction (50cqh → 0.5; A9).
     Cqh(f32),
-    /// 容器行内轴小数（50cqi → 0.5；水平书写=cqw；A9）。
+    /// Container inline-axis fraction (50cqi → 0.5; = cqw in horizontal
+    /// writing mode; A9).
     Cqi(f32),
-    /// 容器块轴小数（50cqb → 0.5；水平书写=cqh；A9）。
+    /// Container block-axis fraction (50cqb → 0.5; = cqh in horizontal
+    /// writing mode; A9).
     Cqb(f32),
-    /// 数字 0 字形 advance 倍数（2ch；A9，字体相对）。
+    /// Multiple of the digit 0 glyph advance (2ch; A9, font-relative).
     Ch(f32),
-    /// x 字形 yMax（x-height）倍数（2ex；A9，字体相对）。
+    /// Multiple of the x glyph yMax / x-height (2ex; A9, font-relative).
     Ex(f32),
-    /// 表意字 U+6C34 advance 倍数（2ic；A9，字体相对；缺字=1em）。
+    /// Multiple of the ideograph U+6C34 advance (2ic; A9, font-relative;
+    /// 1em when the glyph is missing).
     Ic(f32),
-    /// calc() 表达式（CSS Values 4 子集）。
+    /// calc() expression (CSS Values 4 subset).
     Calc(Box<CalcNode>),
 }
 
 impl LengthPercentage {
-    /// 零长度便捷值（0px）。
+    /// Zero-length convenience value (0px).
     pub fn zero() -> Self {
         Self::Px(0.0)
     }
 
-    /// 定值。`percent_basis` 是百分比参照的长度（宽/高/字号，由调用方决定）。
+    /// Resolves the value. `percent_basis` is the length that percentages
+    /// refer to (width/height/font size, chosen by the caller).
     pub fn resolve(&self, ctx: &ResolveCtx, percent_basis: f32) -> Option<f32> {
         match self {
             Self::Px(v) => Some(*v),
@@ -145,8 +163,10 @@ impl LengthPercentage {
         }
     }
 
-    /// A9：是否含容器查询单位叶子（映射期判定是否延迟结算——容器基值
-    /// 布局期才稳定，与百分比 calc 同病同治）。
+    /// A9: whether the value contains a container-query unit leaf (used at
+    /// mapping time to decide deferred resolution — container basis values
+    /// only stabilize at layout time, handled exactly like percentage
+    /// calc()).
     pub fn has_cq(&self) -> bool {
         match self {
             Self::Cqw(_) | Self::Cqh(_) | Self::Cqi(_) | Self::Cqb(_) => true,
@@ -156,64 +176,71 @@ impl LengthPercentage {
     }
 }
 
-/// calc() 数值的单位量纲。
+/// Unit dimension of a calc() value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CalcUnit {
-    /// 无单位数字（仅可作乘除系数）。
+    /// Unitless number (only usable as a multiplication/division factor).
     Number,
-    /// 像素（px）。
+    /// Pixels (px).
     Px,
-    /// 相对当前节点字号（em）。
+    /// Relative to the current node font size (em).
     Em,
-    /// 相对根节点字号（rem）。
+    /// Relative to the root node font size (rem).
     Rem,
-    /// 小数（50% → 0.5）。
+    /// Fraction (50% → 0.5).
     Percent,
-    /// 视口宽度小数（50vw → 0.5）。
+    /// Viewport width fraction (50vw → 0.5).
     Vw,
-    /// 视口高度小数（50vh → 0.5）。
+    /// Viewport height fraction (50vh → 0.5).
     Vh,
-    /// 容器查询宽小数（50cqw → 0.5；A9）。
+    /// Container query width fraction (50cqw → 0.5; A9).
     Cqw,
-    /// 容器查询高小数（50cqh → 0.5；A9）。
+    /// Container query height fraction (50cqh → 0.5; A9).
     Cqh,
-    /// 容器行内轴小数（50cqi → 0.5；水平书写=cqw；A9）。
+    /// Container inline-axis fraction (50cqi → 0.5; = cqw in horizontal
+    /// writing mode; A9).
     Cqi,
-    /// 容器块轴小数（50cqb → 0.5；水平书写=cqh；A9）。
+    /// Container block-axis fraction (50cqb → 0.5; = cqh in horizontal
+    /// writing mode; A9).
     Cqb,
-    /// 数字 0 字形 advance 倍数（A9，字体相对）。
+    /// Multiple of the digit 0 glyph advance (A9, font-relative).
     Ch,
-    /// x 字形 yMax（x-height）倍数（A9，字体相对）。
+    /// Multiple of the x glyph yMax / x-height (A9, font-relative).
     Ex,
-    /// 表意字 U+6C34 advance 倍数（A9，字体相对；缺字=1em）。
+    /// Multiple of the ideograph U+6C34 advance (A9, font-relative; 1em
+    /// when the glyph is missing).
     Ic,
 }
 
-/// `calc()` 表达式树（CSS Values 4 子集：四则运算、嵌套 calc、括号）。
+/// `calc()` expression tree (CSS Values 4 subset: the four arithmetic
+/// operations, nested calc, and parentheses).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum CalcNode {
-    /// 带单位数值；`Number` 仅允许作为乘除系数（解析期校验）。
+    /// A value with a unit; `Number` is only allowed as a
+    /// multiplication/division factor (validated at parse time).
     Value(f32, CalcUnit),
-    /// 加法（a + b）。
+    /// Addition (a + b).
     Sum(Box<CalcNode>, Box<CalcNode>),
-    /// 减法（a - b）。
+    /// Subtraction (a - b).
     Sub(Box<CalcNode>, Box<CalcNode>),
-    /// 乘法（a × b；一侧须为纯数字系数）。
+    /// Multiplication (a × b; one side must be a pure number factor).
     Product(Box<CalcNode>, Box<CalcNode>),
-    /// 除以非零数字（CSS 约束）。
+    /// Division by a non-zero number (CSS constraint).
     Divide(Box<CalcNode>, f32),
-    /// min(a, b, …)（A6：多参二元折叠；任一参可定值则整体可定值）。
+    /// min(a, b, …) (A6: n-ary arguments folded pairwise; resolvable as a
+    /// whole if any argument is resolvable).
     Min(Box<CalcNode>, Box<CalcNode>),
-    /// max(a, b, …)（A6，二元折叠）。
+    /// max(a, b, …) (A6, pairwise folding).
     Max(Box<CalcNode>, Box<CalcNode>),
-    /// clamp(min, val, max)（A6）= max(min, min(val, max))。
+    /// clamp(min, val, max) (A6) = max(min, min(val, max)).
     Clamp(Box<CalcNode>, Box<CalcNode>, Box<CalcNode>),
 }
 
 impl CalcNode {
-    /// 是否含百分比叶子（①calc 直通：映射期判定是否延迟结算）。
+    /// Whether the tree contains a percentage leaf (①calc pass-through:
+    /// used at mapping time to decide deferred resolution).
     pub fn has_percent(&self) -> bool {
         match self {
             Self::Value(_, CalcUnit::Percent) => true,
@@ -229,7 +256,8 @@ impl CalcNode {
         }
     }
 
-    /// 定值：按 ctx 与百分比参照把表达式解析为 px 长度（无法定值时为 None）。
+    /// Resolution: evaluates the expression to a px length using `ctx` and
+    /// the percentage basis (`None` when it cannot be resolved).
     pub fn resolve(&self, ctx: &ResolveCtx, percent_basis: f32) -> Option<f32> {
         match self {
             Self::Value(v, u) => Some(match u {
@@ -282,7 +310,8 @@ impl CalcNode {
         }
     }
 
-    /// 纯数字叶子的原始标量（仅 Product 系数语境使用）。
+    /// Raw scalar of a pure-number leaf (only used in the Product factor
+    /// context).
     fn raw_number(&self) -> Option<f32> {
         match self {
             Self::Value(v, CalcUnit::Number) => Some(*v),
@@ -306,7 +335,8 @@ impl CalcNode {
         }
     }
 
-    /// A9：是否含容器查询单位叶子（递归；LengthPercentage::has_cq 的 calc 体）。
+    /// A9: whether the tree contains a container-query unit leaf (recursive;
+    /// calc body of `LengthPercentage::has_cq`).
     pub fn has_cq(&self) -> bool {
         match self {
             Self::Value(_, u) => matches!(
@@ -324,24 +354,29 @@ impl CalcNode {
     }
 }
 
-/// 角度，统一为度（deg）。
+/// An angle, normalized to degrees (deg).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Angle(pub f32);
 
-/// CSS 颜色：绝对色、currentColor 或 light-dark()。
+/// A CSS color: an absolute color, currentColor, or light-dark().
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum ColorValue {
-    /// currentcolor 关键字（继承 color 属性计算值）。
+    /// The currentcolor keyword (inherits the computed value of the color
+    /// property).
     CurrentColor,
-    /// 绝对颜色（已转 sRGB，分量 \[0,1\] 编码值）。
+    /// Absolute color (already converted to sRGB; components are encoded
+    /// values in \[0,1\]).
     Absolute(AlphaColor<Srgb>),
-    /// MVP 偏差：参数仅存绝对色（currentcolor/嵌套 light-dark 走容错丢弃）。
+    /// MVP deviation: the parameters only store absolute colors
+    /// (currentcolor / nested light-dark goes through fault-tolerant
+    /// dropping).
     LightDark(AlphaColor<Srgb>, AlphaColor<Srgb>),
 }
 
 impl ColorValue {
-    /// light-dark() 按环境色 scheme 取一边，其余原样（Environment 求值的一部分）。
+    /// Picks one side of light-dark() based on the environment color scheme;
+    /// everything else is returned as-is (part of Environment evaluation).
     pub fn pick_scheme(self, dark: bool) -> ColorValue {
         match self {
             Self::LightDark(a, b) => Self::Absolute(if dark { b } else { a }),
@@ -350,14 +385,15 @@ impl ColorValue {
     }
 }
 
-/// 转到 sRGB 并钳制到 [0,1]（gamut 映射的 MVP 代替：clip，deviation 已知）。
+/// Converts to sRGB and clamps to [0,1] (MVP stand-in for gamut mapping:
+/// clipping, a known deviation).
 fn to_srgb_clamped(c: color::DynamicColor) -> AlphaColor<Srgb> {
     let mut a = c.to_alpha_color::<Srgb>();
     a.components = a.components.map(|v| v.clamp(0.0, 1.0));
     a
 }
 
-/// 解析 `<length-percentage>`：px/em/rem/%/vw/vh/calc()。
+/// Parses `<length-percentage>`: px/em/rem/%/vw/vh/calc().
 pub fn parse_length_percentage(p: &mut Parser<'_>) -> ValResult<LengthPercentage> {
     match p.next()?.clone() {
         Token::Dimension {
@@ -545,7 +581,8 @@ fn parse_calc_value(p: &mut Parser<'_>) -> ValResult<CalcNode> {
     }
 }
 
-/// min()/max()/clamp() 参数体（Function 名已由调用方消费）。
+/// Argument body of min()/max()/clamp() (the Function name has already been
+/// consumed by the caller).
 fn parse_math_body(p: &mut Parser<'_>, name: &str) -> ValResult<CalcNode> {
     if name.eq_ignore_ascii_case("clamp") {
         let args = p.parse_nested_block(|p| p.parse_comma_separated(parse_calc_sum))?;
@@ -573,7 +610,8 @@ fn parse_math_body(p: &mut Parser<'_>, name: &str) -> ValResult<CalcNode> {
     Ok(acc)
 }
 
-/// 解析 `<angle>`（deg/grad/rad/turn，归一为度；无单位数字视为 deg）。
+/// Parses `<angle>` (deg/grad/rad/turn, normalized to degrees; a unitless
+/// number is treated as deg).
 pub fn parse_angle(p: &mut Parser<'_>) -> ValResult<Angle> {
     match p.next()?.clone() {
         Token::Dimension {
@@ -598,7 +636,7 @@ pub fn parse_angle(p: &mut Parser<'_>) -> ValResult<Angle> {
     }
 }
 
-/// 解析 `<number>`（无单位数字）。
+/// Parses `<number>` (unitless number).
 pub fn parse_number(p: &mut Parser<'_>) -> ValResult<f32> {
     match p.next()?.clone() {
         Token::Number { value, .. } => Ok(value),
@@ -606,7 +644,8 @@ pub fn parse_number(p: &mut Parser<'_>) -> ValResult<f32> {
     }
 }
 
-/// 解析 `<color>`：关键字、#十六进制或颜色函数（light-dark() 及 CSS Color 4 文法）。
+/// Parses `<color>`: keywords, #hex, or color functions (light-dark() and
+/// the CSS Color 4 grammar).
 pub fn parse_color_value(p: &mut Parser<'_>) -> ValResult<ColorValue> {
     match p.next()?.clone() {
         Token::Ident(ref name) => parse_color_keyword(name, p),
@@ -630,7 +669,8 @@ pub fn parse_color_value(p: &mut Parser<'_>) -> ValResult<ColorValue> {
     }
 }
 
-/// MVP 偏差：light-dark() 参数仅支持绝对色，其余走容错丢弃。
+/// MVP deviation: light-dark() arguments only support absolute colors;
+/// anything else goes through fault-tolerant dropping.
 fn require_absolute(v: ColorValue, p: &mut Parser<'_>) -> ValResult<AlphaColor<Srgb>> {
     match v {
         ColorValue::Absolute(c) => Ok(c),
@@ -655,7 +695,8 @@ fn delegate_parse_color(s: &str, p: &mut Parser<'_>) -> ValResult<ColorValue> {
     }
 }
 
-/// 把当前函数/块的 token 流反序列化为字符串（保留空白与分隔语义）。
+/// Deserializes the token stream of the current function/block into a
+/// string (preserving whitespace and separator semantics).
 fn serialize_nested_tokens(p: &mut Parser<'_>) -> ValResult<String> {
     p.parse_nested_block(|p| {
         let mut out = String::new();

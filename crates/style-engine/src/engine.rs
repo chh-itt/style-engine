@@ -1,8 +1,11 @@
-//! 样式引擎：宿主推送同步协议 + 帧驱动（restyle → taffy layout）。
+//! Style engine: host-pushed synchronization protocol + frame driver
+//! (restyle → taffy layout).
 //!
-//! 引擎零副作用：样式表/树镜像/状态/环境/叶测量全部由宿主推送
-//! （ADR-0005/0006）。`frame()` 单调推进 sync→style→layout，返回
-//! 生成号戳记的布局帧（T4 起叠加 DisplayList）。
+//! The engine is side-effect free: stylesheets, the tree mirror, state,
+//! environment, and leaf measurements are all pushed in by the host
+//! (ADR-0005/0006). `frame()` monotonically advances sync→style→layout and
+//! returns a layout frame stamped with the generation number (with a display
+//! list layered on from T4 onward).
 
 use crate::computed::{ComputedStyle, compute_node_from_cascade, compute_node_in};
 use crate::css::decl::parse_inline_declarations;
@@ -14,20 +17,22 @@ use crate::tree::{NodeId, StyleNode, StyleTree};
 use std::collections::HashMap;
 use std::hash::Hash;
 
-/// B2：宿主 @import 加载器（url → CSS 文本；Send+Sync 引擎契约）。
+/// B2: host-side @import loader (url → CSS text; the Send+Sync engine contract).
 pub type ImportLoader = Box<dyn Fn(&str) -> Option<String> + Send + Sync + 'static>;
 
-/// B4 absolute 重挂扫描栈项：(节点, 样式父, 最近 cb 候选（None=尚无）,
-/// 豁免子树, 豁免标记)。
+/// B4 absolute re-parenting scan stack entry: (node, style parent, nearest cb
+/// candidate (None = none yet), exempted subtree, exemption flag).
 type AbsCbStackItem = (NodeId, Option<NodeId>, Option<NodeId>, Option<NodeId>, bool);
 
-/// E5 grid 语境线名表：模板顶层线名槽 → 线名列表（1 基线号 = 序+1）。
+/// E5 grid contextual line-name table: template top-level line-name slot →
+/// line-name list (1-based line number = index + 1).
 type GridLineMap = std::collections::BTreeMap<String, Vec<i16>>;
-/// E5 grid 语境区域表：区域名 → (row0, col0, row1, col1) 0 基格界。
+/// E5 grid contextual area table: area name → (row0, col0, row1, col1)
+/// 0-based grid bounds.
 type GridAreaMap = std::collections::BTreeMap<String, (usize, usize, usize, usize)>;
 
-/// C2 文本截断候选：(节点, 容器可用宽, 原文, 计算样式, span 表,
-/// 行数上限 None=ellipsis)。
+/// C2 text truncation candidate: (node, container available width, original
+/// text, computed style, span table, line-count cap; None = ellipsis).
 type TruncCandidate = (
     NodeId,
     f32,
@@ -37,47 +42,52 @@ type TruncCandidate = (
     Option<f32>,
 );
 
-/// 布局帧条目（border-box；坐标相对视口、滚动前）。
+/// A layout frame entry (border-box; coordinates relative to the viewport,
+/// pre-scroll).
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[must_use = "布局结果被丢弃则该节点无法绘制"]
+#[must_use = "dropping the layout result leaves the node unpaintable"]
 pub struct LayoutEntry<K: Copy> {
-    /// 宿主节点键。
+    /// Host node key.
     pub key: K,
-    /// 盒左缘 x（视口坐标，px，滚动前）。
+    /// Box left edge x (viewport coordinates, px, pre-scroll).
     pub x: f32,
-    /// 盒顶缘 y（视口坐标，px，滚动前）。
+    /// Box top edge y (viewport coordinates, px, pre-scroll).
     pub y: f32,
-    /// 盒宽 px（border-box）。
+    /// Box width in px (border-box).
     pub width: f32,
-    /// 盒高 px（border-box）。
+    /// Box height in px (border-box).
     pub height: f32,
 }
 
-/// 一帧的布局与绘制结果。
+/// The layout and paint result of one frame.
 #[derive(Debug, Clone)]
-#[must_use = "帧结果（布局+DisplayList）被丢弃则该帧无法绘制"]
+#[must_use = "dropping the frame result (layout + display list) leaves the frame unpaintable"]
 pub struct Frame<K: Copy> {
-    /// 单调递增帧号。
+    /// Monotonically increasing frame number.
     pub generation: u64,
-    /// 布局盒（树序，含根）。
+    /// Layout boxes (tree order, root included).
     pub boxes: Vec<LayoutEntry<K>>,
-    /// 本帧绘制清单（树序基元）。
+    /// This frame's paint list (tree-order primitives).
     pub paint: crate::paint::DisplayList,
-    /// 滚动容器量程（ADR-0007）：key → 各轴最大滚动量（px，非滚动轴为 0）。
-    /// 引擎不夹紧偏移——量程供宿主 clamp 用（零副作用、幂等）。
+    /// Scrollable-container ranges (ADR-0007): key → maximum scroll amount per
+    /// axis (px; 0 for a non-scrollable axis). The engine does not clamp offsets
+    /// — the ranges are provided for the host to clamp with (side-effect free,
+    /// idempotent).
     pub scrollable: HashMap<K, (f32, f32)>,
 }
 
 impl<K: Copy + PartialEq> Frame<K> {
-    /// 按 key 查找布局盒。
+    /// Finds the layout box for a key.
     pub fn find(&self, key: K) -> Option<&LayoutEntry<K>> {
         self.boxes.iter().find(|b| b.key == key)
     }
 
-    /// 布局几何人读视图（F3e，ADR-0027 D1）：本帧全部布局盒按树序一行
-    /// 一个（`key x y w h`）。与 [`StyleEngine::layout_tree_dump`](crate::StyleEngine::layout_tree_dump)
-    /// 的结构树视图分离——Frame 有几何无树、引擎有树无帧几何，宿主按需
-    /// 取用（键格式化要求 `K: Debug`）。
+    /// Human-readable layout-geometry view (F3e, ADR-0027 D1): every layout box
+    /// in this frame, one per line in tree order (`key x y w h`). Kept separate
+    /// from the structural tree view of
+    /// [`StyleEngine::layout_tree_dump`](crate::StyleEngine::layout_tree_dump) —
+    /// a `Frame` has geometry but no tree, the engine has the tree but no frame
+    /// geometry; hosts pick what they need (key formatting requires `K: Debug`).
     pub fn boxes_dump(&self) -> String
     where
         K: std::fmt::Debug,
@@ -93,39 +103,47 @@ impl<K: Copy + PartialEq> Frame<K> {
     }
 }
 
-/// 非文本叶固有尺寸区间（T5d）：((min_w, min_h), (max_w, max_h))。
+/// Non-text leaf intrinsic sizing range (T5d): ((min_w, min_h), (max_w, max_h)).
 pub(crate) type IntrinsicSize = ((f32, f32), (f32, f32));
 
-/// ③multi-column 稳态缓存：幻影列 taffy 节点与当前分配（settle_columns
-/// 复用；n/colw/分配全等帧零额外布局 pass）。assignment[i] = 子节点 i
-/// 所在列（树序）；usize::MAX = 重建后待分配。
+/// ③ multi-column steady-state cache: phantom column taffy nodes and the
+/// current assignment (reused by settle_columns; frames where n/colw/assignment
+/// are all identical perform zero extra layout passes). assignment[i] = the
+/// column child node i lands in (tree order); usize::MAX = pending assignment
+/// after a rebuild.
 #[derive(Default)]
 struct MulticolState {
     phantoms: Vec<taffy::NodeId>,
-    /// 三期⑤b：spanner 分段行包装（Flex Row 装 n 幻影列）——
-    /// column-span:all 模式下每段一行；行模式为空。
+    /// Phase 3 ⑤b: spanner segment row wrapping (a Flex Row holding n phantom
+    /// columns) — one row per segment under column-span:all; empty in row mode.
     rows: Vec<taffy::NodeId>,
-    /// 三期⑤b：spanner 分段模式（容器 Flex Column + 行包装）。
+    /// Phase 3 ⑤b: spanner segment mode (container Flex Column + row wrapping).
     span_mode: bool,
-    /// 三期⑤b：容器孩子序签名（Seg(段序) | Spanner→usize::MAX）——
-    /// 行数不变而 spanner 换位时仅重排容器孩子。
+    /// Phase 3 ⑤b: container child-order signature (Seg(segment index) |
+    /// Spanner→usize::MAX) — when the row count is unchanged but the spanner
+    /// changes position, only the container children are reordered.
     seq_sig: Vec<usize>,
     n: usize,
     colw: f32,
-    /// 每真实子件 (段序, 列序)；(usize::MAX, _) = 重建后待分配
-    /// （spanner 不参与平衡，恒 MAX）。
+    /// Per real child: (segment index, column index); (usize::MAX, _) = pending
+    /// assignment after a rebuild (spanners never participate in balancing and
+    /// are always MAX).
     assignment: Vec<(usize, usize)>,
-    /// 三期⑤a：断口 margin-top 截断的原值备份（taffy 层）——
-    /// 不再列首 / 回退块流时恢复；restyle 时清空（map_style 全量重写
-    /// 已把 margin 复位为样式真值）。
+    /// Phase 3 ⑤a: backup of the original value wherever break margin-top was
+    /// truncated (taffy layer) — restored when the child is no longer the first
+    /// item in a column or falls back to block flow; cleared on restyle
+    /// (map_style's full rewrite has already reset margins to their style
+    /// truth).
     truncated: HashMap<NodeId, MarginTopBackup>,
 }
 
-/// 断口 margin-top 备份的 Send/Sync 镜像：taffy 0.14 `LengthPercentageAuto`
-/// 为 nan-boxing（内部 `*const ()`），非 `Send`/`Sync`，直接入 `HashMap`
-/// 会拖垮 `StyleEngine` 的线程承诺（阶段3 静态断言）。改用显式三态镜像
-/// 记录，恢复时重建；margin 不产生 calc 值（CSS 层已解析），其余 tag 不
-/// 可达（按 Auto 兜底）。
+/// Send/Sync mirror for break margin-top backups: taffy 0.14
+/// `LengthPercentageAuto` is NaN-boxed (internally a `*const ()`) and therefore
+/// not `Send`/`Sync`; putting it directly into a `HashMap` would break
+/// `StyleEngine`'s threading guarantees (Stage 3 static assertions). An
+/// explicit three-variant mirror record is used instead and rebuilt on
+/// restore; margins never produce calc values (already resolved at the CSS
+/// layer), so the remaining tags are unreachable (Auto is the fallback).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MarginTopBackup {
     Length(f32),
@@ -153,17 +171,21 @@ impl MarginTopBackup {
     }
 }
 
-/// taffy 0.14 `TaffyTree` 的 Send/Sync 包装：`TaffyTree` 类型面非
-/// `Send`/`Sync`——内部 `taffy::Style` 携带 nan-boxing 的 `CompactLength`
-/// （`*const ()`）。该指针仅在 taffy `calc` 特性下承载 calc 句柄；引擎
-/// 从不构造 taffy calc 值（CSS `calc()` 在解析/计算层解析为纯 f32），
-/// 所有 `CompactLength` 均为 NaN-boxed 位模式载荷（等同 f32），跨线程
-/// 转移安全。上游已知限制：taffy 未为 CompactLength 提供 Send/Sync impl。
+/// Send/Sync wrapper for taffy 0.14 `TaffyTree`: `TaffyTree` is not
+/// `Send`/`Sync` on its type surface — the internal `taffy::Style` carries a
+/// NaN-boxed `CompactLength` (`*const ()`). That pointer only carries a calc
+/// handle under taffy's `calc` feature; the engine never constructs taffy calc
+/// values (CSS `calc()` is resolved to a plain f32 at the parse/evaluation
+/// layers), so every `CompactLength` is a NaN-boxed bit-pattern payload
+/// (equivalent to f32) and safe to move across threads. Known upstream
+/// limitation: taffy does not provide Send/Sync impls for CompactLength.
 struct SendSyncTaffy(taffy::TaffyTree);
 
-/// 增量重样式去重守卫（阶段5）：同一 restyle 调用内按 pass 计数标记
-/// 已完成节点——脏根互为祖先/后代时，先走的子树覆盖后走的根，避免
-/// 重复求值。全量路径用空表（全节点未标记）语义等价于无守卫。
+/// Incremental restyle dedup guard (Stage 5): within a single restyle call,
+/// completed nodes are marked by pass counter — when dirty roots are ancestors
+/// or descendants of each other, the subtree walked first covers the root
+/// walked later, avoiding duplicate evaluation. The full-tree path uses an
+/// empty map (no node marked), semantically equivalent to no guard.
 #[derive(Default)]
 struct RestyleGuard {
     done: slotmap::SecondaryMap<NodeId, u32>,
@@ -200,25 +222,26 @@ unsafe impl Send for SendSyncTaffy {}
 #[allow(unsafe_code)]
 unsafe impl Sync for SendSyncTaffy {}
 
-/// F2（ADR-0022 D1）：结算 pass 种类——依赖声明 + 拓扑调度（替换 frame
-/// 硬编码序 calc→tables→columns→floats→lines）。pass 内脏区跳过（增量
-/// 布局）=F3 范围。
+/// F2 (ADR-0022 D1): settle pass kinds — dependency declaration + topological
+/// scheduling (replacing frame's hardcoded order
+/// calc→tables→columns→floats→lines). Dirty-region skipping within a pass
+/// (incremental layout) = F3 scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettlePassKind {
-    /// 延迟 calc 求值（三期①）——几何结算源头。
+    /// Deferred calc evaluation (Phase 3 ①) — the source of geometric settlement.
     Calc,
-    /// 表格列模板结算。
+    /// Table column template settlement.
     Tables,
-    /// 多列结算。
+    /// Multi-column settlement.
     Columns,
-    /// 浮动结算（E4）。
+    /// Float settlement (E4).
     Floats,
-    /// IFC 行打包结算（F1）。
+    /// IFC line packing settlement (F1).
     Lines,
 }
 
 impl SettlePassKind {
-    /// 声明依赖（被依赖者须先运行）。
+    /// Declared dependencies (the passes depended on must run first).
     fn deps(self) -> &'static [SettlePassKind] {
         match self {
             SettlePassKind::Calc => &[],
@@ -229,8 +252,9 @@ impl SettlePassKind {
         }
     }
 
-    /// 拓扑调度序（稳定插入序；依赖为静态无环表——环即 bug，
-    /// debug_assert 防回归）。
+    /// Topological schedule order (stable insertion order; dependencies are a
+    /// static acyclic table — a cycle is a bug, debug_assert guards against
+    /// regressions).
     fn schedule() -> Vec<SettlePassKind> {
         let all = [
             SettlePassKind::Calc,
@@ -262,29 +286,33 @@ impl SettlePassKind {
     }
 }
 
-/// G1（ADR-0032）：单槽活动过渡——reconciliation 启动/重定向，采样挂点
-/// 逐帧推进。`from`/`to` 为过渡端点值（from 可能是重定向时刻的插值中间
-/// 值）；时间量与 `self.now` 同为秒（f32，与 animation 采样一致）。
+/// G1 (ADR-0032): single-slot active transition — started/redirected at
+/// reconciliation and advanced per frame at the sampling hook. `from`/`to` are
+/// the transition endpoint values (from may be the interpolation midpoint at
+/// redirect time); durations are in seconds like `self.now` (f32, matching
+/// animation sampling).
 #[derive(Debug, Clone)]
 struct ActiveTransition {
-    /// 目标 PropertyId（写回与列表配对用；槽位由 pid.slot() 派生）。
+    /// Target PropertyId (used for write-back and list pairing; the slot is
+    /// derived via pid.slot()).
     pid: PropertyId,
-    /// 过渡起点值（启动=before-change 值；重定向=当前插值中间值）。
+    /// Transition start value (start = before-change value; redirect = current
+    /// interpolation midpoint).
     from: DeclValue,
-    /// 过渡终点值（restyled 后的级联值）。
+    /// Transition end value (the cascaded value after restyle).
     to: DeclValue,
-    /// 启动/重定向时刻（帧时间，秒）。
+    /// Start/redirect time (frame time, in seconds).
     start_time: f32,
-    /// 过渡时长（秒；≥0）。
+    /// Transition duration (seconds; ≥0).
     duration: f32,
-    /// 延迟（秒；可为负=快进）。
+    /// Delay (seconds; may be negative = fast-forward).
     delay: f32,
-    /// 缓动（复用 animation 文法，ADR-0032 D1）。
+    /// Easing (reuses the animation grammar, ADR-0032 D1).
     easing: TimingFn,
 }
 
-/// P7-②：单个动画组的运行参数视图（anim_groups 从描述符列表
-/// 循环补齐物化）。
+/// P7-②: runtime parameter view of a single animation group (materialized by
+/// anim_groups, cycling the descriptor lists to fill).
 #[derive(Clone, Debug)]
 struct AnimGroupSpec {
     name: Option<String>,
@@ -296,26 +324,30 @@ struct AnimGroupSpec {
     fill: crate::css::property::AnimFillMode,
 }
 
-/// F1（P3，ADR-0034 D2）：行内参与者 TOP 装箱暂存——settle_lines 收集、
-/// flush_inline_line 消费（vertical-align 统一结算偏移+行盒扩展）。
+/// F1 (P3, ADR-0034 D2): inline participant TOP packing staging — collected by
+/// settle_lines, consumed by flush_inline_line (vertical-align resolves
+/// offsets uniformly + line box expansion).
 #[cfg(feature = "text")]
 struct PendingLinePart {
     tid: taffy::NodeId,
     va: crate::css::property::VerticalAlignKind,
-    /// 参与者基线距（TOP 装箱内从盒顶到其基线；Box 无文本=盒高）。
+    /// Participant baseline distance (top-to-baseline within TOP packing; a
+    /// text-less Box = box height).
     pb: f32,
-    /// 参与者盒高（decl 覆盖后）。
+    /// Participant box height (after declaration overrides).
     h: f32,
-    /// TOP 装箱 inset.top 值（= 装箱行顶 − 容器 pad_top）。
+    /// TOP packing inset.top value (= packing row top − container pad_top).
     top: f32,
-    /// 参与者字号 px（sub/super em 常量、middle x-height 换算）。
+    /// Participant font size in px (sub/super em constants, middle x-height
+    /// conversion).
     font_size: f32,
-    /// 参与者字体度量（middle x-height、text-top/bottom asc/desc）。
+    /// Participant font metrics (middle x-height, text-top/bottom asc/desc).
     fm: crate::css::value::FontMetrics,
 }
 
-/// P7-②：组预处理产物——（组参数，槽位→关键帧轨道）。轨道值借用
-/// 样式表（'sheet 生命周期内只读）。
+/// P7-②: group preprocessing output — (group parameters, slot → keyframe
+/// track). Track values borrow from the stylesheet (read-only for the 'sheet
+/// lifetime).
 type PreparedAnimGroups<'a> = Vec<(
     &'a AnimGroupSpec,
     std::collections::BTreeMap<
@@ -324,8 +356,9 @@ type PreparedAnimGroups<'a> = Vec<(
     >,
 )>;
 
-/// G1（ADR-0032）：不可过渡的描述符槽——animation-* 与 transition-*
-/// 描述符自身（文档未定义其动画性；transition 描述符自指无意义）。
+/// G1 (ADR-0032): descriptor slots that cannot transition — the animation-* and
+/// transition-* descriptors themselves (the spec does not define their
+/// animatability; a transition descriptor referencing itself is meaningless).
 fn is_unanimatable_descriptor(pid: PropertyId) -> bool {
     use PropertyId as P;
     matches!(
@@ -345,8 +378,10 @@ fn is_unanimatable_descriptor(pid: PropertyId) -> bool {
     )
 }
 
-/// G1（ADR-0032）：过渡在时刻 now 的当前值（重定向 from 端取值）——
-/// 延迟段=from；进行中=缓动求值 lerp_decl（离散对 50% 翻转）；完成=to。
+/// G1 (ADR-0032): the transition's current value at time now (sampled as the
+/// redirect-time `from` endpoint) — during the delay it is `from`; while
+/// running it is the eased lerp_decl result (discrete pairs flip at 50%);
+/// once complete it is `to`.
 fn transition_sample(t: &ActiveTransition, now: f32, dark: bool) -> DeclValue {
     use crate::css::property::lerp_decl;
     let local = now - t.start_time - t.delay;
@@ -364,69 +399,91 @@ fn transition_sample(t: &ActiveTransition, now: f32, dark: bool) -> DeclValue {
     })
 }
 
-/// 样式引擎实例。K 为宿主节点键（Copy + Eq + Hash）。
+/// The style engine instance. `K` is the host node key (Copy + Eq + Hash).
 pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     tree: StyleTree,
     sheet: Stylesheet,
-    /// B1：用户起源样式表（css-cascade-5 User 层；set_user_stylesheet 注入）。
+    /// B1: user-origin stylesheet (css-cascade-5 User layer; injected via
+    /// set_user_stylesheet).
     user_sheet: Option<Stylesheet>,
-    /// P5（ADR-0033）：UA 起源样式表（UserAgent 层挂点；默认 None——
-    /// 缺省呈现是宿主策略，引擎只提供机制；内置表见 `builtins` 模块）。
+    /// P5 (ADR-0033): UA-origin stylesheet (UserAgent layer hook; None by
+    /// default — default presentation is host policy and the engine only
+    /// provides the mechanism; built-in sheets live in the `builtins` module).
     ua_sheet: Option<Stylesheet>,
-    /// B3：当前焦点链锚点（set_focus 管理 FOCUS/FOCUS_VISIBLE/FOCUS_WITHIN
-    /// 三态迁移；None = 无焦点）。
+    /// B3: current focus-chain anchor (set_focus manages the three-state
+    /// FOCUS/FOCUS_VISIBLE/FOCUS_WITHIN transitions; None = no focus).
     focused_node: Option<NodeId>,
-    /// B4：文档级 @property 注册表（name → 规则；sheet 变更点统一重建）。
+    /// B4: document-level @property registry (name → rule; rebuilt uniformly
+    /// at sheet-change points).
     registered_props: std::collections::BTreeMap<String, crate::css::property_rule::PropertyRule>,
-    /// F3d（ADR-0026 D4）：文档级 @font-face 登记表（合并序 = user → 主表
-    /// → 附加表；同族后规则胜；sheet 变更点统一重建）。字体字节仍由宿主
-    /// add_font 推送——登记表仅描述映射与筛选元数据。
+    /// F3d (ADR-0026 D4): document-level @font-face registry (merge order =
+    /// user → primary → extra sheets; for the same family the later rule
+    /// wins; rebuilt uniformly at sheet-change points). Font bytes are still
+    /// pushed by the host via add_font — the registry only describes the
+    /// mapping and filtering metadata.
     font_faces: Vec<crate::css::stylesheet::FontFaceRule>,
-    /// E：文档级 @counter-style 登记表（与 @font-face 同变更点重建；合并
-    /// 序 = ua → user → 主表 → 附加表，同名后规则胜——查询按此序取末条）。
-    /// css-counter-styles-3 §3：登记可整体覆盖内置样式。
+    /// E: document-level @counter-style registry (rebuilt at the same
+    /// change points as @font-face; merge order = ua → user → primary →
+    /// extra sheets, same-name later rule wins — lookups take the last entry
+    /// in that order). css-counter-styles-3 §3: a registration wholesale
+    /// overrides the built-in style.
     counter_styles: Vec<crate::css::stylesheet::counter_style::CounterStyleRule>,
-    /// C1（ADR-0015）：伪元素注册表 (origin NodeId, which) → 伪节点 NodeId
-    ///（引擎 materialize_pseudos 持有；宿主镜像通道不含伪键）。
+    /// C1 (ADR-0015): pseudo-element registry (origin NodeId, which) → pseudo
+    /// node NodeId (held by the engine's materialize_pseudos; the host mirror
+    /// channel carries no pseudo keys).
     pseudo_ids: std::collections::BTreeMap<(NodeId, u8), NodeId>,
-    /// B2：主表源文本留存（rebuild_sheets 重解析用——嵌套 @import 的
-    /// 未决指令只在整表重解析时存活）。
+    /// B2: primary sheet source text retained for rebuild_sheets
+    /// re-parsing — pending directives of nested @import (a child sheet
+    /// awaiting its source) survive only a full re-parse.
     primary_source: String,
-    /// B2：附加 author 表（登记序级联，句柄化移除；源文本留存供层树
-    /// 重建与导入重拼接）。
+    /// B2: extra author sheets (cascaded in registration order, removed by
+    /// handle; source text retained for layer-tree rebuilds and import
+    /// re-splicing).
     extra_sheets: Vec<(u64, String, Stylesheet)>,
     next_sheet_id: u64,
-    /// B2：文档全局层树（跨表层序唯一基准；附着序 = 先现序）。
+    /// B2: document-global layer tree (the unique baseline for cross-sheet
+    /// layer order; attachment order = first-appearance order).
     doc_layers: crate::css::stylesheet::LayerRegistry,
-    /// B2：内存导入源（@import url → CSS 文本）。
+    /// B2: in-memory import sources (@import url → CSS text).
     imports: std::collections::BTreeMap<String, String>,
-    /// B2：宿主导入加载器（优先于内存源；Send+Sync 引擎契约）。
+    /// B2: host import loader (takes priority over in-memory sources;
+    /// Send+Sync engine contract).
     import_loader: Option<ImportLoader>,
     media: MediaEnv,
     key_to_node: HashMap<K, NodeId>,
     node_to_key: HashMap<NodeId, K>,
     root_key: Option<K>,
-    /// ADR-0010 多根：overlay 根（插入序）。首个 `insert(None)` 为文档根
-    ///（`root_key`），后续 `insert(None)` 依次入列——弹窗/浮层载体。
+    /// ADR-0010 multiple roots: overlay roots (insertion order). The first
+    /// `insert(None)` becomes the document root (`root_key`); later
+    /// `insert(None)` calls queue up in turn — the carriers of popups and
+    /// floating layers.
     overlay_roots: Vec<K>,
-    /// ADR-0010：top-layer 名单（进层序），绘制于全部普通根之后。
+    /// ADR-0010: top-layer roster (entry order), painted after all ordinary
+    /// roots.
     top_layer: Vec<K>,
-    /// ADR-0010：上次 sync_root_order 已应用的根序（稳态帧零操作）。
+    /// ADR-0010: the root order last applied by sync_root_order (steady-state
+    /// frames are no-ops).
     root_order_applied: Vec<K>,
-    /// 宿主推送的叶测量（文本叶，T5 前由宿主提供）。
+    /// Host-pushed leaf measurements (text leaves, provided by the host
+    /// before T5).
     measures: HashMap<NodeId, (f32, f32)>,
-    /// 节点滚动偏移（绘制层用；布局不消费）。
+    /// Node scroll offsets (consumed by the paint layer; layout ignores
+    /// them).
     scroll_offsets: HashMap<NodeId, (f32, f32)>,
     epoch: u64,
     generation: u64,
     dirty_struct: bool,
     dirty_style: bool,
-    /// 增量重样式（阶段5）：set_declarations 脏根（子树局部重算）。
-    /// 全量失效标（dirty_style）优先；容器规则在场时增量退全量。
+    /// Incremental restyle (Stage 5): dirty roots from set_declarations
+    /// (subtree-local recomputation). The full-invalidation flag
+    /// (dirty_style) takes priority; incremental degrades to full when
+    /// container rules are present.
     style_dirty_roots: Vec<NodeId>,
-    /// P6（ADR-0035 D1）：`:has()` 单 compound host 快筛索引（键 = `:has`
-    /// 前 compound 的类型/类/id；表变更点重建，同 rebuild_document_registries 时机）。
-    /// 空 = 未建或无合格规则（判定回全量兜底）；含哨兵键（全空）= 恒升级。
+    /// P6 (ADR-0035 D1): `:has()` single-compound host quick-screen index
+    /// (key = type/class/id of the compound before `:has`; rebuilt at sheet
+    /// change points, same timing as rebuild_document_registries).
+    /// Empty = not built or no qualifying rules (matching falls back to the
+    /// full path); a sentinel key (all-empty) = always upgrade.
     has_host_index: Vec<crate::selector::HasHostKey>,
     viewport: (f32, f32),
     scale: f32,
@@ -435,91 +492,133 @@ pub struct StyleEngine<K: Copy + Eq + Hash + 'static> {
     taffy: SendSyncTaffy,
     taffy_root: Option<taffy::NodeId>,
     taffy_node: HashMap<NodeId, taffy::NodeId>,
-    /// ①calc 直通：延迟结算条目（restyle 重建，settle_calc 消费）。
+    /// ①calc pass-through: deferred settlement entries (rebuilt by restyle,
+    /// consumed by settle_calc).
     calc_deferred: Vec<crate::layout::DeferredCalc>,
-    /// taffy 父链（结算基准 = 父内容尺寸；build_taffy_subtree 填充）。
+    /// taffy parent chain (settlement baseline = parent content size; filled
+    /// by build_taffy_subtree).
     taffy_parent: HashMap<taffy::NodeId, taffy::NodeId>,
-    /// 三期② absolute 锚定跳走：node → 重挂包含块（Some(cb)=cb≠直父；
-    /// None=ICB）。settle_absolute_anchors 每帧重建，collect 消费。
+    /// Phase 3 ② absolute anchor re-homing map: node → re-parented containing
+    /// block (Some(cb) = cb ≠ direct parent; None = ICB). Rebuilt each frame
+    /// by settle_absolute_anchors, consumed by collect.
     abs_cb: HashMap<NodeId, Option<NodeId>>,
-    /// 三期②：taffy 结构偏离样式镜像的活跃标（重挂过 absolute 即置位；
-    /// 全部归位后的下一帧清零——稳态零 absolute 页面跳过整段结构对比）。
+    /// Phase 3 ②: active flag for taffy structure drifting from the style
+    /// mirror (set when any absolute node was re-homed; cleared on the frame
+    /// after everything has been re-homed — a steady-state page with zero
+    /// absolutes skips the whole structure comparison).
     abs_structured: bool,
-    /// ②table：display:table 节点注册表（restyle 收集，settle_tables 结算）。
+    /// ②table: display:table node registry (collected by restyle, settled by
+    /// settle_tables).
     tables: Vec<NodeId>,
-    /// ②table：上次结算列宽缓存（px；全等免重排——稳态帧零额外布局 pass）。
+    /// ②table: last-settled column width cache (px; skip relayout on
+    /// equality — steady-state frames do zero extra layout passes).
     table_cols: HashMap<NodeId, Vec<f32>>,
-    /// 三期④：上次结算的单元格列位签名（(cell, 列起点0基, 列跨, 行跨)；
-    /// 全等免重写）。
+    /// Phase 3 ④: cell column-slot signature of the last settlement
+    /// ((cell, 0-based column start, col span, row span); skip rewriting on
+    /// equality).
     table_cells: HashMap<NodeId, Vec<(NodeId, usize, usize, u32)>>,
-    /// 表格 wrapper 重构：display:table 节点 → 内表 taffy 节点。CSS 2.2
-    /// 表格盒模型要求块级子件提升到表盒之外（匿名块包裹），taffy 无法在
-    /// 单节点内同时表达「表盒自身框」与「提升件堆叠」——故表元素的 taffy
-    /// 节点降级为 wrapper（Block、填满、零 margin/padding/border），新建
-    /// 内表节点承载真实表盒样式；行/组/标题等表格内部件挂内表，不当块级
-    /// 子件挂 wrapper。settle_table_fixup 填充；rebuild_taffy 清空；
-    /// collect 消费内表矩形。
+    /// Table wrapper refactor: display:table node → inner-table taffy node.
+    /// The CSS 2.2 table box model requires block-level children to be
+    /// promoted out of the table box (wrapped in anonymous blocks); taffy
+    /// cannot express "the table box's own frame" and "the promoted children
+    /// stacking" within a single node — so the table element's taffy node is
+    /// demoted to a wrapper (Block, fill, zero margin/padding/border) and a
+    /// fresh inner-table node carries the real table box styles; table
+    /// internals (rows/groups/captions) attach to the inner table, not as
+    /// block-level children of the wrapper. Filled by settle_table_fixup;
+    /// cleared by rebuild_taffy; collect consumes the inner-table rect.
     taffy_table_inner: HashMap<NodeId, taffy::NodeId>,
-    /// 表格 wrapper 重构：裸单元格幻影行缓存——display:table-cell 直属表盒
-    /// 时 settle_tables 建单格行 Grid（幻影节点，同 multicol 幻影列模式）
-    /// 承接单元格；键（表节点, 行槽位）。rebuild_taffy 清空。
+    /// Table wrapper refactor: phantom-row cache for bare cells — when a
+    /// display:table-cell is a direct child of the table box, settle_tables
+    /// creates a single-cell row Grid (a phantom node, same pattern as
+    /// multicol phantom columns) to host the cell; key = (table node, row
+    /// slot). Cleared by rebuild_taffy.
     table_row_anon: HashMap<(NodeId, usize), taffy::NodeId>,
-    /// ③multi-column：多列容器注册表（restyle 收集，settle_columns 结算）。
+    /// ③multi-column: multi-column container registry (collected by restyle,
+    /// settled by settle_columns).
     multicols: Vec<NodeId>,
-    /// ③multi-column：稳态缓存（幻影列节点 + 当前分配；全等免重排）。
+    /// ③multi-column: steady-state cache (phantom column nodes + current
+    /// assignment; skip relayout on equality).
     multicol_state: HashMap<NodeId, MulticolState>,
-    /// 三期⑤c：列规条带（相对容器 border-box 原点）——settle_column_rules
-    /// 逐帧全量重建（几何随列平衡/文本换行漂移，无稳态签名可复用）。
+    /// Phase 3 ⑤c: column rule strips (relative to the container's
+    /// border-box origin) — rebuilt from scratch every frame by
+    /// settle_column_rules (geometry drifts with column balancing and line
+    /// wrapping; no reusable steady-state signature).
     column_rules: HashMap<NodeId, Vec<crate::paint::ColumnRuleSeg>>,
-    /// 命中几何表（F3a，ADR-0023）：最近一帧 paint 期收集；hit_test 逆序查询。
+    /// Hit-test geometry table (F3a, ADR-0023): collected during the last
+    /// frame's paint; hit_test queries in reverse order.
     hit_rects: Vec<crate::paint::HitRect>,
-    /// 阶段2③：容器内容盒尺寸快照（上一布局 pass 的 record_container_sizes
-    /// 记录；restyle 期 @container 求值消费；缺席 = unknown → 特性不命中）。
+    /// Stage 2 ③: container content-box size snapshots (recorded by
+    /// record_container_sizes during the previous layout pass; consumed when
+    /// evaluating @container during restyle; missing = unknown → feature
+    /// does not match).
     container_sizes: HashMap<NodeId, [f32; 2]>,
     styles: HashMap<NodeId, ComputedStyle>,
-    /// G1（ADR-0032）：活动过渡表——restyle 提交点 reconciliation 启动/
-    /// 重定向/取消，frame() 采样挂点逐帧写入过渡中间值并清理过期条目。
-    /// 空表 = 稳态零写入（无活动过渡时 frame() 与既有行为逐位一致）。
+    /// G1 (ADR-0032): active transition table — reconciliation at the restyle
+    /// commit point starts/redirects/cancels transitions, and the frame()
+    /// sampling hook writes transition intermediate values per frame and
+    /// prunes expired entries. An empty table = steady-state zero writes
+    /// (with no active transitions frame() is bit-identical to prior
+    /// behavior).
     transitions: HashMap<NodeId, Vec<ActiveTransition>>,
-    /// G1（ADR-0032）：动画运行槽位的底层值副本——动画结束（fill:none）
-    /// 时恢复 underlying（css-animations-1：无填充结束后回落底层值，不得
-    /// 残留最后动画采样值）。条目 = (槽, 底层值, 上帧写入值)；上帧写入值
-    /// 用于检测外部重算（restyle 重建 cs 后自动刷新快照）。
+    /// G1 (ADR-0032): underlying-value copies of animated slots — when an
+    /// animation ends (fill: none) the underlying value is restored
+    /// (css-animations-1: after an unfilled animation ends the value falls
+    /// back to the underlying value and must not retain the last animation
+    /// sample). Entry = (slot, underlying value, last written value); the
+    /// last written value detects external recomputation (a restyle that
+    /// rebuilds cs automatically refreshes the snapshot).
     anim_underlying: HashMap<NodeId, Vec<(PropertyId, DeclValue, DeclValue)>>,
-    /// C4（ADR-0018）：::selection 通道样式（origin 直配；宿主读取）。
+    /// C4 (ADR-0018): ::selection channel styles (assigned per origin; read
+    /// by the host).
     selection_styles: HashMap<NodeId, ComputedStyle>,
-    /// C4（ADR-0018）：::placeholder 通道样式（origin 直配；宿主读取）。
+    /// C4 (ADR-0018): ::placeholder channel styles (assigned per origin; read
+    /// by the host).
     placeholder_styles: HashMap<NodeId, ComputedStyle>,
-    /// E4（ADR-0019）：浮动覆写触点集（还原清单——还原=map_style 重放
-    /// pristine 样式，不缓存 taffy::Style 值（含 !Send/!Sync 的
-    /// CheapCloneStr，会炸 assert_send_sync）。
+    /// E4 (ADR-0019): float override touch set (restore manifest — restoring
+    /// means replaying pristine styles via map_style; taffy::Style values are
+    /// NOT cached because they contain the !Send/!Sync CheapCloneStr, which
+    /// would trip assert_send_sync).
     float_touched: std::collections::HashSet<NodeId>,
-    /// F1（ADR-0021）：行内运行参与者集——settle_lines 按运行上下文宽度
-    /// 测置的文本叶/盒；文本 remeasure 全宽重测豁免（否则破坏打包结果）。
+    /// F1 (ADR-0021): inline run participant set — text leaves/boxes measured
+    /// by settle_lines within the run-context width; text remeasures are
+    /// exempt from full-width re-measurement (otherwise the packing result
+    /// breaks).
     inline_run_participants: std::collections::HashSet<NodeId>,
-    /// F2（ADR-0022 D2）：文本截断 override（ellipsis/line-clamp）——
-    /// apply_text_truncation 生成，paint Text op 文本替换消费。
+    /// F2 (ADR-0022 D2): text truncation overrides (ellipsis/line-clamp) —
+    /// generated by apply_text_truncation, consumed as paint Text op text
+    /// replacements.
     text_overrides: std::collections::HashMap<NodeId, String>,
-    /// A9：注册字体度量（add_font 时探测：族名表 → ch/ex/ic 每 em 值；
-    /// 未注册族回落近似缺省 ch/ex=0.5em、ic=1em，B 级在案）。
+    /// A9: registered font metrics (probed at add_font: family name table →
+    /// per-em ch/ex/ic values; unregistered families fall back to the
+    /// approximate defaults ch/ex=0.5em, ic=1em, documented in
+    /// FEATURES.md/SINK-MATRIX.md as Tier B).
     font_metrics: Vec<(Vec<String>, crate::css::value::FontMetrics)>,
-    /// span 级样式（T5c）：NodeId → (字节起点, 字节终点, 覆盖后的 ComputedStyle)。
+    /// Span-level styles (T5c): NodeId → (byte start, byte end, post-override
+    /// ComputedStyle).
     span_styles: HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
-    /// 文本叶父指针（T5c-2）：换行重测量需读包含块宽度。
+    /// Text-leaf parent pointers (T5c-2): line-wrapping remeasurement needs
+    /// the containing block width.
     parents: HashMap<NodeId, NodeId>,
-    /// 内置自动测量的文本叶集合（T5c-2）：仅这些节点参与换行重测量。
+    /// Set of text leaves with built-in auto-measurement (T5c-2): only these
+    /// nodes participate in line-wrapping remeasurement.
     #[cfg(feature = "text")]
     auto_text: std::collections::HashSet<NodeId>,
-    /// 文本叶测量所用换行约束（T5c-2）：绘制与测量折行一致；缺席 = 无界。
+    /// Wrapping constraint used for text-leaf measurement (T5c-2): paint and
+    /// measurement line wrapping agree; missing = unbounded.
     wrap_widths: HashMap<NodeId, Option<f32>>,
-    /// 背景图注册表（第五批⑨）：url() 引用 → 宿主预解码 RGBA。
+    /// Background image registry (batch 5 ⑨): url() reference → host-predecoded
+    /// RGBA.
     images: HashMap<String, crate::paint::ImageRes>,
-    /// 文本叶最小内容尺寸（T5d，shrink-to-fit 下限；restyle 期随自动测量产出）。
+    /// Text-leaf minimum content size (T5d, shrink-to-fit lower bound;
+    /// produced alongside auto-measurement during restyle).
     #[cfg(feature = "text")]
     min_measures: HashMap<NodeId, (f32, f32)>,
-    /// 宿主推送的非文本叶固有尺寸区间（T5d）：(min, max) 各轴。
+    /// Host-pushed non-text-leaf intrinsic size ranges (T5d): (min, max) per
+    /// axis.
     intrinsics: HashMap<NodeId, IntrinsicSize>,
-    /// 内置文本栈（feature = "text"；字体字节由宿主推送）。
+    /// Built-in text stack (feature = "text"; font bytes are pushed by the
+    /// host).
     #[cfg(feature = "text")]
     text: crate::text::TextSystem,
 }
@@ -531,7 +630,8 @@ impl<K: Copy + Eq + Hash + 'static> Default for StyleEngine<K> {
 }
 
 impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
-    /// 创建空引擎（树镜像/样式表/环境全空，等待宿主推送）。
+    /// Creates an empty engine (tree mirror/sheet/env all empty, awaiting
+    /// host pushes).
     pub fn new() -> Self {
         Self {
             tree: StyleTree::new(),
@@ -609,9 +709,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
 
     // ---------- 推送协议 ----------
 
-    /// 全量替换样式表（容错：坏规则跳过并记录）。B2：替换主表并全量重建
-    /// 文档层树与导入拼接（附加表保留、按登记序重附着——层序数跨表不可比，
-    /// 以源文本重解析获得干净表内序数再映射文档序）。
+    /// Wholesale stylesheet replacement (tolerant: bad rules are skipped and
+    /// recorded). B2: replaces the primary sheet and fully rebuilds the
+    /// document layer tree and import splicing (extra sheets are kept and
+    /// re-attached in registration order — layer ordinals are not comparable
+    /// across sheets, so the source text is re-parsed to recover clean
+    /// within-sheet ordinals before mapping to document order).
     pub fn set_stylesheet(&mut self, source: &str) -> ParseReport {
         let sheet = crate::css::stylesheet::parse_stylesheet(source);
         self.primary_source = source.to_string();
@@ -624,8 +727,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.sheet.report.clone()
     }
 
-    /// B2：附加 author 样式表（返回句柄供 remove_stylesheet；级联序 =
-    /// 主表之后按登记序，后表胜平手）。@import 在附着期经导入源拼接。
+    /// B2: attach an extra author stylesheet (returns a handle for
+    /// remove_stylesheet; cascade order = after the primary sheet, in
+    /// registration order — later sheets win ties). @import is spliced via
+    /// import sources at attach time.
     pub fn add_stylesheet(&mut self, source: &str) -> u64 {
         self.next_sheet_id += 1;
         let handle = self.next_sheet_id;
@@ -638,7 +743,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         handle
     }
 
-    /// B2：移除附加样式表（句柄无效返回 false）。
+    /// B2: remove an extra stylesheet (returns false for an invalid handle).
     pub fn remove_stylesheet(&mut self, handle: u64) -> bool {
         let before = self.extra_sheets.len();
         self.extra_sheets.retain(|(id, _, _)| *id != handle);
@@ -652,22 +757,25 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         removed
     }
 
-    /// B2：内存导入源（@import url → CSS 文本；未命中再试宿主 loader）。
-    /// 变更后重建已附着表（未解析的导入可补齐）。
+    /// B2: in-memory import source (@import url → CSS text; the host loader
+    /// is tried when this misses). Attached sheets are rebuilt after the
+    /// change (unresolved imports can be completed).
     pub fn set_import_source(&mut self, url: &str, css: &str) {
         self.imports.insert(url.to_string(), css.to_string());
         self.rebuild_sheets();
         self.dirty_style = true;
     }
 
-    /// B2：宿主导入加载器（优先于内存源；None = 移除）。
+    /// B2: host import loader (takes priority over in-memory sources;
+    /// None = remove).
     pub fn set_import_loader(&mut self, loader: Option<ImportLoader>) {
         self.import_loader = loader;
         self.rebuild_sheets();
         self.dirty_style = true;
     }
 
-    /// B2：导入解析器（宿主 loader 优先，回退内存源）。
+    /// B2: import resolver (host loader first, falling back to in-memory
+    /// sources).
     fn import_resolver(&self) -> impl FnMut(&str) -> Option<String> + '_ {
         move |url: &str| {
             if let Some(loader) = &self.import_loader
@@ -679,7 +787,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// B2：附着单表（@import 拼接 + 层树并入文档树重映射 rank）。
+    /// B2: attach a single sheet (@import splicing + layer-tree merge into
+    /// the document tree with rank remapping).
     fn attach_sheet(&mut self, sheet: &mut Stylesheet) {
         {
             let mut seen = Vec::new();
@@ -689,8 +798,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         sheet.remap_layers_to_doc(&mut self.doc_layers);
     }
 
-    /// B2：文档级全量重建（主表 → 附加表按登记序）：重解析附加表（干净
-    /// 表内层序数）→ 附着（导入拼接 + 文档层树重映射）。
+    /// B2: document-level full rebuild (primary sheet → extra sheets in
+    /// registration order): re-parse the extra sheets (clean within-sheet
+    /// layer ordinals) → attach (import splicing + document layer tree
+    /// remapping).
     fn rebuild_sheets(&mut self) {
         self.doc_layers = crate::css::stylesheet::LayerRegistry::default();
         // B2 修订：主表从源文本重解析（而非复用既有解析产物）——嵌套
@@ -713,16 +824,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.rebuild_has_host_index();
     }
 
-    /// B2：author 表组快照（主表在前、附加表按登记序 = 文档序）。
+    /// B2: snapshot of the author sheet group (primary sheet first, extra
+    /// sheets in registration order = document order).
     fn author_sheets(&self) -> Vec<&Stylesheet> {
         std::iter::once(&self.sheet)
             .chain(self.extra_sheets.iter().map(|(_, _, s)| s))
             .collect()
     }
 
-    /// B2：全表集合是否含 @container 规则（收敛环 pass 判据）。P6 D3
-    /// （ADR-0035）：补齐 user_sheet 与 ua_sheet 漏检（原仅主表+附加表——
-    /// 含 @container 的 user 表此前被跳过，收敛环 pass 数判定可错）。
+    /// B2: whether any sheet in the full sheet set contains @container rules
+    /// (convergence-loop pass criterion). P6 D3 (ADR-0035): closes the gap
+    /// where user_sheet and ua_sheet were missed (previously only the
+    /// primary + extra sheets were checked — a user sheet containing
+    /// @container was skipped, so the convergence-loop pass-count criterion
+    /// could be wrong).
     fn any_container_rules(&self) -> bool {
         self.sheet.has_container_rules
             || self
@@ -739,10 +854,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 .any(|(_, _, s)| s.has_container_rules)
     }
 
-    /// B4：重建文档级 @property 注册表（sheet 变更点统一调用）。合并序 =
-    /// ua_sheet → user_sheet → 主表 → 附加表登记序（author 覆 user 覆 UA，
-    /// 与起源优先级同构；P5 ADR-0033）；同名后规则覆盖（spec：@property
-    /// 全部层叠前按文档序处理）。
+    /// B4: rebuild the document-level @property registry (called uniformly at
+    /// sheet-change points). Merge order = ua_sheet → user_sheet → primary →
+    /// extra sheets in registration order (author overrides user overrides
+    /// UA, isomorphic with origin priority; P5 ADR-0033); same-name later
+    /// rules overwrite (spec: @property is processed in document order before
+    /// all cascading).
     fn rebuild_registered_props(&mut self) {
         self.registered_props.clear();
         if let Some(ua) = &self.ua_sheet {
@@ -765,12 +882,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// F3d（ADR-0026 D4）+ E：文档级登记表统一重建（@font-face +
-    /// @counter-style，同变更点）。合并序 = ua_sheet → user_sheet → 主表
-    /// → 附加表登记序（P5 ADR-0033 起源序）；@font-face 同族后规则胜
-    /// （css-fonts-4）；@counter-style 同名后规则胜（css-counter-styles-3，
-    /// 且可整体覆盖内置样式）。字体字节仍由宿主 add_font 推送——登记表
-    /// 仅描述映射与筛选元数据。
+    /// F3d (ADR-0026 D4) + E: unified document-level registry rebuild
+    /// (@font-face + @counter-style, same change point). Merge order =
+    /// ua_sheet → user_sheet → primary → extra sheets in registration order
+    /// (P5 ADR-0033 origin order); for @font-face, same-family later rules
+    /// win (css-fonts-4); for @counter-style, same-name later rules win
+    /// (css-counter-styles-3, and may wholesale override built-in styles).
+    /// Font bytes are still pushed by the host via add_font — the registry
+    /// only describes mapping and filtering metadata.
     fn rebuild_document_registries(&mut self) {
         self.font_faces.clear();
         if let Some(ua) = &self.ua_sheet {
@@ -799,17 +918,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// C1（ADR-0015）：伪元素实体化 pass（frame 内 sync_root_order 之后、
-    /// rebuild_taffy 之前）。全表无伪元素规则 → 清除全部（零成本快路径）；
-    /// 有 → 为每个宿主节点确保 ::before 首子 / ::after 末子存在并归位。
-    /// 伪节点裸 StyleNode（无身份——selectors 经 originating_element 回
-    /// origin 匹配左复合）；文本由 sync_pseudo_text 按 content 计算值供给。
-    /// P9-3（css-lists-3 §3.1）：每个宿主另确保 ::marker 伪节点（首子、
-    /// ::before 之前；空 marker 由 sync_pseudo_text 抑制成盒）——无条件
-    /// 创建使 list-item 宿主首帧即有样式（无 materialize 期滞后）；marker
-    /// 的 list-style-image 注入按上一帧宿主样式（首帧无图像=B·豁免，
-    /// ADR-0041）。any_pseudo 快路径例外：UA/作者表无伪元素规则但存在
-    /// list-item 时 marker 仍需存活——快路径条件加 any_list_item 逃逸。
+    /// C1 (ADR-0015): pseudo-element materialization pass (inside frame,
+    /// after sync_root_order and before rebuild_taffy). If no sheet has
+    /// pseudo-element rules → clear everything (zero-cost fast path);
+    /// otherwise ensure each host node has a ::before first child and an
+    /// ::after last child, positioned correctly. Pseudo nodes are bare
+    /// StyleNodes (no identity — selectors match back to the origin through
+    /// originating_element on the left compound); text is supplied from the
+    /// computed `content` by sync_pseudo_text.
+    /// P9-3 (css-lists-3 §3.1): each host additionally gets a ::marker pseudo
+    /// node (first child, before ::before; an empty marker is suppressed from
+    /// producing a box by sync_pseudo_text) — unconditional creation means a
+    /// list-item host is styled from the first frame (no materialize-time
+    /// lag); marker list-style-image injection uses the host's previous-frame
+    /// style (no image on the first frame = Tier B exemption, ADR-0041).
+    /// any_pseudo fast-path exception: with no pseudo-element rules in the
+    /// UA/author sheets but list-item present, markers must still stay alive
+    /// — the fast-path condition adds an any_list_item escape.
     fn materialize_pseudos(&mut self) {
         let any_pseudo = self.sheet.has_pseudo_rules
             || self.user_sheet.as_ref().is_some_and(|s| s.has_pseudo_rules)
@@ -971,14 +1096,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// C1（ADR-0015）：伪元素文本供给（frame 内 restyle 之后、布局之前）。
-    /// 按 content 计算值写 tree.node.text 并登记测量（remeasure pass 同式；
-    /// 折行由 T5c-2 收敛）。content none/normal → text 清空 + 撤测量
-    ///（盒经 map_style display:none 移除）。
-    /// P5（ADR-0036 D2）：升级为树序 DFS 求值——counter 作用域帧栈
-    ///（reset 压帧 / increment 帧顶或隐式 0 累加 / counter() 最内帧、
-    /// counters() 全帧 join）+ 引号深度（quotes 对表）+ attr()（伪元素
-    /// 取 originating element 属性）。树序保证 = materialize_pseudos 归位。
+    /// C1 (ADR-0015): pseudo-element text supply (inside frame, after restyle
+    /// and before layout). Writes tree.node.text from the computed `content`
+    /// and registers measurements (same scheme as the remeasure pass;
+    /// line wrapping converges via T5c-2). content none/normal → clear the
+    /// text and withdraw measurements (the box is removed via map_style
+    /// display:none).
+    /// P5 (ADR-0036 D2): upgraded to tree-order DFS evaluation — counter
+    /// scope frame stack (reset pushes a frame / increment accumulates on the
+    /// top frame or an implicit 0 / counter() takes the innermost frame,
+    /// counters() joins all frames) + quote depth (quotes pair table) +
+    /// attr() (pseudo elements read the originating element's attributes).
+    /// Tree-order guarantee = materialize_pseudos positioning.
     #[cfg(feature = "text")]
     fn sync_pseudo_text(&mut self) {
         if self.pseudo_ids.is_empty() {
@@ -991,9 +1120,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.eval_content_walk(self.tree.root(), &mut scopes, &mut quote_depth, &host_of);
     }
 
-    /// P5（ADR-0036 D2）：content 求值 DFS（树序）。普通节点应用
-    /// counter-reset/increment（压帧/累加，离开弹出）；伪节点按 content
-    /// 序列求值写文本；子树递归含伪节点（归位序 = before → 宿主子 → after）。
+    /// P5 (ADR-0036 D2): content-evaluation DFS (tree order). Ordinary nodes
+    /// apply counter-reset/increment (frame push/accumulate, popped on
+    /// leave); pseudo nodes evaluate their content sequence into text; the
+    /// recursion includes pseudo nodes (positioned order = before → host
+    /// children → after).
     #[cfg(feature = "text")]
     fn eval_content_walk(
         &mut self,
@@ -1083,8 +1214,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// P5（ADR-0036 D1/D2/D3）：伪节点 content 序列求值为文本。
-    /// 返回 (文本, 新引号深度)；None = 不生成（none/normal/无样式）。
+    /// P5 (ADR-0036 D1/D2/D3): evaluate a pseudo node's content sequence into
+    /// text. Returns (text, new quote depth); None = nothing generated
+    /// (none/normal/no style).
     #[cfg(feature = "text")]
     fn eval_pseudo_content(
         &self,
@@ -1188,7 +1320,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         (Some(out), d)
     }
 
-    /// C1 旧路径搬运：把求值文本写回伪节点（text/measure/taffy 高度）。
+    /// C1 legacy-path carrier: writes the evaluated text back to the pseudo
+    /// node (text/measure/taffy height).
     #[cfg(feature = "text")]
     fn apply_pseudo_text(&mut self, pid: NodeId, text: Option<String>) {
         if self.tree.node(pid).text == text {
@@ -1220,15 +1353,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// P9-3（css-lists-3 §3.2）：::marker 内容算法（按首个真条件求值）。
-    /// 返回 (文本, hide, 新引号深度)；hide=true → 引擎显式抑制成盒
-    ///（suppress_marker 置 taffy Display::None，每帧重放=稳态幂等）。
-    /// ① 宿主非 list-item → 抑制（§3.1：非 list-item 的 ::marker content
-    /// 计算为 none）；② 作者 content ≠ normal → 按 content 求值（同
-    /// ::before）；③ list-style-image 有效 → 匿名替换元素盒（materialize
-    /// 注入 1em 声明，文本 None 不 hide）；④ list-style-type：none →
-    /// 抑制；string → 字面；counter-style 名 → list-item 计数表示 +
-    /// prefix + suffix（未知名回退 decimal，css-counter-styles-3 §2）。
+    /// P9-3 (css-lists-3 §3.2): ::marker content algorithm (evaluated by the
+    /// first true condition). Returns (text, hide, new quote depth);
+    /// hide=true → the engine explicitly suppresses the box (suppress_marker
+    /// sets taffy Display::None, replayed every frame = steady-state
+    /// idempotent). ① Host is not list-item → suppress (§3.1: ::marker
+    /// content of a non-list-item computes to none); ② author content ≠
+    /// normal → evaluate content (same as ::before); ③ valid
+    /// list-style-image → anonymous replaced-element box (materialize
+    /// injects a 1em declaration, text None, not hidden); ④ list-style-type:
+    /// none → suppress; string → literal; counter-style name → list-item
+    /// counter representation + prefix + suffix (unknown names fall back to
+    /// decimal, css-counter-styles-3 §2).
     #[cfg(feature = "text")]
     fn eval_marker_text(
         &self,
@@ -1283,9 +1419,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// P9-3：空 marker 显式 taffy 抑制。map_style 对 Marker 伪节点不做
-    /// content 空判隐藏（可见性由本函数与文本供给管）；rebuild_taffy 每
-    /// 帧重播种 → 本抑制每帧重放（稳态幂等）。
+    /// P9-3: explicit taffy suppression of empty markers. map_style does not
+    /// hide Marker pseudo nodes on empty content (visibility is governed by
+    /// this function and text supply); rebuild_taffy re-seeds every frame →
+    /// this suppression is replayed every frame (steady-state idempotent).
     #[cfg(feature = "text")]
     #[allow(dead_code)]
     fn suppress_marker(&mut self, pid: NodeId) {
@@ -1299,10 +1436,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// B3：全表集合是否含 `:has()` 相对选择器规则（变更类失效升级全量
-    /// 重样式判据——相对选择器命中依赖后代/兄弟结构，增量子树 restyle
-    /// 不感知远端变化）。user_sheet 变更本身即全量重样式，但后续增量
-    /// 变更需此判据感知。P6 补 ua_sheet 漏检（自定义 UA 表可含 `:has`）。
+    /// B3: whether any sheet in the full set contains `:has()` relative
+    /// selector rules (the criterion for upgrading change-class invalidation
+    /// to a full restyle — relative selector hits depend on descendant and
+    /// sibling structure, which an incremental subtree restyle cannot see).
+    /// A user_sheet change is already a full restyle, but later incremental
+    /// changes need this criterion to sense them. P6 adds the ua_sheet check
+    /// that was missed (a custom UA sheet may contain `:has`).
     fn any_has_rules(&self) -> bool {
         self.sheet.has_relative_selectors
             || self
@@ -1319,12 +1459,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 .any(|(_, _, s)| s.has_relative_selectors)
     }
 
-    /// P6（ADR-0035 D1）：重建 `:has()` host 快筛索引（表变更点调用，同
-    /// rebuild_document_registries 时机——attach/set_stylesheet/user·ua 表装载路径）。
-    /// 逐表逐规则深扫 `:has`（含 `:is()`/`:where()`/`:not()` 参数内嵌套）：
-    /// 无 → 不进索引；有 → 逐选择器提键（合格）或记不合格；任一选择器
-    /// 不合格（前缀组合器/`:has` 不在顶层最右 compound）→ 追加无约束
-    /// 哨兵键（该规则任何 host 路径都可能命中，恒升级全量，保守正确）。
+    /// P6 (ADR-0035 D1): rebuild the `:has()` host quick-screen index (called
+    /// at sheet-change points, same timing as rebuild_document_registries —
+    /// the attach/set_stylesheet/user·ua sheet loading paths). Walks every
+    /// rule of every sheet, scanning deep into `:has` (including nesting
+    /// inside `:is()`/`:where()`/`:not()` arguments): none → not indexed;
+    /// some → extract a key per selector (qualified) or record unqualified;
+    /// any unqualified selector (prefix combinator / `:has` not in the
+    /// top-level rightmost compound) → append an unconstrained sentinel key
+    /// (the rule could match on any host path, always upgrade to full —
+    /// conservatively correct).
     fn rebuild_has_host_index(&mut self) {
         self.has_host_index.clear();
         let sheets = std::iter::once(&self.sheet)
@@ -1357,10 +1501,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// P7-①（表格 auto 列）：单元格内容 max-content 宽度——子树文本
-    /// 叶 nowrap 测量取最大（同 settle_lines 盒探针的文本兜底范式）
-    /// 加根格水平内缩（padding+border）。嵌套盒结构组合（多块纵向
-    /// 叠加、行内横向并排）v1 近似为单叶最大——偏差【B】登记 ADR。
+    /// P7-① (table auto columns): cell content max-content width — the
+    /// maximum over the subtree's text leaves measured nowrap (the same
+    /// text-fallback probe paradigm as settle_lines' box probe) plus the
+    /// root cell's horizontal inset (padding+border). Nested box structure
+    /// composition (multiple blocks stacked vertically, inlines side by
+    /// side) is approximated in v1 as a single-leaf maximum — the deviation
+    /// is a Tier B entry registered in the ADR.
     fn content_max_width(&mut self, nid: NodeId) -> f32 {
         let mut w = 0.0f32;
         let mut sub: Vec<NodeId> = vec![nid];
@@ -1422,11 +1569,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         w + inset
     }
 
-    /// P6（ADR-0035 D2）：`style_dirty_roots` 增量失效是否须升级全量。
-    /// 任一 dirty 节点（含自身）沿祖先链通过任一快筛键 → 可能命中 →
-    /// 升级；全部祖先被全部键否决 → 走增量。索引空（无合格规则/未建）
-    /// → 全量兜底（与既有 any_has_rules 行为兼容）。快筛只可能多升级
-    /// （false positive），不可能漏升级——保守正确。
+    /// P6 (ADR-0035 D2): whether `style_dirty_roots` incremental invalidation
+    /// must upgrade to full. If any dirty node (including itself) matches any
+    /// quick-screen key along its ancestor chain → possible hit → upgrade;
+    /// if every key vetoes every ancestor → go incremental. An empty index
+    /// (no qualified rules / not built) → full fallback (compatible with the
+    /// existing any_has_rules behavior). The quick screen can only
+    /// over-upgrade (false positives), never miss an upgrade —
+    /// conservatively correct.
     fn has_invalidation_needs_full(&self) -> bool {
         if !self.any_has_rules() {
             return false;
@@ -1449,7 +1599,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         false
     }
 
-    /// 更新媒体环境（视口外因素：配色/动效偏好）。
+    /// Updates the media environment (viewport-external factors:
+    /// color-scheme and motion preferences).
     pub fn set_environment(&mut self, env: MediaEnv) {
         if self.media != env {
             self.media = env;
@@ -1457,11 +1608,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// B3：焦点族管理（:focus / :focus-visible / :focus-within）。整体迁移
-    /// 语义：清旧焦点链（焦点节点 FOCUS|FOCUS_VISIBLE + 祖先链
-    /// FOCUS_WITHIN）→ 施加新链（焦点节点 FOCUS（focus_visible 时加
-    /// FOCUS_VISIBLE）+ 祖先链 FOCUS_WITHIN）。focus_visible 的启发判定
-    /// （键盘 vs 指针）归宿主——引擎无输入设备知识。
+    /// B3: focus family management (:focus / :focus-visible / :focus-within).
+    /// Wholesale migration semantics: clear the old focus chain (focus node
+    /// FOCUS|FOCUS_VISIBLE + ancestor chain FOCUS_WITHIN) → apply the new
+    /// chain (focus node FOCUS (plus FOCUS_VISIBLE when focus_visible) +
+    /// ancestor chain FOCUS_WITHIN). The focus_visible heuristic (keyboard
+    /// vs pointer) belongs to the host — the engine has no input-device
+    /// knowledge.
     pub fn set_focus(
         &mut self,
         key: Option<K>,
@@ -1515,7 +1668,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 插入节点。`parent=None` 声明根（至多一次）。
+    /// Inserts a node. `parent=None` declares a root (at most once).
     pub fn insert(
         &mut self,
         parent: Option<K>,
@@ -1570,7 +1723,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 移除节点及其子树（根移除 = 清空引擎树）。
+    /// Removes a node and its subtree (removing the root = clearing the
+    /// engine tree).
     pub fn remove(&mut self, key: K) -> Result<(), crate::error::ContractError> {
         let Some(&id) = self.key_to_node.get(&key) else {
             return Err(crate::error::ContractError::UnknownNode);
@@ -1660,10 +1814,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// ADR-0010：把 overlay 根移入/移出 top-layer（弹窗层）。有效绘制序 =
-    /// 文档根 → 非 top overlay（插入序）→ top 层根（进层序）。文档根不可
-    /// 进层（报 `ContractError::NotOverlayRoot`）；未知 key 报
-    /// `ContractError::UnknownNode`。重复移入幂等。
+    /// ADR-0010: move an overlay root into/out of the top layer (the dialog
+    /// layer). Effective paint order = document root → non-top overlays
+    /// (insertion order) → top-layer roots (entry order). The document root
+    /// cannot enter the layer (reports `ContractError::NotOverlayRoot`);
+    /// unknown keys report `ContractError::UnknownNode`. Re-entering is
+    /// idempotent.
     pub fn set_top_layer(&mut self, key: K, on: bool) -> Result<(), crate::error::ContractError> {
         if Some(key) == self.root_key {
             return Err(crate::error::ContractError::NotOverlayRoot);
@@ -1683,7 +1839,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 重设子节点顺序（所有 key 须已是该父节点的子节点）。
+    /// Resets the child order (every key must already be a child of that
+    /// parent).
     pub fn set_children(
         &mut self,
         parent: K,
@@ -1717,7 +1874,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 更新节点 class 列表。
+    /// Updates the node's class list.
     pub fn set_classes(
         &mut self,
         key: K,
@@ -1731,7 +1888,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 更新节点交互状态位。
+    /// Updates the node's interaction state bits.
     pub fn set_state(
         &mut self,
         key: K,
@@ -1745,7 +1902,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 更新节点文本（叶内容）。
+    /// Updates the node's text (leaf content).
     pub fn set_text(
         &mut self,
         key: K,
@@ -1759,7 +1916,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 更新内联声明（style 属性文本；容错解析，报告随返回值给出）。
+    /// Updates inline declarations (style attribute text; tolerant parsing,
+    /// the report comes back in the return value).
     pub fn set_declarations(
         &mut self,
         key: K,
@@ -1799,7 +1957,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(report)
     }
 
-    /// 推送叶测量（文本叶尺寸；T5 后由内置 parley 测量接管）。
+    /// Pushes leaf measurements (text leaf size; taken over by the built-in
+    /// parley measurement after T5).
     pub fn set_leaf_measure(
         &mut self,
         key: K,
@@ -1817,9 +1976,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 推送非文本叶固有尺寸区间（T5d，shrink-to-fit 第三 pass 消费）：
-    /// (min_w, min_h) / (max_w, max_h) 各轴独立。definite 首选尺寸仍走
-    /// [`StyleEngine::set_leaf_measure`]；absolute 叶按包含块宽夹紧到区间内。
+    /// Pushes a non-text-leaf intrinsic size range (T5d; consumed by the
+    /// third shrink-to-fit pass): (min_w, min_h) / (max_w, max_h), each axis
+    /// independent. Definite preferred sizes still go through
+    /// [`StyleEngine::set_leaf_measure`]; absolute leaves clamp by containing
+    /// block width into the range.
     pub fn set_leaf_intrinsic(
         &mut self,
         key: K,
@@ -1835,7 +1996,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 节点是否 position: absolute（T5d：不按父流宽换行，走 shrink-to-fit）。
+    /// Whether the node is position: absolute (T5d: wraps against the
+    /// shrink-to-fit width instead of the parent flow width).
     fn is_absolute(&self, id: NodeId) -> bool {
         matches!(
             self.styles
@@ -1847,8 +2009,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         )
     }
 
-    /// 节点是否定位元素（position != static，absolute 叶的包含块判定）。
-    /// A4：fixed 亦为定位元素（其 absolute 后代的包含块）。
+    /// Whether the node is positioned (position != static; the containing
+    /// block test for absolute leaves).
+    /// A4: fixed also counts as positioned (the containing block of its
+    /// absolute descendants).
     fn is_positioned(&self, id: NodeId) -> bool {
         matches!(
             self.styles
@@ -1862,8 +2026,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         )
     }
 
-    /// 节点是否 fixed 定位（A4：包含块=transformed 祖先或 ICB 视口；
-    /// positioned 祖先不构成 fixed 的包含块）。
+    /// Whether the node is fixed-positioned (A4: containing block =
+    /// transformed ancestor or the ICB viewport; positioned ancestors do not
+    /// form a fixed element's containing block).
     fn is_fixed(&self, id: NodeId) -> bool {
         matches!(
             self.styles
@@ -1875,9 +2040,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         )
     }
 
-    /// rem 基准：文档根计算字号（ADR-0010 多根语义下仅文档根定义 rem）。
-    /// styles 未含根（全量 restyle 清空后求值中 / 首帧前）回落 16.0——
-    /// 恰为 CSS Values 对「根元素 font-size 中 rem 按初始值解析」的规定。
+    /// rem basis: the document root's computed font size (under ADR-0010
+    /// multi-root semantics only the document root defines rem). Falls back
+    /// to 16.0 when styles lacks the root (mid-restyle after a full
+    /// invalidation clears it / before the first frame) — exactly CSS Values'
+    /// rule that rem against the root element's font-size resolves to the
+    /// initial value.
     fn rem_base(&self) -> f32 {
         self.root_key
             .and_then(|k| self.key_to_node.get(&k))
@@ -1886,10 +2054,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             .unwrap_or(16.0)
     }
 
-    /// 映射期环境（CSS 语义：vw/vh 与 calc 视口单位 = 初始包含块 = 帧视口；
-    /// map_style 不评估媒体条件——@media 命中在级联期按宿主推送的 media
-    /// 判定，故此处以帧视口覆盖 media 视口字段，A6 min/max/clamp 与
-    /// calc 同路径受益）。
+    /// Mapping-time environment (CSS semantics: vw/vh and calc viewport
+    /// units = the initial containing block = the frame viewport; map_style
+    /// does not evaluate media conditions — @media hits are decided at
+    /// cascade time from the host-pushed media, so here the frame viewport
+    /// overrides the media viewport fields, and A6 min/max/clamp benefits on
+    /// the same path as calc).
     fn map_env(&self) -> MediaEnv {
         let mut env = self.media;
         env.viewport_w = self.viewport.0;
@@ -1899,14 +2069,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         env.rem = self.rem_base();
         env
     }
-    /// transform ≠ none 的元素成为 absolute/fixed 后代的包含块
-    /// （ADR-0009 双时机之 L2：restyle 期谓词，cb walk 消费）。
+    /// An element with transform ≠ none becomes the containing block for
+    /// absolute/fixed descendants (ADR-0009's L2 of the two timings: a
+    /// restyle-time predicate, consumed by the cb walk).
     fn is_transform_cb(&self, id: NodeId) -> bool {
         self.styles.get(&id).is_some_and(|cs| cs.has_transform())
     }
 
-    /// absolute 叶的可用宽（T5d）：最近 positioned 或 transformed 祖先的内容宽
-    /// （border-box − padding − 已生效 border，`used_h_inset`）；均无 → 视口宽。
+    /// Available width for an absolute leaf (T5d): the content width of the
+    /// nearest positioned or transformed ancestor (border-box − padding −
+    /// effective border, `used_h_inset`); if none → viewport width.
     // 仅 text 测量路径消费（shrink-to-fit pass）；layout-only 编译下保持
     // 零死代码（依赖治理 feature 门禁审计，阶段4）。
     #[cfg(feature = "text")]
@@ -1958,17 +2130,23 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 三期② absolute 锚定跳走（A 级缺口收口）：CSS 中 absolute 子件的包含
-    /// 块 = 最近 positioned 或 transform≠none 祖先（均无 → 初始包含块 ICB），
-    /// 而 taffy 0.14 只按直父 padding box 锚定绝对子件——直父与 cb 之间存在
-    /// static 包装层时 inset 百分比基准、静态位置与 auto 边距全部错位。
-    /// 本 pass 在样式最终就绪（含 @keyframes 覆写——动画可翻转 has_transform）
-    /// 后、布局前执行：用 set_children 移动语义把 absolute 子件重挂到 cb
-    /// 节点（cb==直父的常规情形零变化；跳走后 taffy 的 inset 基准/静态位置
-    /// 随 cb 正确）。table/multicol 子树维持 v1 契约（settle_columns：absolute
-    /// 子件包含块仍为容器）不参与。collect() 按 abs_cb 推导视口坐标；
-    /// 稳态帧 desired 与当前子列表全等免 set_children，无 absolute 且结构
-    /// 已归位时整段跳过。
+    /// Phase 3 ② absolute anchor re-homing (closing the Tier A gap): in CSS
+    /// an absolute child's containing block is the nearest positioned or
+    /// transform≠none ancestor (if none → the initial containing block, ICB),
+    /// but taffy 0.14 only anchors absolute children to the direct parent's
+    /// padding box — when static wrappers sit between the direct parent and
+    /// the cb, the inset percentage basis, static position, and auto margins
+    /// are all wrong. This pass runs after styles are fully final (including
+    /// @keyframes overrides — animations can flip has_transform) and before
+    /// layout: set_children move semantics re-parent absolute children to the
+    /// cb node (zero change in the common cb==direct-parent case; after the
+    /// hop, taffy's inset basis/static position follow the cb correctly).
+    /// table/multicol subtrees keep the v1 contract (settle_columns: an
+    /// absolute child's containing block remains the container) and do not
+    /// participate. collect() derives viewport coordinates from abs_cb;
+    /// steady-state frames skip set_children when desired equals the current
+    /// child list, and skip the whole pass when there are no absolutes and
+    /// the structure is already re-homed.
     fn settle_absolute_anchors(&mut self) {
         let Some(viewport) = self.taffy_root else {
             return;
@@ -2082,7 +2260,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.abs_structured = moved || !self.abs_cb.is_empty();
     }
 
-    /// 推送节点滚动偏移（绘制消费；T4 生效）。
+    /// Pushes a node scroll offset (consumed by paint; effective from T4).
     pub fn set_scroll_offset(
         &mut self,
         key: K,
@@ -2096,16 +2274,19 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Ok(())
     }
 
-    /// 当前样式表纪元（单调递增）。
+    /// Current stylesheet epoch (monotonically increasing).
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
 
-    /// C4（ADR-0018）：::selection / ::placeholder 通道样式解析——origin
-    /// 直配（match_pseudo_element：pseudo == None 即命中），继承基 = origin
-    /// 主样式（css-pseudo-4）；级联经 cascade_channel（主级联防泄漏由
-    /// collect_sheet 过滤承担）。通道样式不进 taffy/不参与布局——纯宿主
-    /// 读取通道；合并表组全无对应规则时整 map 清除（零成本模式）。
+    /// C4 (ADR-0018): ::selection / ::placeholder channel style resolution —
+    /// origin direct matching (match_pseudo_element: pseudo == None is a
+    /// hit), inheritance base = the origin's main style (css-pseudo-4);
+    /// cascading goes through cascade_channel (main-cascade leak prevention
+    /// is handled by collect_sheet filtering). Channel styles never enter
+    /// taffy and never participate in layout — a pure host-read channel;
+    /// when the merged sheet group has no matching rules at all the whole
+    /// map is cleared (zero-cost mode).
     fn style_channels(
         &mut self,
         id: NodeId,
@@ -2209,26 +2390,30 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 诊断 API（C6 可观测性）：读取节点最近一次 restyle 的计算样式。
-    /// 帧前调用返回上一帧样式；未知 key 返回 None——诊断路径不上浮
-    /// [`ContractError`](crate::error::ContractError)。
+    /// Diagnostic API (C6 observability): reads the node's computed style
+    /// from the most recent restyle. Called before a frame it returns the
+    /// previous frame's style; unknown keys return None — the diagnostic
+    /// path does not surface
+    /// [`ContractError`](crate::error::ContractError).
     #[must_use]
     pub fn computed_style(&self, key: K) -> Option<&ComputedStyle> {
         let id = *self.key_to_node.get(&key)?;
         self.styles.get(&id)
     }
 
-    /// C4（ADR-0018）：节点 ::selection 通道样式（origin 直配 + 主样式
-    /// 继承基；选区在场与否归宿主——引擎零副作用）。表组无对应规则 /
-    /// 未知 key = None。
+    /// C4 (ADR-0018): the node's ::selection channel style (origin direct
+    /// matching + main-style inheritance base; whether a selection exists is
+    /// up to the host — the engine has zero side effects). No matching rules
+    /// in the sheet group / unknown key = None.
     #[must_use]
     pub fn selection_style(&self, key: K) -> Option<&ComputedStyle> {
         let id = *self.key_to_node.get(&key)?;
         self.selection_styles.get(&id)
     }
 
-    /// C4（ADR-0018）：节点 ::placeholder 通道样式（语义同
-    /// [`Self::selection_style`]；占位文本存在性归宿主）。
+    /// C4 (ADR-0018): the node's ::placeholder channel style (same semantics
+    /// as [`Self::selection_style`]; placeholder text existence is up to the
+    /// host).
     #[must_use]
     pub fn placeholder_style(&self, key: K) -> Option<&ComputedStyle> {
         let id = *self.key_to_node.get(&key)?;
@@ -2237,7 +2422,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
 
     // ---------- 帧驱动 ----------
 
-    /// 推进一帧：结构同步 → 重算样式 → taffy 布局 → 收集布局盒。
+    /// Advances one frame: structure sync → style recomputation → taffy
+    /// layout → layout box collection.
     pub fn frame(&mut self, viewport: (f32, f32), scale: f32, now: f64) -> Frame<K> {
         // C6 可观测性：帧级 span（`style_engine::engine` target；无订阅者时
         // 惰性构建零成本）。pass 字段随收敛环逐 pass 记录。
@@ -2801,12 +2987,16 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 命中测试（F3a，ADR-0023）：点 → 最顶可命中节点（绘制序逆序；
-    /// 祖先 clip 链全含判定；visibility/display:none 与 pointer-events:
-    /// none 天然排除）。无帧数据或未命中 → None。
-    /// P4 D4（ADR-0037）精确化：查询点先经命中单元登记时活跃仿射的逆
-    /// 变换到节点局部系再测盒（transform 节点命中随变换走）；clip 链
-    /// 改精确形状（矩形含逐角圆角 / clip-path 折线，各自逆矩阵映射）。
+    /// Hit testing (F3a, ADR-0023): point → topmost hit-testable node
+    /// (reverse paint order; the ancestor clip chain must fully contain the
+    /// point; visibility/display:none and pointer-events: none are naturally
+    /// excluded). No frame data or no hit → None.
+    /// P4 D4 (ADR-0037) refinement: the query point is first mapped to node
+    /// local space by the inverse of the affine active at hit-unit
+    /// registration time before box testing (transform nodes hit along with
+    /// their transform); clip chains become exact shapes (rectangles with
+    /// per-corner radii / clip-path polylines, each mapped by its own inverse
+    /// matrix).
     pub fn hit_test(&self, x: f32, y: f32) -> Option<crate::paint::HitTestHit> {
         for r in self.hit_rects.iter().rev() {
             // 变换节点：视口点 → 局部点（登记时 mat 的逆；奇异→恒等回退）。
@@ -2832,17 +3022,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         None
     }
 
-    /// 用户键 → 节点 id（F3a，ADR-0023：hit_test 返回 NodeId 的宿主解释
-    /// 通道；未注册键 → None）。
+    /// User key → node id (F3a, ADR-0023: the host interpretation channel for
+    /// the NodeId hit_test returns; unregistered keys → None).
     pub fn node_id(&self, key: &K) -> Option<NodeId> {
         self.key_to_node.get(key).copied()
     }
 
-    /// 样式树结构人读视图（F3e，ADR-0027 D1）：显示序（root_order_applied
-    /// = paint 同序；空则文档根）逐节点一行，深度缩进；标签 = 元素名/`#id`
-    /// /`.class`/宿主键/伪元素标记/文本截断。几何视图见
-    /// [`Frame::boxes_dump`]——本方法只有树，无帧几何（Frame 才有盒）。
-    /// 纯投影零新状态，不参与 restyle/paint 任何路径。
+    /// Human-readable view of the style tree structure (F3e, ADR-0027 D1):
+    /// one line per node in display order (root_order_applied = the same
+    /// order as paint; falls back to the document root when empty), depth
+    /// indented; labels = element name/`#id`/`.class`/host key/pseudo-element
+    /// marker/text truncation. For the geometry view see
+    /// [`Frame::boxes_dump`] — this method has only the tree, no frame
+    /// geometry (only Frame carries boxes). Pure projection, zero new state,
+    /// participates in no restyle/paint path.
     pub fn layout_tree_dump(&self) -> String
     where
         K: std::fmt::Debug,
@@ -2863,10 +3056,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         out
     }
 
-    /// 阶段2③：记录容器内容盒尺寸快照（container-type ≠ normal 的节点；
-    /// 内容盒 = taffy border box − 解析后 padding/border，负值夹 0）。返回
-    /// 快照是否相对上帧变化（首帧从无到有亦算变 → 驱动一次收敛 pass）。
-    /// 无 @container 规则零成本跳过（快照保持空表）。
+    /// Stage 2 ③: record container content-box size snapshots (nodes with
+    /// container-type ≠ normal; content box = taffy border box − resolved
+    /// padding/border, negatives clamped to 0). Returns whether the snapshot
+    /// changed relative to the previous frame (appearing from nothing on the
+    /// first frame also counts as a change → drives one convergence pass).
+    /// Zero-cost skip when there are no @container rules (snapshot stays an
+    /// empty map).
     fn record_container_sizes(&mut self) -> bool {
         if !self.any_container_rules() {
             return false;
@@ -2897,10 +3093,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         changed
     }
 
-    /// ADR-0010：超根子序 = 有效绘制序（文档根 → 非 top overlay（插入序）
-    /// → top 层根（进层序））。树子序与 taffy 子序同步重排，此后所有既有
-    /// 走查（绘制/命中/量程/文本/级联）零改动地遵序。序未变时零操作
-    ///（稳态帧无 taffy 结构失效）。
+    /// ADR-0010: super-root child order = effective paint order (document
+    /// root → non-top overlays (insertion order) → top-layer roots (entry
+    /// order)). Tree child order and taffy child order are reordered in sync,
+    /// after which every existing walk (paint/hit/extent/text/cascade) obeys
+    /// the order with zero changes. No-op when the order is unchanged
+    /// (steady-state frames cause no taffy structure invalidation).
     fn sync_root_order(&mut self) {
         let doc = match self.root_key {
             Some(k) => k,
@@ -2934,10 +3132,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.root_order_applied = order;
     }
 
-    /// ADR-0010：超根全视口化（block、宽高 100%——overlay 的绝对定位锚定
-    /// 盒 = 视口）与 overlay 根默认视口锚定（映射样式仍为 relative/static
-    /// 时强制 absolute + top/left 0；作者显式 absolute/fixed 不动）。样式
-    /// pass 会以默认样式覆写超根 → 每帧幂等重贴（计算布局前）。
+    /// ADR-0010: super-root full-viewportization (Block, 100% width/height —
+    /// the absolute-positioning anchor box of overlays = the viewport) and
+    /// overlay-root default viewport anchoring (when mapped styles are still
+    /// relative/static, force absolute + top/left 0; author-explicit
+    /// absolute/fixed is left alone). The style pass overwrites the super
+    /// root with default styles → idempotently re-applied every frame
+    /// (before computed layout).
     fn apply_root_anchor_styles(&mut self) {
         use taffy::prelude::{
             Dimension, Display, LengthPercentageAuto as LPA, Position as TPos, Rect, Size,
@@ -3059,23 +3260,35 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         tid
     }
 
-    /// G1（ADR-0032）：restyle 提交点 reconciliation——新计算值 vs
-    /// before-change 值（styles 表）逐槽对账，启动/重定向/取消过渡
-    /// （css-transitions-2 §3 三则）。判定序（规格精化，在案偏差）：
-    /// ①新值==生效值（含过渡采样中间值）→ 取消该槽活动过渡；
-    /// ②combined duration（duration+delay）≤0 → 取消 + 不启动（值即刻
-    /// 跳变为新级联值）；
-    /// ③活动过渡存在且新值==to → 保持运行（不重启时钟——无关 restyle
-    /// 不复位动画进度，偏离任务规格"值相同→取消"字面）；
-    /// ④其余 → 启动/重定向：from=当前插值中间值（活动过渡）否则生效值，
-    /// start=当前帧时间；
-    /// ⑤可插值对（lerp_decl 分类探针）才可 normal 过渡；离散对需
-    /// transition-behavior:allow-discrete 才启动，否则立即跳变；
-    /// ⑥（偏差）目标槽被活动动画覆盖（animation 命中且 duration>0）时
-    /// 不启动新过渡——动画层高于过渡层，启动后首帧即被覆写，徒留隐形
-    /// 计时器；已运行过渡不受影响（动画结束后采样值重现，ADR-0032 边界）。
-    /// transition-* 与 animation-* 描述符槽自身不可过渡（文档未定义其
-    /// 动画性，且自指无意义）。
+    /// G1 (ADR-0032): reconciliation at the restyle commit point — the new
+    /// computed values are reconciled slot by slot against the before-change
+    /// values (the styles map), starting/redirecting/canceling transitions
+    /// (the three rules of css-transitions-2 §3). Decision order (spec
+    /// refinement, documented deviation):
+    /// ① New value == effective value (including transition sample midpoints)
+    /// → cancel that slot's active transition;
+    /// ② combined duration (duration+delay) ≤ 0 → cancel + do not start (the
+    /// value jumps to the new cascaded value immediately);
+    /// ③ an active transition exists and the new value == to → keep running
+    /// (do not restart the clock — an unrelated restyle must not reset
+    /// animation progress, deviating from the task spec's literal "same value
+    /// → cancel");
+    /// ④ otherwise → start/redirect: from = the current interpolation midpoint
+    /// (active transition) else the effective value, start = current frame
+    /// time;
+    /// ⑤ only interpolable pairs (lerp_decl classification probe) may
+    /// transition normally; discrete pairs need
+    /// transition-behavior:allow-discrete to start, otherwise they jump
+    /// immediately;
+    /// ⑥ (deviation) when the target slot is covered by an active animation
+    /// (animation hit with duration>0), no new transition starts — the
+    /// animation layer sits above the transition layer, so a started
+    /// transition would be overwritten on its first frame, leaving only an
+    /// invisible timer; running transitions are unaffected (the sampled value
+    /// reappears after the animation ends, ADR-0032 boundary).
+    /// transition-* and animation-* descriptor slots themselves cannot
+    /// transition (the spec does not define their animatability, and
+    /// self-reference is meaningless).
     fn reconcile_transitions(&mut self, id: NodeId, cs: &ComputedStyle) {
         use crate::css::property::{
             DeclValue, PropertyId as P, TimingFn, TransitionBehavior, TransitionTarget, lerp_decl,
@@ -3267,9 +3480,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// G1（ADR-0032）：该节点活动动画覆盖的槽位集（animation-name 命中
-    /// @keyframes 且 duration>0 时，关键帧声明的 Parsed 槽位集合）——
-    /// reconciliation 抑制这些槽的新过渡启动（偏差⑥）。
+    /// G1 (ADR-0032): the set of slots covered by this node's active
+    /// animations (the Parsed slots declared by @keyframes when
+    /// animation-name hits a rule with duration>0) — reconciliation suppresses
+    /// new transition starts on these slots (deviation ⑥).
     fn animation_covered_slots(
         &self,
         cs: &ComputedStyle,
@@ -3299,10 +3513,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         if slots.is_empty() { None } else { Some(slots) }
     }
 
-    /// G1（ADR-0032）：transition 采样挂点——对每个活动过渡按 now 求插值
-    /// 并写回对应槽位：延迟段保持 from；进度 ≥1 写 to 并移除条目（终值
-    /// = to 保持）；进行中按缓动求值 lerp_decl，不可插值对（allow-discrete
-    /// 启动的离散过渡）按离散规则在 50% 翻转。表空早退（稳态零写入）。
+    /// G1 (ADR-0032): transition sampling hook — evaluates each active
+    /// transition at `now` and writes the interpolated value back to its
+    /// slot: the delay phase holds `from`; progress ≥ 1 writes `to` and
+    /// removes the entry (the end value stays `to`); a running transition
+    /// evaluates lerp_decl under its easing, and a non-interpolable pair (a
+    /// discrete transition started via allow-discrete) flips at 50% per the
+    /// discrete rule. Empty map = early return (steady state writes
+    /// nothing).
     fn sample_transitions(&mut self) {
         use crate::css::property::lerp_decl;
         if self.transitions.is_empty() {
@@ -3355,10 +3573,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// P7-②：动画组视图——从计算样式提取动画组列表（CSS 多动画：
-    /// 组数 = name 列表长度，各描述符列表按 `i % len` 循环补齐，
-    /// 缺省值兜底：duration/delay=0s、iterations=1、ease/normal/none）。
-    /// 兼容旧单值变体（initial_value 遗留）；name 全空 → 无组。
+    /// P7-②: animation group view — extracts the animation group list from
+    /// computed style (CSS multi-animation: group count = the length of the
+    /// name list, each descriptor list cycles by `i % len`, with defaults
+    /// filling gaps: duration/delay 0s, iterations 1, ease/normal/none).
+    /// Compatible with the legacy single-value variants (initial_value
+    /// leftovers); all names empty → no groups.
     fn anim_groups(cs: &ComputedStyle) -> Vec<AnimGroupSpec> {
         use crate::css::property::{AnimDirection, AnimFillMode, DeclValue, PropertyId, TimingFn};
         let names: Vec<Option<String>> = match cs.get(PropertyId::AnimationName) {
@@ -3426,14 +3646,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             .collect()
     }
 
-    /// @keyframes 动画采样（第五批⑰）：对声明了 animation-name 且命中
-    /// @keyframes 的节点，按 now（宿主帧推进，秒）采样关键帧轨道并覆写
-    /// 计算样式。动画层高于作者级联（CSS：动画覆盖普通声明，仅
-    /// !important 更高——分层为残余偏差）；缓动按关键帧段施加（CSS 时序
-    /// 函数语义）；不可插值对按离散规则（段进度<0.5 取前帧）。
-    /// P7-②：多动画组——逐组独立采样（组数 = name 列表长度，描述符
-    /// 循环补齐）；后组胜同槽覆写；underlying 快照节点级共享（首组
-    /// 捕获级联值），结束无填充组逐槽恢复底层值。
+    /// @keyframes animation sampling (batch 5 ⑰): for nodes whose
+    /// animation-name hits an @keyframes rule, samples the keyframe tracks at
+    /// `now` (host-advanced frame clock, seconds) and overwrites computed
+    /// style. The animation layer outranks the author cascade (CSS:
+    /// animations override normal declarations; only !important outranks
+    /// them — the missing cascade origin layer is a residual deviation);
+    /// easing applies per keyframe segment (CSS timing function semantics);
+    /// non-interpolable pairs follow the discrete rule (segment progress
+    /// < 0.5 takes the earlier frame).
+    /// P7-②: multiple animation groups — each group samples independently
+    /// (group count = the length of the name list, descriptors cycle-filled);
+    /// later groups win same-slot overwrites; the underlying snapshot is
+    /// shared per node (the first group captures cascaded values), and a
+    /// finished non-filling group restores underlying values slot by slot.
     fn apply_animations(&mut self) {
         use crate::css::property::{AnimDirection, AnimFillMode, DeclValue, PropertyId};
         use std::collections::BTreeMap;
@@ -3623,15 +3849,20 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// ①calc 直通：百分比 calc 结算循环（设计决策见 layout.rs DeferredRaw
-    /// 注）。首遍布局后，以父节点已布局内容尺寸为基准解析延迟 calc，
-    /// 回写固定值并重算；循环至无变更（上限 3 遍——百分比基准恒为祖先
-    /// 派生（DAG），逐遍稳定一层；3 层内链路与浏览器单遍语义一致，
-    /// 更深链路记偏差待重估）。
-    /// A9：延迟 cq 条目的容器查询基值——沿 taffy 父链上溯找最近
-    /// container-type≠Normal 祖先，取其本帧布局内容盒（settle 在
-    /// compute_layout 之后=本帧新值）；InlineSize 容器块轴回落视口高
-    ///（small viewport 语义）；无容器祖先=视口（规范回落）。
+    /// ① calc pass-through: the percentage-calc settlement loop (design
+    /// decision documented on layout.rs DeferredRaw). After the first layout
+    /// pass, deferred calcs are resolved against the parent node's laid-out
+    /// content size, written back as fixed values, and re-laid-out; loops
+    /// until no change (capped at 3 passes — the percentage basis is always
+    /// ancestor-derived (a DAG), so one layer stabilizes per pass; within 3
+    /// layers chains match browser single-pass semantics; deeper chains are a
+    /// recorded deviation pending revisit).
+    /// A9: deferred cq entries resolve their container-query basis — walk up
+    /// the taffy parent chain to the nearest container-type≠Normal ancestor
+    /// and take its laid-out content box for this frame (settle runs after
+    /// compute_layout = fresh this frame); an InlineSize container falls back
+    /// to viewport height on the block axis (small-viewport semantics); no
+    /// container ancestor = viewport (spec fallback).
     fn cq_basis(&self, node: taffy::NodeId, viewport: (f32, f32)) -> (f32, f32) {
         let rev: HashMap<taffy::NodeId, NodeId> =
             self.taffy_node.iter().map(|(k, v)| (*v, *k)).collect();
@@ -3667,8 +3898,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         viewport
     }
 
-    /// A9：节点字体相对单位度量——font-family 首个具名族匹配注册字体
-    ///（add_font 时探测；大小写不敏感），未命中=近似缺省。
+    /// A9: font-relative unit metrics for a node — the first named family in
+    /// font-family that matches a registered font (probed at add_font; case
+    /// insensitive), otherwise the approximate default metrics.
     fn metrics_for(&self, cs: &ComputedStyle) -> crate::css::value::FontMetrics {
         for fam in cs.font_family().0.iter() {
             if let crate::css::property::FamilyName::Named(n) = fam {
@@ -3682,10 +3914,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         crate::css::value::FontMetrics::default()
     }
 
-    /// P9-3（css-lists-3 §3.1）：list-item 宿主的可见文本 marker 前进宽。
-    /// 条件 = 宿主 display:list-item + marker 节点存在 + 文本非空 + 测量
-    /// 就绪（sync_pseudo_text 供 measures；非 text 特性恒空 → None）。
-    /// 返回 None = marker 抑制或图像盒（无文本合成）。
+    /// P9-3 (css-lists-3 §3.1): advance width of a list-item host's visible
+    /// text marker. Conditions = host display:list-item + a marker node
+    /// exists + non-empty text + measurement ready (sync_pseudo_text supplies
+    /// measures; without the text feature always empty → None).
+    /// Returns None = marker suppressed or an image box (no text synthesis).
     fn marker_advance_of(&self, host: NodeId) -> Option<f32> {
         if self.styles.get(&host)?.display() != crate::css::property::Display::ListItem {
             return None;
@@ -3698,11 +3931,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.measures.get(&m).map(|(w, _)| *w)
     }
 
-    /// 叶换行约束宽=包含块内容宽（父 border-box − padding − 有效 border；
-    /// multicol 重挂叶=幻影列宽无内缩）。T5c-2 remeasure 与 F2 截断结算
-    /// 共用（ADR-0022 D2）。P9-3：父为带可见文本 marker 的 list-item →
-    /// 减 marker 前进宽（inside 语义：首行文本自 marker 右缘起排；后续
-    /// 行同宽收缩=B·豁免近似，ADR-0041）。
+    /// Leaf line-wrapping constraint width = containing block content width
+    /// (parent border-box − padding − effective border; a multicol-rehomed
+    /// leaf uses phantom column width with zero inset). Shared by the T5c-2
+    /// remeasure pass and F2 truncation settlement (ADR-0022 D2). P9-3: a
+    /// list-item parent with a visible text marker subtracts the marker
+    /// advance width (inside semantics: the first line starts right of the
+    /// marker's right edge; subsequent lines shrink by the same amount = a
+    /// Tier B exemption approximation, ADR-0041).
     #[cfg(feature = "text")]
     fn leaf_wrap_width(&self, id: NodeId) -> Option<f32> {
         let parent_id = *self.parents.get(&id)?;
@@ -3749,10 +3985,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Some((pl.size.width - inset - marker_adv).max(0.0))
     }
 
-    /// F2（ADR-0022 D2）：ellipsis 截断文本——二分最长字符前缀使
-    /// width(prefix)+"…" ≤ avail；"…" 本身超宽 → 空串（超窄容器）。
-    /// 字节安全=chars().take（span 字节区间仍为原文本前缀，绘制端
-    /// map_start/map_end 截断语义不变）。
+    /// F2 (ADR-0022 D2): ellipsis text truncation — binary-search the longest
+    /// character prefix such that width(prefix) + "…" ≤ avail; if "…" alone
+    /// exceeds the width → empty string (ultra-narrow container).
+    /// Byte-safe via chars().take (the span byte ranges remain prefixes of
+    /// the original text, so paint-side map_start/map_end truncation
+    /// semantics are unchanged).
     #[cfg(feature = "text")]
     fn make_ellipsis_text(
         &mut self,
@@ -3786,9 +4024,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Some(out)
     }
 
-    /// F2（ADR-0022 D3）：line-clamp 截断文本——二分最长字符前缀使
-    /// measure(prefix+"…", avail).1 ≤ max_h=N*行高（折行测量）；全文本
-    /// 不超行 → None（不截）。空解=仅"…"。
+    /// F2 (ADR-0022 D3): line-clamp text truncation — binary-search the
+    /// longest character prefix such that measure(prefix + "…",
+    /// avail).1 ≤ max_h = N * line height (measured with wrapping); the full
+    /// text fitting the line budget → None (no truncation). An empty result =
+    /// only "…".
     #[cfg(feature = "text")]
     fn make_clamp_text(
         &mut self,
@@ -3831,12 +4071,15 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Some(with_ell(&text.chars().take(lo).collect::<String>()))
     }
 
-    /// F2（ADR-0022 D2）：text-overflow:ellipsis 截断结算——测量宽就绪
-    /// 后逐 auto_text 叶检查：父（包含块）overflow 非 visible ∧ 父
-    /// text-overflow=ellipsis ∧ 叶 nowrap ∧ 测量宽>包含块内容宽 →
-    /// make_ellipsis_text 生成 text_overrides（绘制替换；盒几何不变）。
-    /// overflow visible 不截（spec：仅裁剪语境生效）；多行溢出=line-clamp
-    /// （D3）范围。每帧全量重算（幂等）。
+    /// F2 (ADR-0022 D2): text-overflow:ellipsis truncation settlement —
+    /// after measured widths are ready, checks each auto_text leaf: parent
+    /// (containing block) overflow not visible ∧ parent text-overflow =
+    /// ellipsis ∧ leaf nowrap ∧ measured width > containing block content
+    /// width → make_ellipsis_text produces a text_override (paint-side
+    /// replacement; box geometry unchanged). overflow: visible does not
+    /// truncate (spec: effective only in a clipping context); multi-line
+    /// overflow belongs to line-clamp (D3). Fully recomputed every frame
+    /// (idempotent).
     #[cfg(feature = "text")]
     fn apply_text_truncation(&mut self) {
         self.text_overrides.clear();
@@ -3918,8 +4161,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// F2（ADR-0022 D1）：pass 运行门——空输入跳过（廉价谓词；无输入
-    /// 索引的 pass（浮盒/行内）默认 true，内部早退治理）。
+    /// F2 (ADR-0022 D1): pass run gate — skip on empty input (cheap
+    /// predicate; passes without an input index (floats/lines) default to
+    /// true and govern themselves with internal early returns).
     fn settle_should_run(&self, pass: SettlePassKind) -> bool {
         match pass {
             SettlePassKind::Calc => !self.calc_deferred.is_empty(),
@@ -3929,7 +4173,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// F2（ADR-0022 D1）：pass 分发（原 frame 硬编码序的函数体不动）。
+    /// F2 (ADR-0022 D1): pass dispatch (the bodies of the former hardcoded
+    /// frame sequence are unchanged).
     fn settle_run_pass(&mut self, pass: SettlePassKind, viewport: (f32, f32)) {
         match pass {
             SettlePassKind::Calc => self.settle_calc(viewport),
@@ -4040,28 +4285,40 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 三期④：节点 display 快查（缺样式视为 None）。
+    /// Phase 3 ④: fast display lookup for a node (missing style = None).
     fn display_of(&self, id: NodeId) -> Option<crate::css::property::Display> {
         self.styles.get(&id).map(|cs| cs.display())
     }
 
-    /// ②table：列模板结算——首遍布局给出表内容宽后，按首行单元格声明宽
-    /// （定宽 px / 百分比 / auto）计算列模板回写各 table-row 的单行 Grid；
-    /// 全等缓存则免重排（稳态帧零额外布局 pass）。嵌套表外层先行：变更
-    /// 表格 wrapper 重构（CSS 2.2 §17.4 匿名盒结构侧）：display:table 的
-    /// taffy 节点降级为 wrapper（Block、auto 尺寸、零 margin/padding/border、
-    /// overflow 复位），新建内表节点承载表盒自身全部样式（map_style 全量；
-    /// position 强制 Relative + inset 清零——inner 需充当其 absolute 后代的
-    /// taffy 包含块）；表盒不当块级子件（block/flex/grid/inline-table 等）
-    /// 提升到 wrapper（置于表盒上方，DOM 序——table-anon 金标实测：
-    /// div.c 先于表盒、宽 = 包含块宽），表格内部件（行/行组/单元格/标题）
-    /// 挂内表。collect 读内表矩形；settle_tables 以内表为结算基准。每帧
-    /// 重应用（restyle 会把原样式写回 wrapper tid）。幂等：内表节点按
-    /// taffy_table_inner 在场复用。表子树整体豁免于结构同步（settle_
-    /// absolute_anchors v1 契约），表结构由本函数与 settle_tables 独占。
-    /// 已知边界：absolute 子件随内表（inner 的 Relative 语境承接 taffy
-    /// 锚定，语义 ≈ Chromium 锚表盒 padding box）；提升件若 DOM 序晚于
-    /// 表格内部件，本实现仍置表盒上方（Chromium 同场景插序未建模）。
+    /// ② tables: column template settlement — after the first layout pass
+    /// yields the table content width, computes the column template from the
+    /// first-row cells' declared widths (fixed px / percent / auto) and writes
+    /// a single-row grid back to each table-row; an all-equal cache skips
+    /// re-layout (zero extra layout passes in steady-state frames). Nested
+    /// tables settle outer-first. Wrapper-refactor side of the table
+    /// structure change (CSS 2.2 §17.4 anonymous box structure): the taffy
+    /// node of display:table degrades to a wrapper (Block, auto size, zero
+    /// margin/padding/border, overflow reset); a new inner-table node carries
+    /// all of the table box's own styles (full map_style; position forced to
+    /// Relative + inset zeroed — the inner must act as the taffy containing
+    /// block for its absolute descendants). A table box that is an improper
+    /// block child (block/flex/grid/inline-table etc.) is hoisted onto the
+    /// wrapper (placed above the table box, DOM order — the table-anon
+    /// ground-truth reference measured: div.c before the table box, width =
+    /// containing block width); table-internal parts (rows/row groups/cells/
+    /// caption) attach to the inner table. collect reads the inner-table
+    /// rect; settle_tables settles against the inner table. Re-applied every
+    /// frame (restyle writes the original styles back to the wrapper tid).
+    /// Idempotent: the inner-table node is reused when taffy_table_inner
+    /// already holds it. The table subtree is exempt from structural
+    /// synchronization wholesale (settle_absolute_anchors v1 contract); the
+    /// table structure is owned exclusively by this function and
+    /// settle_tables. Known boundaries: absolute children follow the inner
+    /// table (the inner's Relative context takes taffy anchoring; semantics ≈
+    /// Chromium anchoring to the table box's padding box); if a hoisted
+    /// element comes after table-internal parts in DOM order, this
+    /// implementation still places it above the table box (Chromium's
+    /// insertion order in the same scenario is not modeled).
     fn settle_table_fixup(&mut self) {
         if self.tables.is_empty() {
             return;
@@ -4181,9 +4438,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 触发一次重排后二次迭代（上限 2 遍，内层表宽度取结算后值）。
-    /// 三期④：行发现穿透行组；单元格图（CSS 2.1 §17.2.11.1 简化版）按
-    /// colspan 属性分配显式列位；span-n 声明宽度均分给跨内未声明列。
+    /// One post-relayout second iteration (capped at 2 passes so inner-table
+    /// widths take settled values). Phase 3 ④: row discovery pierces row
+    /// groups; the cell map (simplified CSS 2.1 §17.2.11.1) assigns explicit
+    /// column positions by colspan attribute; a span-n declared width is
+    /// divided evenly among the undeclared columns it spans.
     fn settle_tables(&mut self, viewport: (f32, f32)) {
         if self.tables.is_empty() {
             return;
@@ -4216,12 +4475,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
                 //（幻影行插在裸单元格原位；表子树结构同步豁免，该结构由
                 // settle_table_fixup 与本函数独占）。
                 struct TableRowSpec {
-                    /// 真实行样式节点（幻影行为 None——无样式节点）。
+                    /// Style node of a real row (phantom rows = None — no
+                    /// style node).
                     node: Option<NodeId>,
-                    /// 行 taffy 节点（真实行 tid 或幻影行 tid）。
+                    /// The row's taffy node (real row tid or phantom row tid).
                     tid: taffy::NodeId,
-                    /// 参与单元格图的本行单元格（真实行 = 全部样式子件，
-                    /// none/abs 由下方入图过滤剔除；幻影行 = 单个裸单元格）。
+                    /// This row's cells participating in the cell map (real
+                    /// row = all styled children; none/abs are filtered out of
+                    /// the map below; phantom row = the single bare cell).
                     cells: Vec<NodeId>,
                 }
                 let mut rows: Vec<TableRowSpec> = Vec::new();
@@ -4569,15 +4830,21 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// ③multi-column 结算（settle_calc/settle_tables 同模式的布局期结算）：
-    /// pass1 布局给出容器内容宽后解析列数（count 显式；width 模式
-    /// n = max(1, ⌊(内容宽+gap)/(理想宽+gap)⌋)）与列宽 colw=(cw−gap·(n−1))/n；
-    /// 创建/复用 taffy 幻影列节点（无样式节点、Frame 不报告）并 set_children
-    /// 跨父重挂真实子节点（taffy 0.14 支持移动语义）；按子节点 margin-box
-    /// 单元高做平衡分配（CSS column-fill:balance 近似——理想高 = 总量/列数
-    /// 的贪心填充，空列可承接不可断高子件）；文本重排后二次调用以最终高度
-    /// 复衡。稳态（n/colw/分配全等）零额外布局 pass。v1 边界：断口 margin-top
-    /// 不截断、column-span/rule 不实现、absolute 子件包含块仍为容器。
+    /// ③ multi-column settlement (same layout-time settle pattern as
+    /// settle_calc/settle_tables): after the pass-1 layout yields the
+    /// container content width, resolves the column count (explicit count;
+    /// width mode n = max(1, ⌊(content width+gap)/(ideal width+gap)⌋)) and
+    /// the column width colw=(cw−gap·(n−1))/n; creates/reuses taffy phantom
+    /// column nodes (no style nodes, not reported by Frame) and re-homes the
+    /// real children across parents via set_children (taffy 0.14 supports
+    /// move semantics); balances by margin-box cell height per child (a CSS
+    /// column-fill:balance approximation — greedy fill toward the ideal
+    /// height = total/columns; an empty column may still take an
+    /// unbreakable-tall child); re-balances with final heights on a second
+    /// call after text re-layout. Steady state (n/colw/assignment all equal)
+    /// = zero extra layout passes. v1 boundaries: break margin-top not
+    /// truncated, column-span/rule not implemented, the containing block of
+    /// absolute children remains the container.
     fn settle_columns(&mut self, viewport: (f32, f32)) {
         if self.multicols.is_empty() {
             return;
@@ -5121,28 +5388,40 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 三期⑤c：列规几何结算——每行每相邻列间一条竖直条带（视口系，
-    /// 相对容器 border-box 原点；paint 层加容器原点）。语义：style ∈
-    /// BorderStyle（none/hidden 不画）；v1 仅 solid 实绘，dashed/dotted
-    /// 近似 solid（B 级偏差，与 border 策略一致）；width 缺席 = medium
-    /// 3px，显式负值钳 0（0 宽不画）；color 走 currentcolor 终结。
-    /// 行模式条带 y/高 = 幻影列盒（Flex 拉伸全等 = 容器内容高）；span
-    /// 模式逐段独立。空列照画（CSS 未设内容存在性条件；用例规避）。
-    /// F1（ADR-0021）：IFC 行内流 v1——行打包结算（浮盒先例）。块容器
-    /// 直子分类行内参与者（文本叶 / inline-block 原子盒 / inline 组盒）
-    /// → 贪心行打包 → Position::Absolute+inset 锚定（父 padding box
-    /// 相对）。挂点=settle_floats 之后、文本 remeasure 之前（参与者经
-    /// inline_run_participants 豁免全宽重测）；每帧幂等=map_style 重置
-    /// +重施（无 taffy Style 缓存——E4 E0277 教训）。
-    /// v1 偏差（ADR-0021 D4）：行高=max(参与者测量高)、vertical-align=
-    /// TOP 对齐、inline 组内子叶纵向堆叠（单叶 span 精确）、跨叶强制
-    /// 断行（br）不支持、原子/组盒自然宽=taffy MaxContent 探针、仅
-    /// Block 容器直子运行（inline-flex/grid/table 原子化=偏差在案）。
+    /// Phase 3 ⑤c: column rule geometry settlement — one vertical stripe
+    /// between every pair of adjacent columns per row (viewport coordinates,
+    /// relative to the container's border-box origin; the paint layer adds
+    /// the container origin). Semantics: style ∈ BorderStyle (none/hidden not
+    /// drawn); v1 draws solid only, dashed/dotted approximate solid (Tier B
+    /// deviation, consistent with the border strategy); width missing =
+    /// medium 3px, an explicit negative value clamps to 0 (zero width not
+    /// drawn); color resolves through currentcolor. In row mode the stripe's
+    /// y/height = the phantom column box (Flex stretch equal = container
+    /// content height); in span mode each segment is independent. Empty
+    /// columns still draw (CSS imposes no content-presence condition; kept
+    /// to avoid special-casing use cases).
+    /// F1 (ADR-0021): IFC inline flow v1 — line packing settlement (the
+    /// float precedent pattern). Classifies a block container's direct
+    /// children into inline participants (text leaves / inline-block atomic
+    /// boxes / inline group boxes) → greedy line packing → Position::Absolute +
+    /// inset anchoring (relative to the parent's padding box). Hook point =
+    /// after settle_floats, before text remeasure (participants are exempted
+    /// from the full-width remeasure via inline_run_participants); per-frame
+    /// idempotent = map_style reset + reapply (no taffy::Style caching — the
+    /// E4 E0277 lesson).
+    /// v1 deviations (ADR-0021 D4): line height = max(participant measured
+    /// heights), vertical-align = TOP alignment, child leaves inside an
+    /// inline group stack vertically (exact for single-leaf spans), forced
+    /// line breaks across leaves (br) unsupported, atomic/group box natural
+    /// width = taffy MaxContent probe, runs only among direct children of
+    /// Block containers (inline-flex/grid/table atomization = deviation
+    /// documented in FEATURES.md/SINK-MATRIX.md).
     #[cfg(feature = "text")]
     fn settle_lines(&mut self, viewport: (f32, f32)) {
         use crate::css::property::{DeclValue, Display, PropertyId, WhiteSpace};
-        /// 行内参与者：文本叶（容器直子）或盒（inline-block 原子 / inline
-        /// 组——其子叶保持组内块流，remeasure 继续管）。
+        /// Inline participant: a text leaf (direct child of the container)
+        /// or a box (inline-block atomic / inline group — its child leaves
+        /// keep their in-group block flow, still managed by remeasure).
         #[derive(Debug, Clone, Copy)]
         enum InlinePart {
             Leaf { id: NodeId },
@@ -5521,11 +5800,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// Box 参与者基线探针（P3，ADR-0034 D2）：子树**首个文本叶**的
-    /// 探针布局 y 偏移 + 其首行基线；无文本叶 = 盒底边（v1 近似）。
-    /// 前置：对 tid 已跑 MaxContent 探针布局（location 树就绪）。
-    /// location.y 沿路径累加（taffy 子节点 location 相对父 content box；
-    /// border/padding 差异近似=B 级在案 ADR-0034）。
+    /// Box participant baseline probe (P3, ADR-0034 D2): the probe layout y
+    /// offset of the subtree's **first text leaf** plus its first-line
+    /// baseline; no text leaf = the box's bottom edge (v1 approximation).
+    /// Precondition: a MaxContent probe layout has already run for tid (the
+    /// location tree is ready). location.y accumulates along the path (taffy
+    /// child locations are relative to the parent content box; the
+    /// border/padding difference approximation = Tier B, documented in
+    /// ADR-0034).
     #[cfg(feature = "text")]
     fn box_first_text_baseline(&mut self, root: NodeId, fallback: f32) -> f32 {
         let mut stack: Vec<(NodeId, f32)> = vec![(root, 0.0)];
@@ -5566,13 +5848,17 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         fallback
     }
 
-    /// 行两阶段结算 flush（P3，ADR-0034 D2）：TOP 装箱收集完成后按
-    /// vertical-align 统一结算纵向偏移——行基线 L = max(基线距)；非
-    /// bottom 值先算 dy 并回填 inset.top（dy 相对装箱行顶）；行盒底 =
-    /// max(原行高, max(dy+h)) 扩展（descender 下沉扩展语义）；bottom
-    /// 值对齐扩展后行底（二遍）。返回最终行高（≥ 入参 line_h）。
-    /// 偏差（ADR-0034 在案）：va=baseline 不产生偏移（v1 TOP 装箱逐位
-    /// 一致——混字号默认基线下沉属 B 级后续）；calc() 承载偏移按 0。
+    /// Line two-phase settlement flush (P3, ADR-0034 D2): after TOP packing
+    /// collects the line, resolves vertical offsets uniformly by
+    /// vertical-align — the line baseline L = max(baseline distance);
+    /// non-bottom values compute dy first and backfill inset.top (dy is
+    /// relative to the packed line top); the line box bottom = max(original
+    /// line height, max(dy+h)) extends (descender sink extension
+    /// semantics); bottom values align to the extended line bottom (second
+    /// pass). Returns the final line height (≥ the line_h argument).
+    /// Deviations (documented in ADR-0034): va=baseline produces no offset
+    /// (v1 is bit-identical to TOP packing — mixed font-size default-baseline
+    /// sink is deferred Tier B); calc()-carried offsets count as 0.
     #[cfg(feature = "text")]
     fn flush_inline_line(
         &mut self,
@@ -5641,13 +5927,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         final_h
     }
 
-    /// E4（ADR-0019）：浮动结算——出流/堆叠/环绕/clear 钳位（CSS 2 §9.5）。
-    /// 诚实边界（0.x）：兄弟级环绕（顶缘落在浮盒带内=带内同侧浮盒宽和）
-    /// +同父浮栈贪心放置+clear 钳位（margin-top 增量）；table/multicol/
-    /// 定位子树豁免（v1 浮动不进表格/定位上下文）。挂点=settle_columns
-    /// 之后、文本 remeasure 之前（折行宽依赖结算值）。幂等=每帧先还原
-    /// 上帧覆写（map_style 重放 pristine）→ pristine 布局→几何计算→覆写→终布局
-    /// （浮盒在场=两次布局，同 settle_tables 多遍先例）。
+    /// E4 (ADR-0019): float settlement — out-of-flow / stacking / wrapping /
+    /// clear clamping (CSS 2 §9.5). Honest boundary (0.x): sibling-level
+    /// wrapping (a top edge falling inside a float's band = the summed width
+    /// of same-side floats within the band) + same-parent float-stack greedy
+    /// placement + clear clamping (margin-top increments); table/multicol/
+    /// positioned subtrees are exempt (v1 floats do not enter tables or
+    /// positioning contexts). Hook point = after settle_columns, before text
+    /// remeasure (the wrapping width depends on settled values).
+    /// Idempotent = each frame first restores the previous frame's overwrites
+    /// (map_style replays pristine) → pristine layout → geometry computation
+    /// → overwrite → final layout (floats present = two layouts, same
+    /// multi-pass precedent as settle_tables).
     fn settle_floats(&mut self, viewport: (f32, f32)) {
         let Some(root) = self.taffy_root else {
             return;
@@ -5732,7 +6023,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
             let content_right = pl.location.x + pl.size.width - pl.border.right - pl.padding.right;
             let content_top = pl.location.y + pl.border.top + pl.padding.top;
             let pad_right_x = pl.location.x + pl.size.width - pl.border.right;
-            /// 单个浮盒放置记录（本 pass 局部）。
+            /// One float placement record (local to this pass).
             struct Place {
                 id: NodeId,
                 is_left: bool,
@@ -5966,7 +6257,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 单容器的列规条带（只读；None = 不画/无几何）。
+    /// One container's column rule stripes (read-only; None = not drawn / no
+    /// geometry).
     fn column_rule_segs(
         &self,
         mc: NodeId,
@@ -6091,13 +6383,18 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_style = false;
     }
 
-    /// 增量重样式（阶段5）：对脏根子树（根 + 全部后代）局部重算样式，
-    /// 全树其余节点的 styles/taffy 镜像保持现值。正确性域：节点样式求值
-    /// 只依赖①自身/祖先的树数据（类、状态、声明块——兄弟声明互不影响，
-    /// :nth-child 按树位不按样式）②继承的父样式（子树重算即重取）
-    /// ③祖先容器快照（有容器规则时不走本路径，退全量收敛环）。
-    /// 表格/多列子树退全量：幻影列与列模板为跨节点累积状态，v1 增量
-    /// 路径不触碰（残余偏差记 FEATURES.md ㉙）。
+    /// Incremental restyle (Stage 5): re-evaluates styles locally over each
+    /// dirty root's subtree (root + all descendants) while the styles/taffy
+    /// mirrors of the rest of the tree keep their current values.
+    /// Correctness domain: a node's style evaluation depends only on ① its
+    /// own/ancestors' tree data (classes, state, declaration blocks — sibling
+    /// declarations do not interact; :nth-child is by tree position, not
+    /// style) ② inherited parent styles (the subtree re-evaluation re-reads
+    /// them) ③ ancestor container snapshots (with container rules this path
+    /// is not taken; falls back to the full convergence loop). Table/multicol
+    /// subtrees fall back to full restyle: phantom columns and column
+    /// templates are cross-node accumulated state the v1 incremental path
+    /// does not touch (residual deviation recorded in FEATURES.md ㉙).
     fn restyle_subtrees(&mut self, roots: Vec<NodeId>) {
         // 失效根过滤：树中已不存在的根（remove 后残留）跳过。
         let roots: Vec<NodeId> = roots
@@ -6160,8 +6457,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// B1：设置用户起源样式表（css-cascade-5 User 层：介于 UA 与 author
-    /// 之间；层树独立于 author 表）。样式变化触发全树重样式。
+    /// B1: sets the user-origin stylesheet (css-cascade-5 User layer:
+    /// between UA and author; the layer tree is independent of the author
+    /// sheet). A style change triggers a full-tree restyle.
     pub fn set_user_stylesheet(&mut self, css: &str) {
         self.user_sheet = Some(crate::css::stylesheet::parse_stylesheet(css));
         // B4：user 表可携带 @property（合并序最前 = author 覆 user）。
@@ -6174,7 +6472,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_struct = true;
     }
 
-    /// B1：清除用户起源样式表。
+    /// B1: clears the user-origin stylesheet.
     pub fn clear_user_stylesheet(&mut self) {
         self.user_sheet = None;
         self.rebuild_registered_props();
@@ -6185,11 +6483,14 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_struct = true;
     }
 
-    /// P5（ADR-0033 D1）：设置 UA 起源样式表（css-cascade-5 UserAgent 层：
-    /// Default < UA < User < Author；important 反转自动生效）。合并序：
-    /// @property/@font-face UA 表注册先于 user 表（起源序）。默认不装载
-    /// ——缺省呈现是宿主策略（中立契约）；HTML 缺省表见
-    /// `style_engine::builtins::DEFAULT_UA_SHEET`。样式变化触发全树重样式。
+    /// P5 (ADR-0033 D1): sets the UA-origin stylesheet (css-cascade-5
+    /// UserAgent layer: Default < UA < User < Author; the important flip
+    /// applies automatically). Merge order: @property/@font-face from the UA
+    /// sheet registers before the user sheet (origin order). Not loaded by
+    /// default — the default presentation is host policy (a neutral
+    /// contract); for the HTML default sheet see
+    /// `style_engine::builtins::DEFAULT_UA_SHEET`. A style change triggers a
+    /// full-tree restyle.
     pub fn set_ua_stylesheet(&mut self, css: &str) {
         self.ua_sheet = Some(crate::css::stylesheet::parse_stylesheet(css));
         self.rebuild_registered_props();
@@ -6200,7 +6501,7 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_struct = true;
     }
 
-    /// P5（ADR-0033 D1）：清除 UA 起源样式表。
+    /// P5 (ADR-0033 D1): clears the UA-origin stylesheet.
     pub fn clear_ua_stylesheet(&mut self) {
         self.ua_sheet = None;
         self.rebuild_registered_props();
@@ -6211,8 +6512,8 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_struct = true;
     }
 
-    /// 宿主推入字体数据（feature = "text"）；字体变化影响文本测量，
-    /// 触发全树样式/布局失效。
+    /// Host-pushed font data (feature = "text"); a font change affects text
+    /// measurement and triggers a full-tree style/layout invalidation.
     #[cfg(feature = "text")]
     pub fn add_font(&mut self, data: Vec<u8>) {
         // A9：注册即探测 ch/ex/ic 度量与族名（失败=不落表→近似缺省）
@@ -6233,19 +6534,25 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         self.dirty_struct = true;
     }
 
-    /// F3d（ADR-0026 D4）：@font-face 登记表只读视图（合并序 = user → 主表
-    /// → 附加表；同族后规则胜）。宿主据此映射 local()/url() 键到 add_font
-    /// 推送的字节、按 unicode-range/style/weight/stretch 筛选匹配；引擎仅
-    /// 供给元数据，不做字体匹配决策（匹配与回退属宿主/后续阶段契约）。
+    /// F3d (ADR-0026 D4): a read-only view of the @font-face registry (merge
+    /// order = user → primary → extra sheets; later same-family rules win).
+    /// The host uses it to map local()/url() keys to bytes pushed via
+    /// add_font and to filter matches by unicode-range/style/weight/stretch;
+    /// the engine only supplies metadata and makes no font-matching decision
+    /// (matching and fallback are a host / later-phase contract).
     pub fn font_faces(&self) -> &[crate::css::stylesheet::FontFaceRule] {
         &self.font_faces
     }
 
-    /// C3（ADR-0017 D4）：替换内容叶测量（CSS 10.3.4 简化契约）：
-    /// 双边声明=盒取声明值；单边声明=另一边按源宽高比缩放；全 auto=自然
-    /// 尺寸（块级替换元素不拉伸）。% 宽以 `avail`（容器可用宽近似）为基。
-    /// 返回 None = 非图像叶 / 引用未注册 / 宿主已手动 set_leaf_intrinsic
-    ///（此时引擎不接管尺寸；absolute 叶的手动区间经 T5d shrink 通道消费）。
+    /// C3 (ADR-0017 D4): replaced-content leaf measurement (simplified CSS
+    /// 10.3.4 contract): both sides declared = the box takes the declared
+    /// values; one side declared = the other scales by the source aspect
+    /// ratio; all auto = natural size (block-level replaced elements do not
+    /// stretch). A % width resolves against `avail` (an approximation of the
+    /// container's available width). Returns None = not an image leaf / the
+    /// reference is unregistered / the host already called set_leaf_intrinsic
+    /// (the engine then does not take over sizing; an absolute leaf's manual
+    /// interval is consumed via the T5d shrink channel).
     fn image_leaf_measure(&mut self, id: &NodeId, avail: f32) -> Option<(f32, f32)> {
         let reference = self.tree.node(*id).image.as_ref()?.clone();
         let img = self.images.get(&reference)?;
@@ -6292,16 +6599,21 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         Some((mw, mh.max(0.0)))
     }
 
-    /// C3（ADR-0017 D4）：替换内容叶布局前种子——measures + taffy 尺寸回写。
-    /// 静态量（样式不变则幂等跳过，无需 reflow 收敛环）；absolute 叶仅注入
-    /// 固有区间，不写 taffy 尺寸（位置/夹紧由 T5d 第三 pass 处理）。
-    /// E5（ADR-0020）：grid 放置解析——纯样式派生（容器模板线名+区域
-    /// 矩形 → 子放置数字线号），挂点 = seed_image_leaves 之后、
-    /// compute_layout 之前（无布局依赖 → 无额外重排；每帧幂等 =
-    /// restyle 的 map_style 重置放置 + 本 pass 重施）。
-    /// 解析序（`<custom-ident>`）：区域名 → 全名线 → strip `-start`/`-end`
-    /// 裸名线 → 未知名 = Auto（spec：不存在的名视作 auto）。
-    /// v1 边界：线名仅支持模板顶层（repeat 内括号 = 解析失败声明无效）。
+    /// C3 (ADR-0017 D4): pre-layout seeding for replaced-content leaves —
+    /// measures + taffy size write-back. Static quantities (idempotent skip
+    /// when styles are unchanged; no reflow convergence loop needed);
+    /// absolute leaves get only the intrinsic interval injected, no taffy
+    /// sizes (position/clamping is handled by the T5d third pass).
+    /// E5 (ADR-0020): grid placement resolution — a pure style derivation
+    /// (container template line names + area rectangles → numeric child
+    /// line numbers), hook point = after seed_image_leaves, before
+    /// compute_layout (no layout dependency → no extra re-layout; per-frame
+    /// idempotent = placements reset by restyle's map_style + re-applied by
+    /// this pass). Resolution order (`<custom-ident>`): area name → full
+    /// line name → bare line name with `-start`/`-end` stripped → unknown
+    /// name = Auto (spec: a non-existent name acts as auto).
+    /// v1 boundary: line names are supported only at template top level
+    /// (brackets inside repeat = parse failure, declaration invalid).
     fn apply_grid_placements(&mut self) {
         let mut stack: Vec<NodeId> = vec![self.tree.root()];
         while let Some(id) = stack.pop() {
@@ -6359,8 +6671,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// E5：容器语境——列/行线名注册表（1 基线号；模板顶层线名槽，
-    /// line_names[i] = 第 i+1 号线）+ 区域矩形表（0 基格界）。
+    /// E5: container context — the column/row line-name registries (1-based
+    /// line numbers; template top-level line-name slots, line_names[i] = line
+    /// i+1) plus the area rectangle table (0-based cell bounds).
     fn grid_context(&self, gid: &NodeId) -> (GridLineMap, GridLineMap, GridAreaMap) {
         let mut col_lines: GridLineMap = std::collections::BTreeMap::new();
         let mut row_lines: GridLineMap = std::collections::BTreeMap::new();
@@ -6409,10 +6722,13 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         (col_lines, row_lines, areas)
     }
 
-    /// E5：单轴放置对解析（start/end 长手 → taffy 数字放置对）。
-    /// SpanName 终界 = start 线后第 k 次名线（候选 = 全名+strip 后缀裸名，
-    /// 排序去重；不足 = 末候选+1 钳——隐式线按 spec 计入）；两侧正线号
-    /// start ≥ end → end = start+1 钳（跨度至少 1）。
+    /// E5: resolves one axis's placement pair (longhands start/end → taffy
+    /// numeric placement pair).
+    /// SpanName end boundary = the k-th named line after the start line
+    /// (candidates = full names + bare names with the suffix stripped,
+    /// sorted and deduplicated; exhausted = last candidate + 1 clamp —
+    /// implicit lines count per spec); with positive line numbers on both
+    /// sides, start ≥ end → end clamps to start+1 (span at least 1).
     fn resolve_axis(
         lines: &GridLineMap,
         areas: &GridAreaMap,
@@ -6516,7 +6832,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         (conv(start_p), conv(end_p))
     }
 
-    /// E5：命名起点解析（区域起边 → 全名线首现 → strip 后缀裸名首现）。
+    /// E5: named start resolution (area start edge → first occurrence of the
+    /// full line name → first occurrence of the bare name with the suffix
+    /// stripped).
     fn resolve_named_start(
         s: &str,
         lines: &GridLineMap,
@@ -6541,7 +6859,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         None
     }
 
-    /// E5：命名终点解析（区域止边 = 界+2 → 全名线末现 → strip 后缀裸名末现）。
+    /// E5: named end resolution (area end edge = bounds+2 → last occurrence
+    /// of the full line name → last occurrence of the bare name with the
+    /// suffix stripped).
     fn resolve_named_end(
         s: &str,
         lines: &GridLineMap,
@@ -6612,10 +6932,12 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 注册背景图（第五批⑨）：background-image: url(ref) 引用 → 宿主
-    /// 预解码 RGBA（零副作用——引擎不取 URL、不解码位图格式）；注册于
-    /// 样式表设置前后皆可，未注册引用绘制期告警跳过；仅影响绘制
-    /// （DisplayList 每帧重建，无需脏标）。
+    /// Registers a background image (batch 5 ⑨): a background-image:
+    /// url(ref) reference resolves to host-pre-decoded RGBA (zero side
+    /// effects — the engine never fetches URLs or decodes bitmap formats);
+    /// registration works before or after stylesheet setup, and unregistered
+    /// references are skipped with a paint-time warning; affects paint only
+    /// (the display list rebuilds every frame; no dirty flag needed).
     pub fn add_image(&mut self, reference: &str, width: u32, height: u32, rgba: Vec<u8>) {
         debug_assert_eq!(
             width as usize * height as usize * 4,
@@ -6890,8 +7212,10 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
         }
     }
 
-    /// 深度优先收集布局盒。taffy 的 `location` 是父相对坐标，故携带祖先累计偏移
-    /// 合成视口绝对坐标（合成视口根引入后，树根不再是 taffy 根）。
+    /// Depth-first collection of layout boxes. taffy's `location` is
+    /// parent-relative, so ancestor accumulated offsets are carried along to
+    /// synthesize viewport-absolute coordinates (after the synthetic viewport
+    /// root was introduced, the tree root is no longer the taffy root).
     fn collect(
         &self,
         id: NodeId,
@@ -6983,10 +7307,11 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     }
 }
 
-/// 样式树结构递归投影（F3e，ADR-0027 D1）：`layout_tree_dump` 的行生产器。
-/// 标签 = 元素名（匿名 `anon`）/`#id`/`.class` 连串/`key=K`（宿主映射时）
-/// /`[::before|::after]`（伪实体）/`text="…"`（截断 24 字节）。深度缩进
-/// 两空格一级。
+/// Recursive structural projection of the style tree (F3e, ADR-0027 D1): the
+/// line producer behind `layout_tree_dump`. Labels = element name (anonymous
+/// `anon`) / `#id` / chained `.class`es / `key=K` (when host-mapped)
+/// /`[::before|::after]` (pseudo entities) / `text="…"` (truncated to 24
+/// bytes). Depth indents two spaces per level.
 fn dump_tree_node<K: Copy + std::fmt::Debug>(
     tree: &StyleTree,
     keys: &mut HashMap<NodeId, K>,
@@ -7021,8 +7346,10 @@ fn dump_tree_node<K: Copy + std::fmt::Debug>(
     }
 }
 
-/// class 语义归一（CSS class 属性为空格分隔 token）：把每个条目按 ASCII
-/// 空白拆开并丢弃空项——宿主传 `"row alt"` 与 `["row", "alt"]` 等价。
+/// class semantics normalization (the CSS class attribute is a
+/// space-separated token list): splits every entry on ASCII whitespace and
+/// drops empty items — a host passing `"row alt"` is equivalent to passing
+/// `["row", "alt"]`.
 fn normalize_classes(input: &[String]) -> smallvec::SmallVec<[String; 4]> {
     input
         .iter()
@@ -7031,9 +7358,11 @@ fn normalize_classes(input: &[String]) -> smallvec::SmallVec<[String; 4]> {
         .collect()
 }
 
-/// 两阶段包含块内容宽的水平内缩项（T5c-2 收口）：padding 恒计；border 仅在
-/// style 非 none 时计入（CSS used width：style none 时边框宽归零，初始
-/// medium 不参与）。width 侧兼容 Len 与 BorderWidth 两种物化。
+/// Horizontal inset items against the two-phase containing block content
+/// width (T5c-2 close-out): padding always counts; border counts only when
+/// its style is not none (CSS used width: a none-style border contributes
+/// zero width; the initial medium never participates). The width side
+/// accepts both the Len and BorderWidth materializations.
 fn used_h_inset(
     cs: &ComputedStyle,
     width_id: crate::css::property::PropertyId,
@@ -7058,8 +7387,9 @@ fn used_h_inset(
     }
 }
 
-/// 声明长度检查（第五批⑥文本叶契约）：width/height 是否被显式声明
-/// （`LenAuto(Some)`；auto=None 不算声明）。声明值优先于文本测量。
+/// Declared-length check (batch 5 ⑥ text-leaf contract): whether width/
+/// height is explicitly declared (`LenAuto(Some)`; auto=None does not count
+/// as declared). Declared values take precedence over text measurement.
 fn has_declared_len(cs: &ComputedStyle, pid: crate::css::property::PropertyId) -> bool {
     matches!(
         cs.get(pid),
@@ -7072,8 +7402,10 @@ mod tests {
     use super::*;
     use crate::tree::NodeState;
 
-    /// API 冻结（阶段3）：公共类型线程安全承诺（C3）——静态断言防回归。
-    /// StyleEngine/Frame 须可跨线程移动（宿主在渲染线程消费 DisplayList）。
+    /// API freeze (Stage 3): thread-safety promise for public types (C3) —
+    /// static assertions guard against regression. StyleEngine/Frame must be
+    /// movable across threads (the host consumes the DisplayList on the
+    /// render thread).
     #[test]
     fn public_types_are_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -7171,7 +7503,8 @@ mod tests {
         assert_eq!(frame.boxes[1].x, 56.0); // 40 + 16
     }
 
-    /// 真实字体（demo 资产，同仓自由许可）：让测量/换行通路在测试中真实生效。
+    /// Real fonts (demo assets, freely licensed in-repo): make the
+    /// measurement/wrapping paths genuinely exercise in tests.
     const TEST_FONT: &[u8] = include_bytes!("../../style-engine-demo/assets/fonts/DejaVuSans.ttf");
     const TEST_FONT_CJK: &[u8] =
         include_bytes!("../../style-engine-demo/assets/fonts/NotoSansSC.ttf");
@@ -11064,8 +11397,9 @@ mod tests {
         assert!((fs2(Key(2)) - 20.0 / 1.2).abs() < 1e-4, "20/1.2 比例回退");
     }
 
-    /// P6（ADR-0035 D1）：host 快筛键提取矩阵——类/类型/通配/前缀组合器
-    /// 哨兵/id 键，且表装载路径重建索引。
+    /// P6 (ADR-0035 D1): the host quick-screen key extraction matrix —
+    /// class/type/wildcard/prefix-combinator sentinel/id keys, and the
+    /// index rebuilds on sheet-load paths.
     #[test]
     fn has_host_index_keys_and_sentinel() {
         let mut engine: StyleEngine<Key> = StyleEngine::new();
@@ -11111,8 +11445,10 @@ mod tests {
         assert!(engine.has_host_index.is_empty(), "非 :has 表零键");
     }
 
-    /// P6（ADR-0035 D2）：增量失效快筛判定矩阵——无关子树否决（走增量）、
-    /// host 子树命中（升级全量）、前缀组合器哨兵恒升级、无 :has 表恒增量。
+    /// P6 (ADR-0035 D2): the incremental-invalidation quick-screen decision
+    /// matrix — unrelated subtree votes down (goes incremental), a host
+    /// subtree hit upgrades to full restyle, a prefix-combinator sentinel
+    /// always upgrades, and a sheet without :has always stays incremental.
     #[test]
     fn has_invalidation_needs_full_matrix() {
         let mut engine: StyleEngine<Key> = StyleEngine::new();
@@ -11164,8 +11500,9 @@ mod tests {
         assert!(!engine.has_invalidation_needs_full(), "无 :has 零升级");
     }
 
-    /// P6（ADR-0035 D3）：any_container_rules 补齐 user_sheet/ua_sheet
-    /// 漏检——user 表含 @container 时收敛环 pass 判定（cap=3）正确。
+    /// P6 (ADR-0035 D3): any_container_rules covers the user_sheet/ua_sheet
+    /// miss — when the user sheet carries @container, the convergence-loop
+    /// pass decision (cap=3) is correct.
     #[test]
     fn container_rules_detected_in_user_sheet() {
         let mut engine: StyleEngine<Key> = StyleEngine::new();

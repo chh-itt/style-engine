@@ -1,16 +1,16 @@
 # style-engine
 
-**为 Rust 原生 GUI 提供的框架无关 CSS 语义层**：承包「样式声明 → 级联计算 → 布局 → 绘制指令」整条链，窗口/事件/时钟/资源等副作用全部留给宿主。
+**A framework-agnostic CSS semantic layer for native Rust GUIs**: it owns the full chain from style declarations → cascade → layout → paint commands, and leaves every side effect (windows, events, clocks, resources) to the host.
 
-- **L1 样式代数**：真实 CSS 文本解析（cssparser）+ 选择器匹配（selectors）+ 自研属性文法，产出 `ComputedStyle`（183 属性槽位 + custom properties）。
-- **L2 布局**（feature = `layout`）：taffy（flex/grid/block/absolute）+ 自研结算层（calc 17 轴结算式、表格两阶段列宽、多列二分平衡）+ 内置文本栈 parley（测量/断行/bidi）。
-- **L3 绘制**：中立 `DisplayList`（`PaintOp` 指令序列）——渲染由宿主接入任意后端；参考实现 `style-engine-vello`（GPU），确定性参照 `style-engine-soft`（零依赖纯软光栅），轻量 CPU 后端 `style-engine-tiny`（tiny-skia，嵌入式/无 GPU 目标）。
+- **L1 Style algebra**: real CSS text parsing (cssparser) + selector matching (selectors) + an in-house property grammar, producing `ComputedStyle` (183 property slots + custom properties).
+- **L2 Layout** (feature = `layout`): taffy (flex/grid/block/absolute) + an in-house resolution layer (calc across 17 axes as settled expressions, two-phase table column sizing, multi-column bisection balancing) + the built-in text stack parley (measurement / line breaking / bidi).
+- **L3 Paint**: a neutral `DisplayList` (a sequence of `PaintOp` commands) — rendering is up to whichever backend the host plugs in; reference GPU sink `style-engine-vello`, deterministic ground-truth sink `style-engine-soft` (zero-dependency pure software rasterizer), lightweight CPU backend `style-engine-tiny` (tiny-skia, for embedded / no-GPU targets).
 
-**定位**：桌面 GUI 的 CSS 语义层（面向 egui/iced/bevy 类宿主）；以浏览器为**度量衡**而非目标——正确性由 conformance harness 对比 Chromium golden（Numeric 0.5px 容差 + Pixel 错误分类双通道，当前 35 用例零 xfail）证明。子集边界由 [docs/FEATURES.md](docs/FEATURES.md) 权威定义：每行特性要么有金标准证据，要么有显式排除理由与重估条件。
+**Positioning**: a CSS semantic layer for desktop GUIs (aimed at egui/iced/bevy-style hosts); the browser is the **yardstick**, not the target — correctness is proven by the conformance harness against Chromium goldens (dual channel: Numeric with 0.5px tolerance + Pixel with error classification; currently 35 cases, zero xfail). The subset boundary is defined authoritatively by [docs/FEATURES.md](docs/FEATURES.md): every feature line either carries golden evidence or an explicit exclusion reason with a revisit condition.
 
-## 快速上手
+## Quick start
 
-安装（crates.io）：
+Install from crates.io:
 
 ```powershell
 cargo add style-engine style-engine-vello
@@ -22,57 +22,58 @@ use style_engine::{StyleEngine, StyleNode};
 let mut engine = StyleEngine::new();
 engine.set_stylesheet(".btn { background-color: #3366cc; padding: 8px 16px; }");
 
-// 宿主树镜像：根 1 → 按钮 2（K 为宿主自己的 Copy + Eq + Hash 键）
+// Host tree mirror: root 1 → button 2 (K is the host's own Copy + Eq + Hash key)
 engine.insert(None, 1, StyleNode::default())?;
 let mut btn = StyleNode::default();
 btn.name = Some("button".into());
 btn.classes = ["btn".to_string()].into_iter().collect();
 engine.insert(Some(1), 2, btn)?;
 
-// 每帧：视口 + 缩放因子 + 单调时钟（crate 无内部时钟，同输入同输出）
+// Per frame: viewport + scale factor + monotonic clock (the crate has no internal clock; same input, same output)
 let frame = engine.frame((800.0, 600.0), 1.0, 0.0);
 let hit = frame.find(2).expect("node laid out");
 
-// 绘制：DisplayList 交给任意 Sink
+// Paint: hand the DisplayList to any sink
 let scene = style_engine_vello::render(&frame.paint);
 ```
 
-零副作用契约：字体/图片字节由宿主推入（`add_font` / `add_image`），交互状态由宿主推送（`set_state`），滚动偏移归宿主（`set_scroll_offset`，量程经 `Frame.scrollable` 上报）。错误双轨：CSS 内容错误按规范容错进 `ParseReport`；宿主违约以 `ContractError` 上浮。
+Side-effect-free contract: font/image bytes are pushed in by the host (`add_font` / `add_image`), interaction state is pushed by the host (`set_state`), and scroll offsets live in the host (`set_scroll_offset`; ranges are reported via `Frame.scrollable`). Errors come in two tracks: CSS content errors are tolerated per spec into `ParseReport`; host contract violations surface as `ContractError`.
 
-## Workspace 布局
+## Workspace layout
 
-| crate | 职责 |
+| crate | role |
 |---|---|
-| `style-engine` | 核心：L1/L2/L3，无 GPU 依赖 |
-| `style-engine-vello` | GPU Sink 参考实现（wgpu/vello 只在此） |
-| `style-engine-soft` | 纯软件光栅 Sink（零第三方运行时依赖，像素确定性） |
-| `style-engine-tiny` | 轻量 CPU Sink（tiny-skia/parley，嵌入式/无 GPU 目标） |
-| `style-engine-conformance` | Chromium golden 双通道对比 harness |
-| `style-engine-demo` | winit 敌意消费者演示 |
+| `style-engine` | Core: L1/L2/L3, no GPU dependency |
+| `style-engine-vello` | GPU sink reference implementation (wgpu/vello live only here) |
+| `style-engine-soft` | Pure software rasterizer sink (zero third-party runtime deps, pixel-deterministic) |
+| `style-engine-tiny` | Lightweight CPU sink (tiny-skia/parley, for embedded / no-GPU targets) |
+| `style-engine-conformance` | Chromium golden dual-channel comparison harness |
+| `style-engine-demo` | winit adversarial-consumer demo |
 
-## Feature 门禁
+## Feature gates
 
-- `layout`（默认开）：taffy 布局与全部结算 pass
-- `text`（默认开）：parley 文本测量/断行
-- `serde`：DisplayList/ComputedStyle 机器通道（paint_dump OpDump 镜像、
-  调试 dump 往返锁）
-- `--no-default-features`：仅 CSS 解析/级联/绘制编译
+- `layout` (on by default): taffy layout and all resolution passes
+- `text` (on by default): parley text measurement / line breaking
+- `serde`: machine channel for DisplayList/ComputedStyle (paint_dump OpDump mirror, debug dump round-trip locks)
+- `--no-default-features`: only CSS parsing / cascade / paint compile
 
-## 文档索引
+## Documentation index
 
-- [CONTEXT.md](CONTEXT.md) — 领域语言（术语表）
-- [docs/V1-SCOPE.md](docs/V1-SCOPE.md) — v1.0 行为验收基准（承诺面/偏差面/排除面）
-- [docs/adr/](docs/adr/) — 架构决策记录（DisplayList 中立契约、渲染栈、conformance、推送式同步、滚动、层叠、transform、…）
-- [docs/FEATURES.md](docs/FEATURES.md) — 特性注册表（子集边界权威 + 偏差分级 A/B/C）
-- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — 性能预算与门禁推导
-- [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — 依赖政策与版本地板链
-- [CHANGELOG.md](CHANGELOG.md) — 按阶段演进记录
+The referenced documents are maintained in Chinese:
 
-## 本地开发
+- [CONTEXT.md](CONTEXT.md) — domain language (glossary)
+- [docs/V1-SCOPE.md](docs/V1-SCOPE.md) — v1.0 behavioral acceptance baseline (promises / deviations / exclusions)
+- [docs/adr/](docs/adr/) — architecture decision records (DisplayList neutral contract, rendering stack, conformance, push-based sync, scrolling, layering, transform, …)
+- [docs/FEATURES.md](docs/FEATURES.md) — feature registry (authoritative subset boundary + A/B/C deviation tiers)
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — performance budgets and gate derivations
+- [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — dependency policy and version-floor chain
+- [CHANGELOG.md](CHANGELOG.md) — phase-by-phase history
+
+## Local development
 
 ```powershell
-.\run.ps1            # fmt + clippy + test --all-features + hack 幂集（+ perf）
-cargo test -p style-engine --all-features   # 仅核心测试
+.\run.ps1            # fmt + clippy + test --all-features + hack powerset (+ perf)
+cargo test -p style-engine --all-features   # core tests only
 ```
 
-MSRV **1.90**（edition 2024；依赖地板链见 DEPENDENCIES.md）。许可 MIT OR Apache-2.0；发布 crates.io（2026-10 决策，废止早期「不发布」约定）。
+MSRV **1.90** (edition 2024; see DEPENDENCIES.md for the dependency floor chain). Licensed under MIT OR Apache-2.0; published to crates.io (2026-10 decision, superseding the earlier "do not publish" policy).

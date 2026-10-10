@@ -1,23 +1,27 @@
-//! 布局映射：ComputedStyle → taffy::Style（L2 适配）。
+//! Layout mapping: ComputedStyle → taffy::Style (L2 adapter).
 //!
-//! 偏差（记录 FEATURES.md）：calc 内含百分比在布局映射期按 0 折算
-//! （taffy 无 calc）；grid 轨道映射（repeat/minmax）T3b 落地，当前
-//! grid 容器仅映射 display 与 gap。
+//! Deviations (documented in FEATURES.md): calc expressions containing
+//! percentages are folded to 0 during layout mapping (taffy has no calc);
+//! grid track mapping (repeat/minmax) landed in T3b, so currently only
+//! display and gap are mapped on grid containers.
 
 use crate::computed::ComputedStyle;
 use crate::css::property::{Align, DeclValue, PropertyId};
 use crate::css::stylesheet::MediaEnv;
 use crate::css::value::{CalcNode, CalcUnit, LengthPercentage, ResolveCtx};
 
-/// em 以节点自身字号为基准，rem 以 MediaEnv.rem（文档根计算字号）为基准。
+/// em is based on the node's own font size; rem on MediaEnv.rem (the
+/// document root's computed font size).
 fn resolve_px(lp: &LengthPercentage, cs: &ComputedStyle, env: &MediaEnv) -> Option<f32> {
     let ctx = map_ctx(cs, env);
     lp.resolve(&ctx, 0.0)
 }
 
-/// A9：映射期统一 ResolveCtx——容器查询单位按 small viewport 回落
-///（无容器祖先的规范缺省），字体度量取节点 ComputedStyle（restyle 期
-/// 由引擎按 font-family 补写真实值；未注册族=近似缺省，B 级在案）。
+/// A9: mapping uses a unified ResolveCtx — container query units fall back
+/// to the small viewport (the spec default without a container ancestor);
+/// font metrics come from the node's ComputedStyle (the engine rewrites real
+/// values per font-family during restyle; unregistered families get
+/// approximate defaults — Tier B, documented in FEATURES.md).
 fn map_ctx(cs: &ComputedStyle, env: &MediaEnv) -> ResolveCtx {
     let m = cs.font_metrics();
     ResolveCtx {
@@ -30,7 +34,8 @@ fn map_ctx(cs: &ComputedStyle, env: &MediaEnv) -> ResolveCtx {
     }
 }
 
-/// A9：直变体 → calc 表达式（延迟结算队列统一以 CalcNode 承载）。
+/// A9: direct variants → calc expression (the deferred settle queue carries
+/// everything as CalcNode).
 fn lp_to_calc(lp: &LengthPercentage) -> CalcNode {
     match lp {
         LengthPercentage::Px(v) => CalcNode::Value(*v, CalcUnit::Px),
@@ -58,12 +63,15 @@ fn lp_to_calc(lp: &LengthPercentage) -> CalcNode {
 // 百分比并回写固定值（engine.rs settle_calc，上限 3 遍）。收集走
 // thread_local（引擎帧路径单线程；map_style 每次调用即清空）。
 
-/// 延迟 calc 的结算槽位（三期③扩展：width/height 之外新增 flex-basis、
-/// min/max、margin/padding 三族——此前含百分比 calc 在这些槽位按 0 折算）。
-/// 结算基准：width 族 = 包含块内容宽；height 族 = 包含块内容高；
-/// margin/padding 百分比按 CSS 2.1 §8.3/§8.4 恒以包含块 WIDTH 为基
-/// （含 margin-top/bottom、padding-top/bottom）；flex-basis 按父容器
-/// 主轴（settle 期读父 flex_direction 决定，basis_axis 返回 None）。
+/// Settle slots for deferred calc (phase-3 ③ extension: beyond width/height,
+/// adds the flex-basis, min/max, and margin/padding families — calc with
+/// percentages used to be folded to 0 in these slots).
+/// Settle basis: width family = containing block content width; height
+/// family = containing block content height; margin/padding percentages
+/// always resolve against the containing block WIDTH per CSS 2.1
+/// §8.3/§8.4 (including margin-top/bottom and padding-top/bottom);
+/// flex-basis follows the parent's main axis (read from the parent's
+/// flex_direction during settle, hence basis_axis returns None).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CalcAxis {
     Width,
@@ -86,7 +94,8 @@ pub(crate) enum CalcAxis {
 }
 
 impl CalcAxis {
-    /// 结算基准轴（对应父内容盒的宽/高；FlexBasis 动态判定）。
+    /// Settle basis axis (against the parent content box's width/height;
+    /// FlexBasis is decided dynamically).
     pub(crate) fn basis_axis(self) -> Option<CalcAxis> {
         match self {
             CalcAxis::Height | CalcAxis::MinHeight | CalcAxis::MaxHeight => Some(CalcAxis::Height),
@@ -97,7 +106,8 @@ impl CalcAxis {
         }
     }
 
-    /// 结算值回写 taffy 样式（padding 负值按 CSS §8.4 钳 0）。
+    /// Writes the settled value back to the taffy style (negative padding
+    /// clamped to 0 per CSS §8.4).
     pub(crate) fn write(self, style: &mut taffy::prelude::Style, px: f32) {
         use taffy::prelude::{Dimension, LengthPercentage as LP, LengthPercentageAuto as LPA};
         let px = match self {
@@ -129,8 +139,10 @@ impl CalcAxis {
     }
 }
 
-/// 映射期捕获的延迟 calc（expr + 解析上下文快照；A9 + 字体度量与容器
-/// 基值——cq 基值结算期现查 cq_basis，度量快照自节点 ComputedStyle）。
+/// Deferred calc captured during mapping (expr + resolve-context snapshot:
+/// A9 + font metrics and container base values — cq base values re-query
+/// cq_basis at settle time; metric snapshots come from the node's
+/// ComputedStyle).
 pub(crate) struct DeferredRaw {
     pub axis: CalcAxis,
     pub expr: CalcNode,
@@ -138,15 +150,15 @@ pub(crate) struct DeferredRaw {
     pub rem: f32,
     pub vw: f32,
     pub vh: f32,
-    /// A9：ch 基准（每 em；defer 时自 cs 捕获）。
+    /// A9: ch basis (per em; captured from cs at defer time).
     pub ch_per_em: f32,
-    /// A9：ex 基准（每 em）。
+    /// A9: ex basis (per em).
     pub ex_per_em: f32,
-    /// A9：ic 基准（每 em）。
+    /// A9: ic basis (per em).
     pub ic_per_em: f32,
 }
 
-/// 挂接 taffy 节点后的结算条目。
+/// A settle entry, created after the taffy node is attached.
 pub(crate) struct DeferredCalc {
     pub node: taffy::NodeId,
     pub raw: DeferredRaw,
@@ -157,7 +169,8 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// 取走本次 map_style 捕获的延迟 calc（调用方挂接 taffy 节点 id）。
+/// Takes the deferred calc captured by this map_style call (the caller
+/// attaches the taffy node id).
 pub(crate) fn take_calc_deferred() -> Vec<DeferredRaw> {
     CALC_DEFERRED.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
@@ -224,9 +237,11 @@ fn length_percentage_auto(
     }
 }
 
-/// margin：CSS 初始值为 0；显式 auto 保留（auto 水平 margin 使定宽块级盒居中）。
-/// 旧实现把缺席 margin 经 len_auto(None) 映射为 auto，导致无 margin 的
-/// 定宽块级子盒被意外水平居中。
+/// margin: the CSS initial value is 0; explicit auto is preserved (auto
+/// horizontal margins center a fixed-width block box). The old
+/// implementation mapped absent margins through len_auto(None) to auto,
+/// which unintentionally centered fixed-width block children with no
+/// margin.
 fn margin_side(
     cs: &ComputedStyle,
     id: PropertyId,
@@ -242,8 +257,9 @@ fn margin_side(
     }
 }
 
-/// 三期③：LengthPercentageAuto 槽位（min/max/margin）的延迟结算映射——
-/// 含百分比 calc 捕获进结算队列，首遍以 px 部分折叠。
+/// Phase-3 ③: deferred settle mapping for LengthPercentageAuto slots
+/// (min/max/margin) — calc with percentages is captured into the settle
+/// queue, with the first pass folded from its px part.
 fn lp_auto_defer(
     lp: Option<&LengthPercentage>,
     cs: &ComputedStyle,
@@ -272,8 +288,9 @@ fn lp_auto_defer(
     }
 }
 
-/// 三期③：LengthPercentage 槽位（padding/gap）的延迟结算映射；clamp_neg
-/// 对 padding/gap 负值按 CSS 钳 0（负值非法）。
+/// Phase-3 ③: deferred settle mapping for LengthPercentage slots
+/// (padding/gap); clamp_neg clamps negative padding/gap to 0 per CSS
+/// (negative values are invalid).
 fn lp_defer(
     lp: &LengthPercentage,
     cs: &ComputedStyle,
@@ -315,7 +332,7 @@ fn length_percentage(
     }
 }
 
-/// align 家族 → taffy AlignItems（normal → None = 引擎初始）。
+/// align family → taffy AlignItems (normal → None = engine initial).
 fn align_items(a: Align) -> Option<taffy::prelude::AlignItems> {
     match a {
         Align::Normal => None,
@@ -329,7 +346,7 @@ fn align_items(a: Align) -> Option<taffy::prelude::AlignItems> {
     }
 }
 
-/// justify-content 映射。
+/// justify-content mapping.
 fn justify_content(a: Align) -> Option<taffy::prelude::JustifyContent> {
     match a {
         Align::Normal | Align::Stretch | Align::Baseline => None,
@@ -356,7 +373,7 @@ fn align_content(a: Align) -> Option<taffy::prelude::AlignContent> {
     }
 }
 
-/// 计算样式 → taffy 样式。
+/// Computed style → taffy style.
 pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
     use taffy::prelude::{Rect, Size, Style};
 
@@ -633,9 +650,11 @@ pub fn map_style(cs: &ComputedStyle, env: &MediaEnv) -> taffy::prelude::Style {
     ts
 }
 
-/// ③multi-column 请求判定（map_style 与引擎登记共用）：column-count ≥2
-/// 显式多列；count 缺席/auto 时 column-width 声明即请求（列数布局期
-/// 结算，可能回退 1 列——引擎 deactivate 路径还原块流）。
+/// ③ Multi-column request decision (shared by map_style and the engine's
+/// registration): column-count ≥2 is an explicit multicol request; when
+/// count is absent/auto, any declared column-width is a request (the column
+/// count settles during layout and may fall back to 1 — the engine's
+/// deactivate path restores block flow).
 pub fn multicol_requested(cs: &ComputedStyle) -> bool {
     match cs.get(PropertyId::ColumnCount) {
         Some(DeclValue::ColumnCount(Some(n))) => *n >= 2,
@@ -647,18 +666,24 @@ pub fn multicol_requested(cs: &ComputedStyle) -> bool {
     }
 }
 
-/// ②table v1 列宽分配（像素列宽序列，settle_tables 消费）：
-/// 定宽照抄、百分比按表内容宽解析、auto 均分剩余（CSS 规范按内容
-/// max-content 比例分配——v1 偏差：等分；单 auto 列时与规范一致）。
-/// 剩余为负时 auto 取 0；声明列数不足 n_cols 以 auto 补齐。
-/// 浏览器语义（Chromium 153 实测对齐）：Length 声明 = content-box，
-/// 列贡献 = px + 单元格水平内缩（padding+border）；Percent 声明 =
-/// border-box（列宽 = p×表内容宽，不追加内缩——单元格百分比宽的
-/// 已知非对称行为）。Auto 列取剩余 border-box 宽——P7-①：剩余按
-/// `content_max`（各列内容 max-content 宽，同序对齐）比例分配；测量
-/// 缺失（切片不足/全 0）退回均分。
-/// 注：taffy 0.14 Dimension 为 CompactLength 编码结构体（非枚举），
-/// 分类用 is_auto/into_option/value。
+/// ② Table v1 column-width distribution (a pixel-width sequence consumed by
+/// settle_tables): fixed widths copied as-is, percentages resolved against
+/// the table content width, auto columns evenly split the remainder (the
+/// CSS spec distributes by content max-content proportion — v1 deviation:
+/// even split; identical to the spec with a single auto column). When the
+/// remainder is negative, auto columns take 0; if fewer columns are declared
+/// than n_cols, the missing ones are auto.
+/// Browser semantics (aligned with Chromium 153 measurements): a Length
+/// declaration is content-box — column contribution = px + horizontal cell
+/// inset (padding+border); a Percent declaration is border-box (column
+/// width = p × table content width, no inset added — the known asymmetric
+/// behavior of percentage cell widths). Auto columns take the remaining
+/// border-box width — P7-①: the remainder is distributed proportionally to
+/// `content_max` (each column's content max-content width, aligned in the
+/// same order); missing measurements (short slice / all zeros) fall back to
+/// an even split.
+/// Note: taffy 0.14's Dimension is a CompactLength-encoded struct (not an
+/// enum); classify with is_auto/into_option/value.
 pub fn table_column_template(
     table_content_width: f32,
     declared: &[(taffy::prelude::Dimension, f32)],
@@ -707,7 +732,7 @@ pub fn table_column_template(
         .collect()
 }
 
-/// 轨道项 → taffy GridTemplateComponent（repeat 展开为重复计数）。
+/// Track item → taffy GridTemplateComponent (repeat becomes a repeat count).
 fn grid_component<S: taffy::style::CheapCloneStr>(
     ts: &crate::css::property::TrackSize,
     cs: &ComputedStyle,
@@ -732,8 +757,9 @@ fn grid_component<S: taffy::style::CheapCloneStr>(
     }
 }
 
-/// 轨道尺寸 → taffy TrackSizingFunction。极小侧 fr / 嵌套 minmax / 嵌套
-/// repeat 属解析容错场景（CSS 禁止），防御性归 auto。
+/// Track size → taffy TrackSizingFunction. fr on a min side / nested minmax
+/// / nested repeat are parser-tolerance cases (CSS forbids them),
+/// defensively mapped to auto.
 fn track_sizing(
     ts: &crate::css::property::TrackSize,
     cs: &ComputedStyle,
@@ -803,8 +829,8 @@ fn max_side(
     }
 }
 
-/// grid-auto-rows/columns（单长度解析子集）→ taffy 自动轨道列表；
-/// 缺席 → 空（taffy 默认 = auto 行为）。
+/// grid-auto-rows/columns (single-length parse subset) → the taffy implicit
+/// track list; absent → empty (taffy's default = auto behavior).
 fn auto_tracks(
     v: Option<&crate::css::property::DeclValue>,
     cs: &ComputedStyle,
@@ -832,8 +858,9 @@ fn flex_number(cs: &ComputedStyle, id: PropertyId, fallback: f32) -> f32 {
     }
 }
 
-/// 有效边框宽（单侧）：style none → 0；width 缺席/none → 0；其余按 LP 解析。
-/// 与 used_h_inset 的 used-width 语义一致（style none 时边框宽归零）。
+/// Effective border width (one side): style none → 0; width absent/none →
+/// 0; otherwise resolved as LP. Matches the used-width semantics of
+/// used_h_inset (border width collapses to zero when style is none).
 fn border_side(
     cs: &ComputedStyle,
     width_id: PropertyId,

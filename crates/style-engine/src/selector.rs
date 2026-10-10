@@ -1,8 +1,10 @@
-//! 选择器适配：selectors 0.40（SelectorImpl/Parser/Element）+ 树匹配。
+//! Selector adaptation: selectors 0.40 (SelectorImpl/Parser/Element) + tree
+//! matching.
 //!
-//! selectors 0.40 与其配对的 cssparser 0.37 绑定（`cssparser-sel` 重命名
-//! 依赖）；解析层的 cssparser 0.38 与之无类型交集——选择器预lude 以源
-//! 文本形式交给 selectors 重解析（见 docs/DEPENDENCIES.md）。
+//! selectors 0.40 is bound to its paired cssparser 0.37 (the `cssparser-sel`
+//! renamed dependency); the parsing layer's cssparser 0.38 shares no types with
+//! it — the selector prelude is handed to selectors for re-parsing as source
+//! text (see docs/DEPENDENCIES.md).
 
 use crate::tree::{NodeState, StyleTree};
 use precomputed_hash::PrecomputedHash;
@@ -21,16 +23,17 @@ use selectors::parser::{
 use selectors::{Element as ElementTrait, OpaqueElement};
 use std::fmt;
 
-/// selectors 内部使用的 cssparser（0.37，重命名依赖）。
+/// The cssparser selectors uses internally (0.37, renamed dependency).
 use cssparser_sel as sel_css;
 
-/// selectors 关联类型的字符串包装：String 未实现 0.37 cssparser 的
-/// `ToCss` 与 `PrecomputedHash`，这里补齐（哈希用 FNV-1a，仅影响快筛）。
+/// String wrapper for the selectors associated types: String does not implement
+/// the 0.37 cssparser's `ToCss` and `PrecomputedHash`, so they are provided here
+/// (hashing uses FNV-1a, affecting only fast screening).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct SelString(String);
 
 impl SelString {
-    /// 内部字符串只读访问。
+    /// Read-only access to the inner string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -79,7 +82,8 @@ impl PrecomputedHash for SelString {
     }
 }
 
-/// 选择器词表：类型/id/类名/属性值统一用 SelString（GUI 树无命名空间）。
+/// Selector vocabulary: type/id/class names/attribute values all use SelString
+/// (the GUI tree has no namespaces).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyleSelectorImpl;
 
@@ -96,30 +100,30 @@ impl SelectorImplTrait for StyleSelectorImpl {
     type PseudoElement = PseudoElement;
 }
 
-/// 非树结构伪类（T0 子集，FEATURES.md）。
+/// Non-tree-structural pseudo-classes (T0 subset, FEATURES.md).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PseudoClass {
-    /// :hover（悬停）。
+    /// :hover (hovering).
     Hover,
-    /// :active（按下）。
+    /// :active (pressed).
     Active,
-    /// :focus（聚焦）。
+    /// :focus (focused).
     Focus,
-    /// :focus-visible（键盘聚焦可见）。
+    /// :focus-visible (keyboard-focus visible).
     FocusVisible,
-    /// :focus-within（自身或后代聚焦）。
+    /// :focus-within (self or a descendant focused).
     FocusWithin,
-    /// :disabled（禁用）。
+    /// :disabled (disabled).
     Disabled,
-    /// :enabled（可用）。
+    /// :enabled (enabled).
     Enabled,
-    /// :checked（选中）。
+    /// :checked (checked).
     Checked,
 }
 
 impl PseudoClass {
-    /// 伪类名 → PseudoClass（大小写不敏感）。
+    /// Pseudo-class name → PseudoClass (case-insensitive).
     pub fn from_name(name: &str) -> Option<Self> {
         Some(cssparser::match_ignore_ascii_case!(name,
             "hover" => Self::Hover,
@@ -134,7 +138,7 @@ impl PseudoClass {
         ))
     }
 
-    /// 与节点状态位求值。
+    /// Evaluates against the node's state bits.
     pub fn matches_state(&self, state: NodeState) -> bool {
         match self {
             Self::Hover => state.contains(NodeState::HOVER),
@@ -186,20 +190,24 @@ impl NonTSPseudoClass for PseudoClass {
     }
 }
 
-/// 伪元素（T0 仅解析接受；匹配恒 false，生成内容随 T5 落地）。
+/// Pseudo-elements (T0 accepts them at parse time only; matching is always
+/// false, generated content lands with T5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PseudoElement {
-    /// ::before。
+    /// ::before.
     Before,
-    /// ::after。
+    /// ::after.
     After,
-    /// ::selection（C4/ADR-0018：非盒生成——选区文本样式通道）。
+    /// ::selection (C4/ADR-0018: non-box-generating — the selection text styling
+    /// channel).
     Selection,
-    /// ::placeholder（C4/ADR-0018：非盒生成——占位文本样式通道）。
+    /// ::placeholder (C4/ADR-0018: non-box-generating — the placeholder text
+    /// styling channel).
     Placeholder,
-    /// ::marker（P9-3/css-lists-3 §3.1：盒生成——列表项标记伪节点，
-    /// 文本由引擎按宿主 list-style-* 合成）。
+    /// ::marker (P9-3/css-lists-3 §3.1: box-generating — a list-item marker
+    /// pseudo-node whose text the engine synthesizes from the host's
+    /// list-style-*).
     Marker,
 }
 
@@ -219,7 +227,7 @@ impl PseudoElementTrait for PseudoElement {
     type Impl = StyleSelectorImpl;
 }
 
-/// selectors 解析器钩子：接受状态伪类，开启 :is()/:where()。
+/// selectors parser hook: accepts state pseudo-classes, enables :is()/:where().
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SelectorParser;
 
@@ -231,9 +239,10 @@ impl<'i> SelectorParserTrait<'i> for SelectorParser {
         true
     }
 
-    /// B3：启用 :has() 相对选择器（selectors 0.40 自带解析与匹配——
-    /// matching.rs relative_selector 模块走同一 Element trait 遍历；
-    /// 失效模型=引擎侧 any_has_rules() 全量重样式升级）。
+    /// B3: enables :has() relative selectors (selectors 0.40 ships its own
+    /// parsing and matching — the matching.rs relative_selector module walks the
+    /// same Element trait; invalidation model = engine-side any_has_rules()
+    /// full re-style escalation).
     fn parse_has(&self) -> bool {
         true
     }
@@ -250,11 +259,13 @@ impl<'i> SelectorParserTrait<'i> for SelectorParser {
         })
     }
 
-    /// C1（ADR-0015）：盒生成伪元素 ::before/::after；C4（ADR-0018）：
-    /// 非盒生成伪元素 ::selection/::placeholder。selectors 0.40 的
-    /// `is_css2_pseudo_element` legacy 路由使 `:before` 单冒号形自动同路
-    /// （CSS2 集不含 selection/placeholder → 单冒号形自然拒绝，spec 一致）；
-    /// first-line/first-letter 等其余伪元素不在目标范围，拒绝。
+    /// C1 (ADR-0015): box-generating pseudo-elements ::before/::after; C4
+    /// (ADR-0018): non-box-generating pseudo-elements ::selection/::placeholder.
+    /// selectors 0.40's `is_css2_pseudo_element` legacy routing automatically
+    /// sends the single-colon `:before` form down the same path (the CSS2 set
+    /// contains no selection/placeholder → single-colon forms of those are
+    /// naturally rejected, spec-conformant); other pseudo-elements such as
+    /// first-line/first-letter are out of scope and rejected.
     fn parse_pseudo_element(
         &self,
         location: sel_css::SourceLocation,
@@ -280,13 +291,13 @@ impl<'i> SelectorParserTrait<'i> for SelectorParser {
     }
 }
 
-/// 本引擎的选择器列表类型。
+/// This engine's selector list type.
 pub type StyleSelectorList = SelectorList<StyleSelectorImpl>;
 
-/// 从预lude 源文本解析选择器列表。
+/// Parses a selector list from prelude source text.
 ///
-/// 失败信息为 Debug 文本（用于 ParseReport 警告；选择器解析失败整条
-/// 规则按容错丢弃）。
+/// The failure message is Debug text (used for ParseReport warnings; on selector
+/// parse failure the whole rule is dropped per the error-tolerance policy).
 pub fn parse_selector_list(source: &str) -> Result<StyleSelectorList, String> {
     // cssparser 0.37：Parser 借用可变的 ParserInput
     let mut input = sel_css::ParserInput::new(source);
@@ -295,23 +306,26 @@ pub fn parse_selector_list(source: &str) -> Result<StyleSelectorList, String> {
         .map_err(|e| format!("{e:?}"))
 }
 
-/// P6（ADR-0035 D1）：`:has()` 规则 host compound 快筛键——`:has` 前单
-/// compound 提取的类型/类/id 约束。全空键（哨兵）= 无约束，预筛恒不否决
-/// （保守方向：只可能多升级、不可能漏升级）。
+/// P6 (ADR-0035 D1): host compound fast-screen key for `:has()` rules — the
+/// type/class/id constraints extracted from the single compound preceding `:has`.
+/// An all-empty key (sentinel) = unconstrained; the pre-screen never vetoes it
+/// (conservative direction: can only over-escalate, never miss an escalation).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct HasHostKey {
-    /// 类型选择器约束（None = 无约束或通配）。
+    /// Type selector constraint (None = unconstrained or wildcard).
     pub(crate) tag: Option<String>,
-    /// 类约束集合（空 = 无约束；命中要求键类集 ⊆ 目标类集）。
+    /// Class constraint set (empty = unconstrained; a hit requires the key's
+    /// class set ⊆ the target's class set).
     pub(crate) classes: Vec<String>,
-    /// id 约束（None = 无约束）。
+    /// id constraint (None = unconstrained).
     pub(crate) id: Option<String>,
 }
 
 impl HasHostKey {
-    /// 对树节点快筛：tag 精确相等（与匹配器 `has_local_name` 同为大小写
-    /// 敏感 `==`，无 false negative）/ 键类集 ⊆ 节点类集 / id 精确相等；
-    /// None 字段 = 该轴无约束恒过。
+    /// Fast-screens a tree node: tag exact equality (case-sensitive `==`, same
+    /// as the matcher's `has_local_name`, so no false negatives) / key class set
+    /// ⊆ node class set / id exact equality; a None field = unconstrained on that
+    /// axis, always passes.
     pub(crate) fn matches_node(
         &self,
         name: Option<&str>,
@@ -327,9 +341,11 @@ impl HasHostKey {
     }
 }
 
-/// P6（ADR-0035）：深扫选择器列表是否含 `:has()`（含 `:is()`/`:where()`/
-/// `:not()` 参数内嵌套——凡含相对选择器即受快筛守门，防止藏在函数式
-/// 伪类参数里的 `:has` 绕过索引造成漏升级）。
+/// P6 (ADR-0035): deep-scans a selector list for `:has()` (including nesting
+/// inside `:is()`/`:where()`/`:not()` arguments — anything containing a relative
+/// selector falls under fast-screen gating, preventing a `:has` hidden inside a
+/// functional pseudo-class argument from bypassing the index and missing an
+/// escalation).
 pub(crate) fn list_contains_has(list: &StyleSelectorList) -> bool {
     list.slice().iter().any(selector_contains_has)
 }
@@ -344,14 +360,17 @@ fn selector_contains_has(selector: &selectors::parser::Selector<StyleSelectorImp
     })
 }
 
-/// P6（ADR-0035 D1）：提取单条选择器的 host 快筛键。
+/// P6 (ADR-0035 D1): extracts the host fast-screen key of a single selector.
 ///
-/// 返回 None = 该选择器不合格（无 `:has` / `:has` 带前缀组合器
-/// `.a > .b:has(x)` / `:has` 不在顶层最右 compound）——调用方对不合格
-/// 选择器回退全量兜底。合格判定：最右 compound（`iter()` 首 sequence）
-/// 含顶层 `Has` 组件且 `next_sequence()` 为 None（无前缀组合器）。
-/// compound 内其余组件（属性选择器/伪类/命名空间等）不进键——键只弱化
-/// 约束不强化，否决方向不受影响（保守正确）。
+/// Returns None = the selector does not qualify (no `:has` / `:has` with a
+/// prefixed combinator `.a > .b:has(x)` / `:has` not in the top-level rightmost
+/// compound) — the caller falls back to the full scan for non-qualifying
+/// selectors. Qualification test: the rightmost compound (the first `iter()`
+/// sequence) contains a top-level `Has` component and `next_sequence()` is None
+/// (no prefixed combinator). Other components inside the compound (attribute
+/// selectors/pseudo-classes/namespaces etc.) do not enter the key — the key only
+/// weakens constraints, never strengthens them, so the veto direction is
+/// unaffected (conservatively correct).
 pub(crate) fn has_host_key(
     selector: &selectors::parser::Selector<StyleSelectorImpl>,
 ) -> Option<HasHostKey> {
@@ -374,17 +393,17 @@ pub(crate) fn has_host_key(
     Some(key)
 }
 
-/// 树视图：selectors Element 特征的挂载点。
+/// Tree view: the mount point for the selectors Element trait.
 #[derive(Clone, Debug)]
 pub struct TreeNode<'a>(&'a StyleTree, crate::tree::NodeId);
 
 impl<'a> TreeNode<'a> {
-    /// 挂载样式树与节点键。
+    /// Mounts the style tree and a node key.
     pub fn new(tree: &'a StyleTree, id: crate::tree::NodeId) -> Self {
         Self(tree, id)
     }
 
-    /// 当前节点键。
+    /// The current node's key.
     pub fn id(&self) -> crate::tree::NodeId {
         self.1
     }
@@ -396,8 +415,9 @@ impl<'a> TreeNode<'a> {
         }
     }
 
-    /// 结构遍历跳过伪节点（ADR-0015）：宿主 :first-child/:nth-child/兄弟
-    /// 组合器计数与伪元素实体化前后逐位不变。
+    /// Structural traversal skips pseudo-nodes (ADR-0015): host
+    /// :first-child/:nth-child/sibling-combinator counts are bit-identical
+    /// before and after pseudo-element materialization.
     fn first_host_child(&self) -> Option<crate::tree::NodeId> {
         self.0
             .children(self.1)
@@ -521,10 +541,12 @@ impl<'a> ElementTrait for TreeNode<'a> {
         self.0.node(self.1).pseudo == Some(which)
     }
 
-    /// C4（ADR-0018）：伪元素组合器回溯目标。C1 实体化伪节点维持默认
-    /// 父链（宿主节点）；::selection/::placeholder 于 origin 节点直配
-    ///（通道匹配）——伪元素主题复合命中后，前缀复合仍在 origin 节点
-    /// 自身求值（originating element = 节点自身）。
+    /// C4 (ADR-0018): the combinator back-tracking target for pseudo-elements.
+    /// C1-materialized pseudo-nodes keep the default parent chain (the host
+    /// node); ::selection/::placeholder match directly on the origin node
+    /// (channel matching) — after the pseudo-element subject compound hits, the
+    /// prefixed compound is still evaluated on the origin node itself
+    /// (originating element = the node itself).
     fn pseudo_element_originating_element(&self) -> Option<Self> {
         if self.0.node(self.1).pseudo.is_some() {
             self.parent_element()
@@ -593,12 +615,13 @@ impl<'a> ElementTrait for TreeNode<'a> {
     }
 }
 
-/// 单节点选择器列表匹配。
+/// Matches a selector list against a single node.
 pub fn matches(tree: &StyleTree, id: crate::tree::NodeId, list: &StyleSelectorList) -> bool {
     match_specificity(tree, id, list).is_some()
 }
 
-/// 匹配并返回命中选择器的特异性（级联排序键）；未命中 → None。
+/// Matches and returns the specificity of the hit selector (the cascade sort
+/// key); no hit → None.
 pub fn match_specificity(
     tree: &StyleTree,
     id: crate::tree::NodeId,

@@ -1,12 +1,17 @@
-//! 计算样式：级联胜出 → var() 代换 → 继承/初始值（L1 语义终点）。
+//! Computed styles: cascade winners → var() substitution →
+//! inheritance/initial values (the L1 semantic endpoint).
 //!
-//! 流程（ADR-0003/ADR-0004）：
-//! 1. custom properties：继承值为底、胜出原始值覆盖，var() 链按需解析
-//!    （环检测；失败 = guaranteed-invalid，该名缺席）；
-//! 2. 胜出声明：`Parsed` 直取；`Var` 代换后重解析，失败走 IACVT
-//!    （继承属性取父值，否则初始值）；
-//! 3. 全集物化：64 个属性逐一填充（父继承或初始值），供 T3/T4 直接读取；
-//! 4. 字号解析：em 相对父字号，物化为绝对 px。
+//! Pipeline (ADR-0003/ADR-0004):
+//! 1. Custom properties: inherited values as the base, winning raw values
+//!    override, var() chains resolved on demand (cycle detection; failure =
+//!    guaranteed-invalid, the name is absent);
+//! 2. Winning declarations: `Parsed` taken directly; `Var` is substituted
+//!    then re-parsed, with failure falling to IACVT (inherited properties
+//!    take the parent value, otherwise the initial value);
+//! 3. Full-set materialization: the 64 properties are filled in one by one
+//!    (parent inheritance or initial value) for T3/T4 to read directly;
+//! 4. Font-size resolution: em is relative to the parent font size,
+//!    materialized as absolute px.
 
 use crate::cascade::{ContainerCtx, cascade_declarations};
 use crate::css::decl::{DeclSource, token_buf_to_string};
@@ -24,21 +29,26 @@ use peniko::color::AlphaColor;
 use smallvec::{SmallVec, smallvec};
 use std::collections::BTreeMap;
 
-/// 单节点计算样式（全集物化）。
+/// The computed style of a single node (full-set materialization).
 #[derive(Debug, Clone, PartialEq)]
-#[must_use = "计算样式被丢弃则该次级联求解无意义"]
+#[must_use = "dropping the computed style makes this cascade resolution meaningless"]
 pub struct ComputedStyle {
-    /// 全集槽位存储：下标 = [`PropertyId::slot()`]（0..183），None = 未物化。
-    /// 槽位 O(1) 下标写替代 BTreeMap 的 log n 走查 + 节点分配——全集物化
-    /// 每节点 ~94 次插入曾是 restyle 成本主体（阶段5 归因，PERFORMANCE.md）。
+    /// Full-set slot storage: index = [`PropertyId::slot()`] (0..183),
+    /// None = not materialized. O(1) indexed slot writes replace BTreeMap's
+    /// log n walk + node allocation — full-set materialization was ~94
+    /// inserts per node and used to dominate restyle cost (phase-5
+    /// attribution, PERFORMANCE.md).
     values: Vec<Option<DeclValue>>,
-    /// 已解析 custom properties（终值文本）。
+    /// Resolved custom properties (final value text).
     custom: BTreeMap<String, String>,
-    /// 字体相对单位度量（A9：ch/ex/ic 基准，每 em；restyle 期由引擎按
-    /// font-family 首族补写，缺省近似值——未注册族 ch/ex=0.5em、ic=1em）。
+    /// Font-relative unit metrics (A9: ch/ex/ic bases, per em; rewritten by
+    /// the engine during restyle from font-family's first family, with
+    /// default approximations — unregistered families get ch/ex = 0.5em and
+    /// ic = 1em).
     font_metrics: crate::css::value::FontMetrics,
-    /// 伪元素标记（C1/ADR-0015）：Some = 本样式属于引擎实体化的伪节点
-    ///（map_style 据此在 content none/normal 时映射 Display::None）。
+    /// Pseudo-element marker (C1/ADR-0015): Some = this style belongs to an
+    /// engine-materialized pseudo node (map_style maps Display::None when
+    /// content is none/normal based on this).
     pseudo: Option<crate::tree::PseudoWhich>,
 }
 
@@ -54,36 +64,43 @@ impl Default for ComputedStyle {
 }
 
 impl ComputedStyle {
-    /// 动画覆盖（第五批⑰）：级联后按关键帧采样覆写单个属性。
+    /// Animation override (fifth batch ⑰): after the cascade, individual
+    /// properties are overwritten by keyframe sampling.
     pub fn set_value(&mut self, id: PropertyId, v: DeclValue) {
         self.values[id.slot()] = Some(v);
     }
 
-    /// 读槽位值（宿主可读契约，ADR-0003 公有 API 面内）：
-    /// `None` = 该属性未在级联中显式出现，保持初始/继承缺省语义。
-    /// 行为提示属性（cursor/user-select 等宿主消费通道）的读取入口。
+    /// Reads a slot value (host-readable contract, within the ADR-0003
+    /// public API surface): `None` = the property never appeared explicitly
+    /// in the cascade, keeping initial/inherit default semantics. The read
+    /// entry for behavior-hint properties (host consumption channels such as
+    /// cursor/user-select).
     pub fn value(&self, id: PropertyId) -> Option<&DeclValue> {
         self.values[id.slot()].as_ref()
     }
 
-    /// 读已解析 custom property 终值（var() 代换完成后；宿主可读契约）。
-    /// 键为含 `--` 前缀的自定义属性名。
+    /// Reads a resolved custom property's final value (after var()
+    /// substitution; host-readable contract). Keys are custom property names
+    /// including the `--` prefix.
     pub fn custom_value(&self, name: &str) -> Option<&str> {
         self.custom.get(name).map(|s| s.as_str())
     }
 
-    /// 字体相对单位度量（A9；引擎 restyle 期按 font-family 补写）。
+    /// Font-relative unit metrics (A9; rewritten by the engine during
+    /// restyle based on font-family).
     pub fn font_metrics(&self) -> &crate::css::value::FontMetrics {
         &self.font_metrics
     }
 
-    /// 字体度量写入（crate 内部：engine restyle 期调用）。
+    /// Font metrics write (crate-internal: called by the engine during
+    /// restyle).
     pub(crate) fn set_font_metrics(&mut self, m: crate::css::value::FontMetrics) {
         self.font_metrics = m;
     }
 
-    /// content 计算值（C1）：宿主节点恒 Normal（content 仅作用于伪元素）；
-    /// 伪节点由 map_style 消费（none/normal → 无盒）。
+    /// content computed value (C1): host nodes are always Normal (content
+    /// only applies to pseudo elements); pseudo nodes are consumed by
+    /// map_style (none/normal → no box).
     pub fn content(&self) -> crate::css::property::ContentValue {
         match self.values[PropertyId::Content.slot()].as_ref() {
             Some(DeclValue::Content(c)) => c.clone(),
@@ -91,17 +108,18 @@ impl ComputedStyle {
         }
     }
 
-    /// 伪元素标记读取（C1）。
+    /// Pseudo-element marker read (C1).
     pub fn pseudo(&self) -> Option<crate::tree::PseudoWhich> {
         self.pseudo
     }
 
-    /// 伪元素标记写入（crate 内部：compute 期自树节点同步）。
+    /// Pseudo-element marker write (crate-internal: synced from the tree
+    /// node during compute).
     pub(crate) fn set_pseudo(&mut self, p: Option<crate::tree::PseudoWhich>) {
         self.pseudo = p;
     }
 
-    /// text-transform 计算值（C2；继承）。
+    /// text-transform computed value (C2; inherited).
     pub fn text_transform(&self) -> crate::css::property::TextTransformKind {
         match self.values[PropertyId::TextTransform.slot()].as_ref() {
             Some(DeclValue::TextTransform(k)) => *k,
@@ -109,7 +127,7 @@ impl ComputedStyle {
         }
     }
 
-    /// overflow-wrap 计算值（C2；不继承）。
+    /// overflow-wrap computed value (C2; not inherited).
     pub fn overflow_wrap(&self) -> crate::css::property::OverflowWrapKind {
         match self.values[PropertyId::OverflowWrap.slot()].as_ref() {
             Some(DeclValue::OverflowWrap(k)) => *k,
@@ -117,7 +135,7 @@ impl ComputedStyle {
         }
     }
 
-    /// word-break 计算值（C2；不继承）。
+    /// word-break computed value (C2; not inherited).
     pub fn word_break(&self) -> crate::css::property::WordBreakKind {
         match self.values[PropertyId::WordBreak.slot()].as_ref() {
             Some(DeclValue::WordBreak(k)) => *k,
@@ -125,7 +143,7 @@ impl ComputedStyle {
         }
     }
 
-    /// object-fit 计算值（C3；不继承）。
+    /// object-fit computed value (C3; not inherited).
     pub fn object_fit(&self) -> crate::css::property::ObjectFitKind {
         match self.values[PropertyId::ObjectFit.slot()].as_ref() {
             Some(DeclValue::ObjectFit(k)) => *k,
@@ -133,7 +151,8 @@ impl ComputedStyle {
         }
     }
 
-    /// object-position 计算值 (x, y)（C3；不继承；初始中心）。
+    /// object-position computed value (x, y) (C3; not inherited; initial
+    /// center).
     pub fn object_position(
         &self,
     ) -> (
@@ -149,7 +168,7 @@ impl ComputedStyle {
         }
     }
 
-    /// text-overflow 计算值（F2，ADR-0022 D2；不继承）。
+    /// text-overflow computed value (F2, ADR-0022 D2; not inherited).
     pub fn text_overflow(&self) -> crate::css::property::TextOverflowKind {
         match self.values[PropertyId::TextOverflow.slot()].as_ref() {
             Some(DeclValue::TextOverflow(k)) => *k,
@@ -157,7 +176,8 @@ impl ComputedStyle {
         }
     }
 
-    /// -webkit-line-clamp 行数（F2，ADR-0022 D3；0=none；不继承）。
+    /// -webkit-line-clamp line count (F2, ADR-0022 D3; 0 = none; not
+    /// inherited).
     pub fn webkit_line_clamp(&self) -> u32 {
         match self.values[PropertyId::WebkitLineClamp.slot()].as_ref() {
             Some(DeclValue::WebkitLineClamp(n)) => *n,
@@ -165,8 +185,8 @@ impl ComputedStyle {
         }
     }
 
-    /// text-decoration-line 位集（F2，ADR-0022 D4；1=underline 2=overline
-    /// 4=line-through；不继承）。
+    /// text-decoration-line bit set (F2, ADR-0022 D4; 1 = underline,
+    /// 2 = overline, 4 = line-through; not inherited).
     pub fn text_decoration_line(&self) -> u8 {
         match self.values[PropertyId::TextDecorationLine.slot()].as_ref() {
             Some(DeclValue::TextDecorationLine(b)) => *b,
@@ -174,7 +194,7 @@ impl ComputedStyle {
         }
     }
 
-    /// text-decoration-style（F2，ADR-0022 D4；不继承）。
+    /// text-decoration-style (F2, ADR-0022 D4; not inherited).
     pub fn text_decoration_style(&self) -> crate::css::property::TextDecoStyleKind {
         match self.values[PropertyId::TextDecorationStyle.slot()].as_ref() {
             Some(DeclValue::TextDecorationStyle(k)) => *k,
@@ -182,7 +202,8 @@ impl ComputedStyle {
         }
     }
 
-    /// text-decoration-color（F2，ADR-0022 D4；缺省 currentColor；不继承）。
+    /// text-decoration-color (F2, ADR-0022 D4; defaults to currentColor; not
+    /// inherited).
     pub fn text_decoration_color(&self) -> ColorValue {
         match self.values[PropertyId::TextDecorationColor.slot()].as_ref() {
             Some(DeclValue::Color(cv)) => *cv,
@@ -190,7 +211,7 @@ impl ComputedStyle {
         }
     }
 
-    /// text-decoration-thickness（F2，ADR-0022 D4；不继承）。
+    /// text-decoration-thickness (F2, ADR-0022 D4; not inherited).
     pub fn text_decoration_thickness(&self) -> crate::css::property::TextDecoThickness {
         match self.values[PropertyId::TextDecorationThickness.slot()].as_ref() {
             Some(DeclValue::TextDecorationThickness(t)) => t.clone(),
@@ -198,7 +219,7 @@ impl ComputedStyle {
         }
     }
 
-    /// text-shadow 影列表（F2，ADR-0022 D5；空=none；继承）。
+    /// text-shadow shadow list (F2, ADR-0022 D5; empty = none; inherited).
     pub fn text_shadows(&self) -> Vec<crate::css::property::TextShadowSpec> {
         match self.values[PropertyId::TextShadow.slot()].as_ref() {
             Some(DeclValue::TextShadow(v)) => v.clone(),
@@ -206,7 +227,7 @@ impl ComputedStyle {
         }
     }
 
-    /// float 计算值（E4，css-position-3 / ADR-0019；不继承）。
+    /// float computed value (E4, css-position-3 / ADR-0019; not inherited).
     pub fn float(&self) -> crate::css::property::FloatKind {
         match self.values[PropertyId::Float.slot()].as_ref() {
             Some(DeclValue::Float(k)) => *k,
@@ -214,7 +235,7 @@ impl ComputedStyle {
         }
     }
 
-    /// clear 计算值（E4，css-position-3 / ADR-0019；不继承）。
+    /// clear computed value (E4, css-position-3 / ADR-0019; not inherited).
     pub fn clear(&self) -> crate::css::property::ClearKind {
         match self.values[PropertyId::Clear.slot()].as_ref() {
             Some(DeclValue::Clear(k)) => *k,
@@ -222,7 +243,7 @@ impl ComputedStyle {
         }
     }
 
-    /// border-image-source 计算值（F3d，ADR-0026 D1；不继承）。
+    /// border-image-source computed value (F3d, ADR-0026 D1; not inherited).
     pub fn border_image_source(&self) -> crate::css::property::BackgroundImage {
         match self.values[PropertyId::BorderImageSource.slot()].as_ref() {
             Some(DeclValue::BorderImageSource(v)) => v.clone(),
@@ -230,7 +251,7 @@ impl ComputedStyle {
         }
     }
 
-    /// border-image-slice 计算值（F3d，ADR-0026 D1；不继承）。
+    /// border-image-slice computed value (F3d, ADR-0026 D1; not inherited).
     pub fn border_image_slice(&self) -> crate::css::property::BorderImageSlice {
         match self.values[PropertyId::BorderImageSlice.slot()].as_ref() {
             Some(DeclValue::BorderImageSlice(v)) => *v,
@@ -241,7 +262,7 @@ impl ComputedStyle {
         }
     }
 
-    /// border-image-width 计算值（F3d，ADR-0026 D1；不继承）。
+    /// border-image-width computed value (F3d, ADR-0026 D1; not inherited).
     pub fn border_image_width(&self) -> crate::css::property::BorderImageWidth {
         match self.values[PropertyId::BorderImageWidth.slot()].as_ref() {
             Some(DeclValue::BorderImageWidth(v)) => v.clone(),
@@ -251,7 +272,7 @@ impl ComputedStyle {
         }
     }
 
-    /// border-image-outset 计算值（F3d，ADR-0026 D1；不继承）。
+    /// border-image-outset computed value (F3d, ADR-0026 D1; not inherited).
     pub fn border_image_outset(&self) -> crate::css::property::BorderImageOutset {
         match self.values[PropertyId::BorderImageOutset.slot()].as_ref() {
             Some(DeclValue::BorderImageOutset(v)) => v.clone(),
@@ -263,7 +284,7 @@ impl ComputedStyle {
         }
     }
 
-    /// border-image-repeat 计算值（F3d，ADR-0026 D1；不继承）。
+    /// border-image-repeat computed value (F3d, ADR-0026 D1; not inherited).
     pub fn border_image_repeat(&self) -> crate::css::property::BorderImageRepeatXY {
         match self.values[PropertyId::BorderImageRepeat.slot()].as_ref() {
             Some(DeclValue::BorderImageRepeat(v)) => *v,
@@ -274,8 +295,8 @@ impl ComputedStyle {
         }
     }
 
-    /// font-stretch 计算值（F3d，ADR-0026 D3；继承；归一百分比
-    /// 50..=200，100=normal）。
+    /// font-stretch computed value (F3d, ADR-0026 D3; inherited; normalized
+    /// percentage 50..=200, 100 = normal).
     pub fn font_stretch(&self) -> f32 {
         match self.values[PropertyId::FontStretch.slot()].as_ref() {
             Some(DeclValue::FontStretch(v)) => *v,
@@ -283,8 +304,9 @@ impl ComputedStyle {
         }
     }
 
-    /// word-spacing 计算值（F3d，ADR-0026 D3；继承；None=normal=0，
-    /// 百分比基=font-size，解析期后物化）。
+    /// word-spacing computed value (F3d, ADR-0026 D3; inherited;
+    /// None = normal = 0, percentage basis is font-size, materialized after
+    /// parsing).
     pub fn word_spacing(&self) -> Option<LengthPercentage> {
         match self.values[PropertyId::WordSpacing.slot()].as_ref() {
             Some(DeclValue::LenAuto(v)) => v.clone(),
@@ -292,8 +314,8 @@ impl ComputedStyle {
         }
     }
 
-    /// font-feature-settings 计算值（F3d，ADR-0026 D3；继承；
-    /// OpenType tag + value 对列表）。
+    /// font-feature-settings computed value (F3d, ADR-0026 D3; inherited;
+    /// OpenType tag + value pair list).
     pub fn font_features(&self) -> Vec<([u8; 4], u16)> {
         match self.values[PropertyId::FontFeatures.slot()].as_ref() {
             Some(DeclValue::FontFeatures(v)) => v.clone(),
@@ -301,8 +323,8 @@ impl ComputedStyle {
         }
     }
 
-    /// font-variation-settings 计算值（F3d，ADR-0026 D3；继承；
-    /// 轴 tag + value 对列表）。
+    /// font-variation-settings computed value (F3d, ADR-0026 D3; inherited;
+    /// axis tag + value pair list).
     pub fn font_variations(&self) -> Vec<([u8; 4], f32)> {
         match self.values[PropertyId::FontVariations.slot()].as_ref() {
             Some(DeclValue::FontVariations(v)) => v.clone(),
@@ -310,7 +332,7 @@ impl ComputedStyle {
         }
     }
 
-    /// font-variant-caps 计算值（F3d，ADR-0026 D3；继承）。
+    /// font-variant-caps computed value (F3d, ADR-0026 D3; inherited).
     pub fn font_variant_caps(&self) -> crate::css::property::FontVariantCapsKind {
         match self.values[PropertyId::FontVariantCaps.slot()].as_ref() {
             Some(DeclValue::FontVariantCaps(k)) => *k,
@@ -319,7 +341,8 @@ impl ComputedStyle {
     }
 }
 
-/// 属性继承性（CSS 级联继承语义：文本/字体类继承，盒模型不继承）。
+/// Property inheritance (CSS cascade inheritance semantics: text/font
+/// properties inherit, box-model properties do not).
 pub fn inherits(id: PropertyId) -> bool {
     use PropertyId as P;
     matches!(
@@ -367,7 +390,7 @@ pub fn inherits(id: PropertyId) -> bool {
     )
 }
 
-/// 属性初始值（CSS initial；引擎偏差处注明）。
+/// Property initial values (CSS initial; engine deviations are noted).
 pub fn initial_value(id: PropertyId) -> DeclValue {
     use PropertyId as P;
     match id {
@@ -655,11 +678,13 @@ pub fn initial_value(id: PropertyId) -> DeclValue {
     }
 }
 
-/// custom property 代换器：继承终值为底、胜出原始值覆盖，按需解析 + 环检测。
+/// Custom property resolver: inherited final values as the base, winning
+/// raw values override, on-demand resolution + cycle detection.
 struct CustomResolver<'a> {
     inherited: &'a BTreeMap<String, String>,
     own_raw: BTreeMap<String, String>,
-    /// B4：注册属性表（@property 语法门/initial 回退判据）。
+    /// B4: registered property table (@property syntax gate / initial-value
+    /// fallback criterion).
     registered: &'a BTreeMap<String, crate::css::property_rule::PropertyRule>,
     memo: BTreeMap<String, String>,
 }
@@ -719,7 +744,7 @@ impl<'a> CustomResolver<'a> {
         resolved
     }
 
-    /// 代换 raw 中所有 var() 引用；None = guaranteed-invalid。
+    /// Substitutes all var() references in raw; None = guaranteed-invalid.
     fn substitute(&mut self, raw: &str, stack: &mut Vec<String>) -> Option<String> {
         if !raw.contains("var(") {
             return Some(raw.to_string());
@@ -750,7 +775,8 @@ impl<'a> CustomResolver<'a> {
     }
 }
 
-/// 从 "var(" 之后扫描到匹配 ')'；返回 (参数串, 总消耗长度)。
+/// Scans from after "var(" to the matching ')'; returns (argument string,
+/// total consumed length).
 fn split_var_call(s: &str) -> Option<(&str, usize)> {
     let mut depth = 1i32;
     for (i, c) in s.char_indices() {
@@ -768,7 +794,7 @@ fn split_var_call(s: &str) -> Option<(&str, usize)> {
     None
 }
 
-/// 首个顶层逗号分隔参数与 fallback。
+/// Splits at the first top-level comma into the name argument and fallback.
 fn split_var_args(args: &str) -> (&str, Option<&str>) {
     let mut depth = 0i32;
     for (i, c) in args.char_indices() {
@@ -787,17 +813,18 @@ fn is_custom_name(name: &str) -> bool {
 }
 
 impl ComputedStyle {
-    /// 读取属性计算值（无则 None）。
+    /// Reads a property's computed value (None if absent).
     pub fn get(&self, id: PropertyId) -> Option<&DeclValue> {
         self.values[id.slot()].as_ref()
     }
 
-    /// 读取已解析 custom property 终值文本（guaranteed-invalid → None）。
+    /// Reads a resolved custom property's final text (guaranteed-invalid →
+    /// None).
     pub fn custom(&self, name: &str) -> Option<&str> {
         self.custom.get(name).map(String::as_str)
     }
 
-    /// display（默认 block）。
+    /// display (default block).
     pub fn display(&self) -> Display {
         match self.values[PropertyId::Display.slot()].as_ref() {
             Some(DeclValue::Display(d)) => *d,
@@ -805,7 +832,7 @@ impl ComputedStyle {
         }
     }
 
-    /// position（默认 static）。
+    /// position (default static).
     pub fn position(&self) -> Position {
         match self.values[PropertyId::Position.slot()].as_ref() {
             Some(DeclValue::Position(p)) => *p,
@@ -813,7 +840,8 @@ impl ComputedStyle {
         }
     }
 
-    /// box-sizing（默认 content-box；映射到 taffy 时换算 size 语义）。
+    /// box-sizing (default content-box; converted to size semantics when
+    /// mapped onto taffy).
     pub fn box_sizing(&self) -> crate::css::property::BoxSizing {
         match self.values[PropertyId::BoxSizing.slot()].as_ref() {
             Some(DeclValue::BoxSizing(b)) => *b,
@@ -821,7 +849,7 @@ impl ComputedStyle {
         }
     }
 
-    /// transform 函数列表（空 = none）。
+    /// transform function list (empty = none).
     pub fn transform(&self) -> &[crate::css::property::TransformFn] {
         match self.values[PropertyId::Transform.slot()].as_ref() {
             Some(DeclValue::Transform(list)) => list,
@@ -829,23 +857,27 @@ impl ComputedStyle {
         }
     }
 
-    /// transform ≠ none（ADR-0009 判定谓词单点：L2 cb 语义位与 L3 SC 触发共享）。
+    /// transform ≠ none (ADR-0009 single decision predicate: the L2 cb
+    /// semantic bit and the L3 SC trigger share it).
     pub fn has_transform(&self) -> bool {
         !self.transform().is_empty()
     }
 
-    /// filter 非 none（P2，ADR-0031 D1：携带函数链本体；非空 = 有效滤镜）。
+    /// filter ≠ none (P2, ADR-0031 D1: carries the function chain itself;
+    /// non-empty = an active filter).
     pub fn has_filter(&self) -> bool {
         matches!(self.get(PropertyId::Filter), Some(DeclValue::Filters(f)) if !f.is_empty())
     }
 
-    /// backdrop-filter 非 none（P2，ADR-0031 D1/D3：函数链本体化，非空
-    /// 触发 backdrop SC；效果由 sink 实现——soft 原生、vello T2）。
+    /// backdrop-filter ≠ none (P2, ADR-0031 D1/D3: the function chain is
+    /// materialized; non-empty triggers the backdrop SC; the effect is
+    /// implemented by the sink — native in soft, T2 in vello).
     pub fn has_backdrop_filter(&self) -> bool {
         matches!(self.get(PropertyId::BackdropFilter), Some(DeclValue::Filters(f)) if !f.is_empty())
     }
 
-    /// filter 函数链本体访问（P2）：空链 = none。绘制层与 dump 消费。
+    /// filter function chain access (P2): empty chain = none. Consumed by
+    /// the paint layer and the dump.
     pub fn filter_chain(&self) -> &[crate::css::property::FilterFn] {
         match self.get(PropertyId::Filter) {
             Some(DeclValue::Filters(f)) => f,
@@ -853,7 +885,7 @@ impl ComputedStyle {
         }
     }
 
-    /// backdrop-filter 函数链本体访问（P2）：空链 = none。
+    /// backdrop-filter function chain access (P2): empty chain = none.
     pub fn backdrop_filter_chain(&self) -> &[crate::css::property::FilterFn] {
         match self.get(PropertyId::BackdropFilter) {
             Some(DeclValue::Filters(f)) => f,
@@ -861,7 +893,8 @@ impl ComputedStyle {
         }
     }
 
-    /// vertical-align 计算值（P3，ADR-0034 D3）。缺槽回退初始 Baseline。
+    /// vertical-align computed value (P3, ADR-0034 D3). A missing slot falls
+    /// back to the initial Baseline.
     pub fn vertical_align(&self) -> crate::css::property::VerticalAlignKind {
         match self.get(PropertyId::VerticalAlign) {
             Some(DeclValue::VerticalAlign(v)) => v.clone(),
@@ -869,8 +902,9 @@ impl ComputedStyle {
         }
     }
 
-    /// content 序列段视图（P5，ADR-0036 D1）：`Seq` 时返回段表；
-    /// `Str`/`None`/`Normal` → None（Str 走 `content()` 单串快路径）。
+    /// content sequence-segment view (P5, ADR-0036 D1): returns the segment
+    /// table for `Seq`; `Str`/`None`/`Normal` → None (Str takes the
+    /// single-string `content()` fast path).
     pub fn content_pieces(&self) -> Option<&[crate::css::property::ContentPiece]> {
         match self.get(PropertyId::Content) {
             Some(DeclValue::Content(crate::css::property::ContentValue::Seq(p))) => Some(p),
@@ -878,8 +912,9 @@ impl ComputedStyle {
         }
     }
 
-    /// list-style-type 计算值（P9-3，css-lists-3 §3.4）：`None` = 关键字
-    /// none（抑制标记）；缺槽回退初始 disc。
+    /// list-style-type computed value (P9-3, css-lists-3 §3.4): `None` =
+    /// the keyword none (marker suppressed); a missing slot falls back to
+    /// the initial disc.
     pub fn list_style_type(&self) -> Option<crate::css::property::ListStyleTypeValue> {
         match self.get(PropertyId::ListStyleType) {
             Some(DeclValue::ListStyleType(t)) => t.clone(),
@@ -889,7 +924,8 @@ impl ComputedStyle {
         }
     }
 
-    /// list-style-position 计算值（P9-3，§3.5）：缺槽回退初始 outside。
+    /// list-style-position computed value (P9-3, §3.5): a missing slot falls
+    /// back to the initial outside.
     pub fn list_style_position(&self) -> crate::css::property::ListStylePosition {
         match self.get(PropertyId::ListStylePosition) {
             Some(DeclValue::ListStylePosition(p)) => *p,
@@ -897,8 +933,8 @@ impl ComputedStyle {
         }
     }
 
-    /// list-style-image 计算值（P9-3，§3.3）：`None` = none；缺槽回退初始
-    /// none。
+    /// list-style-image computed value (P9-3, §3.3): `None` = none; a
+    /// missing slot falls back to the initial none.
     pub fn list_style_image(&self) -> Option<crate::css::property::BackgroundImage> {
         match self.get(PropertyId::ListStyleImage) {
             Some(DeclValue::ListStyleImage(i)) => i.clone(),
@@ -906,8 +942,8 @@ impl ComputedStyle {
         }
     }
 
-    /// counter-reset 计算值（P5，ADR-0036 D2）：`[(name, 初始值)]` 表
-    ///（none → 空表）。
+    /// counter-reset computed value (P5, ADR-0036 D2): a `[(name, initial
+    /// value)]` table (none → empty table).
     pub fn counter_reset(&self) -> &[(String, i64)] {
         match self.get(PropertyId::CounterReset) {
             Some(DeclValue::CounterList(items)) => items,
@@ -915,8 +951,8 @@ impl ComputedStyle {
         }
     }
 
-    /// counter-increment 计算值（P5，ADR-0036 D2）：`[(name, 步长)]` 表
-    ///（none → 空表）。
+    /// counter-increment computed value (P5, ADR-0036 D2): a `[(name,
+    /// increment)]` table (none → empty table).
     pub fn counter_increment(&self) -> &[(String, i64)] {
         match self.get(PropertyId::CounterIncrement) {
             Some(DeclValue::CounterList(items)) => items,
@@ -924,8 +960,8 @@ impl ComputedStyle {
         }
     }
 
-    /// quotes 引号对表（P5，ADR-0036 D3）：auto 物化缺省对表
-    /// `“” ‘’`（css-content-3 §3）；none → 空表。
+    /// quotes pair table (P5, ADR-0036 D3): auto materializes the default
+    /// pair table `“” ‘’` (css-content-3 §3); none → empty table.
     pub fn quotes_pairs(&self) -> Vec<(String, String)> {
         match self.get(PropertyId::Quotes) {
             Some(DeclValue::Quotes(crate::css::property::QuotesValue::Pairs(p))) => p.clone(),
@@ -937,8 +973,9 @@ impl ComputedStyle {
         }
     }
 
-    /// hyphens 连字符断字模式（F4，ADR-0028 D2；initial=manual；断词
-    /// 效果受上游分段器边界，三值 v1 行为一致）。
+    /// hyphens hyphenation mode (F4, ADR-0028 D2; initial = manual; actual
+    /// breaking depends on upstream segmenter boundaries; all three values
+    /// behave identically in v1).
     pub fn hyphens(&self) -> crate::css::property::HyphensKind {
         match self.values[PropertyId::Hyphens.slot()].as_ref() {
             Some(DeclValue::Hyphens(k)) => *k,
@@ -946,13 +983,14 @@ impl ComputedStyle {
         }
     }
 
-    /// clip-path 存在性（第四批④ SC 位；F3c 升级：形状 ≠ none 即触发，
-    /// ADR-0025）。
+    /// clip-path presence (fourth batch ④ SC bit; F3c upgrade: any shape
+    /// ≠ none triggers, ADR-0025).
     pub fn has_clip_path(&self) -> bool {
         !matches!(self.clip_path(), crate::css::property::ClipShape::None)
     }
 
-    /// will-change 含可触发 SC 的属性（第五批㉒ SC 触发全集）。
+    /// will-change contains an SC-triggering property (fifth batch ㉒, the
+    /// full SC trigger set).
     pub fn has_will_change_sc(&self) -> bool {
         matches!(
             self.get(PropertyId::WillChange),
@@ -960,7 +998,7 @@ impl ComputedStyle {
         )
     }
 
-    /// isolation: isolate（第五批㉒）。
+    /// isolation: isolate (fifth batch ㉒).
     pub fn has_isolation(&self) -> bool {
         matches!(
             self.get(PropertyId::Isolation),
@@ -968,8 +1006,8 @@ impl ComputedStyle {
         )
     }
 
-    /// mix-blend-mode 计算值（P1-2）：缺席或 normal →
-    /// `BlendMode::Normal`。
+    /// mix-blend-mode computed value (P1-2): absent or normal →
+    /// `BlendMode::Normal`.
     pub fn mix_blend(&self) -> crate::css::property::BlendMode {
         match self.get(PropertyId::MixBlendMode) {
             Some(crate::css::property::DeclValue::BlendMode(m)) => *m,
@@ -977,12 +1015,13 @@ impl ComputedStyle {
         }
     }
 
-    /// mix-blend-mode ≠ normal（第五批㉒ 起 SC 触发；P1-2 起携带效果）。
+    /// mix-blend-mode ≠ normal (SC trigger since fifth batch ㉒; carries the
+    /// effect since P1-2).
     pub fn has_mix_blend(&self) -> bool {
         self.mix_blend() != crate::css::property::BlendMode::Normal
     }
 
-    /// overflow-x（默认 visible）。
+    /// overflow-x (default visible).
     pub fn overflow_x(&self) -> Overflow {
         match self.values[PropertyId::OverflowX.slot()].as_ref() {
             Some(DeclValue::Overflow(o)) => *o,
@@ -990,7 +1029,7 @@ impl ComputedStyle {
         }
     }
 
-    /// overflow-y（默认 visible）。
+    /// overflow-y (default visible).
     pub fn overflow_y(&self) -> Overflow {
         match self.values[PropertyId::OverflowY.slot()].as_ref() {
             Some(DeclValue::Overflow(o)) => *o,
@@ -998,7 +1037,7 @@ impl ComputedStyle {
         }
     }
 
-    /// flex-direction（默认 row）。
+    /// flex-direction (default row).
     pub fn flex_direction(&self) -> FlexDirection {
         match self.values[PropertyId::FlexDirection.slot()].as_ref() {
             Some(DeclValue::FlexDirection(d)) => *d,
@@ -1006,7 +1045,7 @@ impl ComputedStyle {
         }
     }
 
-    /// flex-wrap（默认 nowrap）。
+    /// flex-wrap (default nowrap).
     pub fn flex_wrap(&self) -> FlexWrap {
         match self.values[PropertyId::FlexWrap.slot()].as_ref() {
             Some(DeclValue::FlexWrap(w)) => *w,
@@ -1014,7 +1053,7 @@ impl ComputedStyle {
         }
     }
 
-    /// LenAuto 族读取：auto → None。
+    /// LenAuto family read: auto → None.
     pub fn len_auto(&self, id: PropertyId) -> Option<&LengthPercentage> {
         match self.values[id.slot()].as_ref() {
             Some(DeclValue::LenAuto(Some(lp))) => Some(lp),
@@ -1022,7 +1061,7 @@ impl ComputedStyle {
         }
     }
 
-    /// Len 族读取。
+    /// Len family read.
     pub fn len(&self, id: PropertyId) -> Option<&LengthPercentage> {
         match self.values[id.slot()].as_ref() {
             Some(DeclValue::Len(lp)) => Some(lp),
@@ -1030,7 +1069,7 @@ impl ComputedStyle {
         }
     }
 
-    /// 四边 margin（top, right, bottom, left；auto → None）。
+    /// Four-side margin (top, right, bottom, left; auto → None).
     pub fn margin(&self) -> [Option<&LengthPercentage>; 4] {
         [
             self.len_auto(PropertyId::MarginTop),
@@ -1040,7 +1079,7 @@ impl ComputedStyle {
         ]
     }
 
-    /// 四边 padding（top, right, bottom, left）。
+    /// Four-side padding (top, right, bottom, left).
     pub fn padding(&self) -> [Option<&LengthPercentage>; 4] {
         [
             self.len(PropertyId::PaddingTop),
@@ -1050,7 +1089,7 @@ impl ComputedStyle {
         ]
     }
 
-    /// color（默认不透黑）。
+    /// color (default opaque black).
     pub fn color(&self) -> ColorValue {
         match self.values[PropertyId::Color.slot()].as_ref() {
             Some(DeclValue::Color(c)) => *c,
@@ -1058,9 +1097,11 @@ impl ComputedStyle {
         }
     }
 
-    /// background-color（默认透明）。
-    /// F3b（ADR-0024）：背景层对齐视图——层数 = max(各长手层数, 1)，
-    /// 短列表 cycling 补齐（css-backgrounds-3 §3）；缺省长手以初始值参与。
+    /// background-color (default transparent).
+    /// F3b (ADR-0024): background layer-aligned view — layer count =
+    /// max(each longhand's layer count, 1); short lists are cycled to fill
+    /// (css-backgrounds-3 §3); missing longhands participate with their
+    /// initial values.
     pub fn background_layers(&self) -> Vec<crate::css::property::BackgroundLayer> {
         use crate::css::property::{
             Attachment, BackgroundBox, BackgroundClip, BackgroundImage, BgSize, Position2D,
@@ -1128,8 +1169,8 @@ impl ComputedStyle {
             .collect()
     }
 
-    /// background-color — 背景色计算值（ColorValue 原样；绘制期经
-    /// resolve_color 环境化）。
+    /// background-color — the background color computed value (ColorValue
+    /// as-is; environment-resolved via resolve_color at paint time).
     pub fn background_color(&self) -> ColorValue {
         match self.values[PropertyId::BackgroundColor.slot()].as_ref() {
             Some(DeclValue::Color(c)) => *c,
@@ -1137,7 +1178,7 @@ impl ComputedStyle {
         }
     }
 
-    /// clip-path — 裁剪形状（F3c，ADR-0025；初始 none）。
+    /// clip-path — the clip shape (F3c, ADR-0025; initial none).
     pub fn clip_path(&self) -> crate::css::property::ClipShape {
         match self.values[PropertyId::ClipPath.slot()].as_ref() {
             Some(DeclValue::ClipPath(s)) => s.clone(),
@@ -1145,7 +1186,7 @@ impl ComputedStyle {
         }
     }
 
-    /// 已解析的绝对字号（px）。
+    /// The resolved absolute font size (px).
     pub fn font_size_px(&self) -> f32 {
         match self.values[PropertyId::FontSize.slot()].as_ref() {
             Some(DeclValue::Len(LengthPercentage::Px(v))) => *v,
@@ -1153,7 +1194,7 @@ impl ComputedStyle {
         }
     }
 
-    /// font-weight（默认 400）。
+    /// font-weight (default 400).
     pub fn font_weight(&self) -> f32 {
         match self.values[PropertyId::FontWeight.slot()].as_ref() {
             Some(DeclValue::Number(n)) => *n,
@@ -1161,7 +1202,7 @@ impl ComputedStyle {
         }
     }
 
-    /// font-style（默认 normal）。
+    /// font-style (default normal).
     pub fn font_style(&self) -> FontStyle {
         match self.values[PropertyId::FontStyle.slot()].as_ref() {
             Some(DeclValue::FontStyle(s)) => *s,
@@ -1169,7 +1210,7 @@ impl ComputedStyle {
         }
     }
 
-    /// font-family 列表（全集物化保证存在）。
+    /// font-family list (full-set materialization guarantees presence).
     pub fn font_family(&self) -> &FontFamilyList {
         match self.values[PropertyId::FontFamily.slot()].as_ref() {
             Some(DeclValue::FontFamily(list)) => list,
@@ -1177,7 +1218,7 @@ impl ComputedStyle {
         }
     }
 
-    /// line-height（全集物化保证存在）。
+    /// line-height (full-set materialization guarantees presence).
     pub fn line_height(&self) -> &LineHeight {
         match self.values[PropertyId::LineHeight.slot()].as_ref() {
             Some(DeclValue::LineHeight(lh)) => lh,
@@ -1185,7 +1226,7 @@ impl ComputedStyle {
         }
     }
 
-    /// text-align（默认 start）。
+    /// text-align (default start).
     pub fn text_align(&self) -> TextAlign {
         match self.values[PropertyId::TextAlign.slot()].as_ref() {
             Some(DeclValue::TextAlign(a)) => *a,
@@ -1193,9 +1234,11 @@ impl ComputedStyle {
         }
     }
 
-    /// 行高解析为 px（None = normal，消费侧走排版器默认字体度量 ≈ CSS normal）。
-    /// 百分比基 = 本元素字号（CSS line-height 语义）；盘点修复：此前该属性
-    /// 已解析入库但无任何消费者（无效声明）。
+    /// Line height resolved to px (None = normal; the consumer falls back to
+    /// the typesetter's default font metrics ≈ CSS normal). The percentage
+    /// basis is this element's font size (CSS line-height semantics);
+    /// inventory fix: this property used to be resolved and stored but had
+    /// no consumer at all (an invalid declaration).
     pub(crate) fn resolved_line_height_px(&self, env: &MediaEnv) -> Option<f32> {
         let fs = self.font_size_px();
         // P0 rem 修复：rem 基准 = MediaEnv.rem（引擎接线文档根字号）。
@@ -1207,9 +1250,10 @@ impl ComputedStyle {
         }
     }
 
-    /// 字距解析为 px（letter-spacing 百分比基 = 字号）。
-    /// 解析产物为 LenAuto（normal → None）；initial 曾为 Len(Px(0.0))，
-    /// 与解析类型不一致——盘点修复为同型 LenAuto(None)。
+    /// Letter spacing resolved to px (letter-spacing percentage basis is the
+    /// font size). The parse product is LenAuto (normal → None); the initial
+    /// value used to be Len(Px(0.0)), inconsistent with the parsed type —
+    /// fixed in the inventory to the same-shaped LenAuto(None).
     pub(crate) fn resolved_letter_spacing_px(&self, env: &MediaEnv) -> f32 {
         let fs = self.font_size_px();
         // P0 rem 修复：rem 基准 = MediaEnv.rem（引擎接线文档根字号）。
@@ -1221,8 +1265,9 @@ impl ComputedStyle {
         }
     }
 
-    /// 词距解析为 px（F3d，ADR-0026 D5；word-spacing 百分比基 = 字号，
-    /// 与 letter-spacing 同范式）。None = normal = 无消费（parley 默认 0）。
+    /// Word spacing resolved to px (F3d, ADR-0026 D5; word-spacing
+    /// percentage basis is the font size, same pattern as letter-spacing).
+    /// None = normal = no consumption (parley defaults to 0).
     pub(crate) fn resolved_word_spacing_px(&self, env: &MediaEnv) -> Option<f32> {
         let fs = self.font_size_px();
         // P0 rem 修复：rem 基准 = MediaEnv.rem（引擎接线文档根字号）。
@@ -1230,10 +1275,11 @@ impl ComputedStyle {
         self.word_spacing()?.resolve(&ctx, fs)
     }
 
-    /// 生效 font-feature-settings（F3d，ADR-0026 D5）：显式 feature 列表
-    /// 并上 font-variant-caps 派生（TitlingCaps→'titl'、Unicase→'unic'，
-    /// CSS Fonts 4 语义）；同 tag 冲突时显式 feature-settings 优先
-    /// （派生 tag 不重复才推）。
+    /// Effective font-feature-settings (F3d, ADR-0026 D5): the explicit
+    /// feature list unioned with font-variant-caps derivations
+    /// (TitlingCaps→'titl', Unicase→'unic', CSS Fonts 4 semantics); when the
+    /// same tag conflicts, the explicit feature-settings win (the derived tag
+    /// is pushed only when not already present).
     pub(crate) fn effective_font_features(&self) -> Vec<([u8; 4], u16)> {
         let mut out = self.font_features();
         let derived: Option<([u8; 4], u16)> = match self.font_variant_caps() {
@@ -1250,7 +1296,7 @@ impl ComputedStyle {
         out
     }
 
-    /// white-space（默认 normal）。
+    /// white-space (default normal).
     pub fn white_space(&self) -> WhiteSpace {
         match self.values[PropertyId::WhiteSpace.slot()].as_ref() {
             Some(DeclValue::WhiteSpace(w)) => *w,
@@ -1258,7 +1304,7 @@ impl ComputedStyle {
         }
     }
 
-    /// direction（A8：逻辑→物理映射基准；默认 ltr）。
+    /// direction (A8: the logical→physical mapping basis; default ltr).
     pub fn direction(&self) -> crate::css::property::DirectionKind {
         match self.values[PropertyId::Direction.slot()].as_ref() {
             Some(DeclValue::Direction(d)) => *d,
@@ -1266,7 +1312,7 @@ impl ComputedStyle {
         }
     }
 
-    /// unicode-bidi（A8：文本栈提示；默认 normal）。
+    /// unicode-bidi (A8: a text-stack hint; default normal).
     pub fn unicode_bidi(&self) -> crate::css::property::UnicodeBidiKind {
         match self.values[PropertyId::UnicodeBidi.slot()].as_ref() {
             Some(DeclValue::UnicodeBidi(b)) => *b,
@@ -1274,7 +1320,7 @@ impl ComputedStyle {
         }
     }
 
-    /// opacity（默认 1.0）。
+    /// opacity (default 1.0).
     pub fn opacity(&self) -> f32 {
         match self.values[PropertyId::Opacity.slot()].as_ref() {
             Some(DeclValue::Number(n)) => *n,
@@ -1282,7 +1328,7 @@ impl ComputedStyle {
         }
     }
 
-    /// z-index 数值（auto 或缺席取 0.0）。
+    /// z-index numeric value (auto or absent reads 0.0).
     pub fn z_index(&self) -> f32 {
         match self.values[PropertyId::ZIndex.slot()].as_ref() {
             Some(DeclValue::Number(n)) => *n,
@@ -1290,7 +1336,7 @@ impl ComputedStyle {
         }
     }
 
-    /// container-type（阶段2③；默认 Normal）。
+    /// container-type (phase 2 ③; default Normal).
     pub fn container_type(&self) -> ContainerType {
         match self.values[PropertyId::ContainerType.slot()].as_ref() {
             Some(DeclValue::ContainerType(t)) => *t,
@@ -1298,7 +1344,7 @@ impl ComputedStyle {
         }
     }
 
-    /// container-name 名单（阶段2③）。
+    /// container-name list (phase 2 ③).
     pub fn container_names(&self) -> &[String] {
         match self.values[PropertyId::ContainerName.slot()].as_ref() {
             Some(DeclValue::ContainerName(list)) => list,
@@ -1306,12 +1352,15 @@ impl ComputedStyle {
         }
     }
 
-    /// 调试人读视图（F3e，ADR-0027 D1）：显式物化槽位（`PropertyId::ALL`
-    /// 序，`css_name: {Debug}` 一行一个；None 槽位 = 未显式出现在级联中，
-    /// 不输出）+ custom properties（`--name: value`，字典序）+ 字体度量 +
-    /// 伪元素标记。宿主排查「为什么画错/为什么布局不对」的第一入口；
-    /// 机器往返通道见 `paint_dump`（serde feature）。零新状态、零分支语义
-    /// ——纯投影，不参与级联/结算任何路径。
+    /// Debug human-readable view (F3e, ADR-0027 D1): explicitly materialized
+    /// slots (in `PropertyId::ALL` order, one `css_name: {Debug}` per line;
+    /// None slots = never appeared explicitly in the cascade and are not
+    /// printed) + custom properties (`--name: value`, lexicographic) + font
+    /// metrics + the pseudo-element marker. The first entry point for hosts
+    /// diagnosing "why is it drawn wrong / why is the layout wrong"; the
+    /// machine round-trip channel is `paint_dump` (serde feature). Zero new
+    /// state, zero branch semantics — a pure projection that takes no part in
+    /// any cascade/settlement path.
     pub fn debug_dump(&self) -> String {
         let mut out = String::new();
         for pid in PropertyId::ALL {
@@ -1334,7 +1383,8 @@ impl ComputedStyle {
     }
 }
 
-/// 计算单节点样式（自根向下逐层调用；`parent` 为父节点计算样式）。
+/// Computes a single node's style (called level by level from the root
+/// downward; `parent` is the parent node's computed style).
 pub fn compute_node<'a>(
     tree: &'a StyleTree,
     id: NodeId,
@@ -1355,12 +1405,16 @@ pub fn compute_node<'a>(
     )
 }
 
-/// 带容器快照的计算（阶段2③）：`container_ctx` 为祖先容器栈（restyle
-/// DFS 维护，自最外向最内；无 @container 时零长度零成本）。B1：`user_sheet`
-/// 为用户起源样式表（None = 无）。B2：`sheets` 为 author 表组按值（主表
-/// 在前、附加表按登记序 = 文档序）。B4：`registered` 为文档级 @property
-/// 注册表（引擎附着期合并；独立 compute_node 无注册表 = 空）。
-/// P5（ADR-0033）：`ua_sheet` 为 UA 起源样式表（None = 无；收集序最前）。
+/// Compute with container snapshots (phase 2 ③): `container_ctx` is the
+/// ancestor container stack (maintained by the restyle DFS, outermost to
+/// innermost; zero-length and zero-cost without @container). B1: `user_sheet`
+/// is the user-origin stylesheet (None = none). B2: `sheets` is the author
+/// sheet group passed by value (main sheet first, extra sheets in
+/// registration order = document order). B4: `registered` is the
+/// document-level @property registry (merged during engine attachment; a
+/// standalone compute_node has no registry = empty).
+/// P5 (ADR-0033): `ua_sheet` is the UA-origin stylesheet (None = none;
+/// collected first).
 #[allow(clippy::too_many_arguments)] // 公开 API 形状保持（B2 user_sheet/B4 registered/P5 ua_sheet 扩展位）
 pub fn compute_node_in<'a>(
     tree: &'a StyleTree,
@@ -1377,9 +1431,11 @@ pub fn compute_node_in<'a>(
     compute_node_from_cascade(tree, id, cascaded, registered, env, parent)
 }
 
-/// C4（ADR-0018）：从既有级联输出计算节点样式——compute_node_in 的主体
-/// 抽取（公开签名零改），供通道级联（::selection/::placeholder）复用；
-/// parent 语义不变（通道调用传 origin 主样式 = css-pseudo-4 继承基）。
+/// C4 (ADR-0018): computes a node's style from existing cascade output —
+/// the body of compute_node_in extracted (public signature unchanged) for
+/// reuse by the channel cascade (::selection/::placeholder); parent
+/// semantics unchanged (channel calls pass the origin main style = the
+/// css-pseudo-4 inheritance base).
 pub fn compute_node_from_cascade(
     tree: &StyleTree,
     id: NodeId,

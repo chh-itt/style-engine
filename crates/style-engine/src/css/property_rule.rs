@@ -1,86 +1,89 @@
-//! B4 @property（css-properties-values-api）：注册规则解析 + syntax 文法
-//! 解析与校验。设计见 docs/adr/0014-property-registry.md。
+//! B4 @property (css-properties-values-api): registration rule parsing plus
+//! syntax grammar parsing and validation. Design: docs/adr/0014-property-registry.md.
 //!
-//! MVP 面：类型族 14 种 + `+`/`#` 单层组合子；`||`/`&&`/嵌套组合 → 注册
-//! 无效（Dropped）。类型试探为字符串级（color 复用真文法 parse_color，
-//! 其余 token 级判定）。
+//! MVP surface: 14 type families + single-level `+`/`#` combinators;
+//! `||`/`&&`/nested combinations make the registration invalid (Dropped).
+//! Type probing is string-level (color reuses the real grammar parse_color;
+//! everything else is a token-level check).
 
 use crate::css::decl::{TokenBuf, capture_tokens, token_buf_to_string};
 use cssparser::{Delimiter, ParseError, Parser, Token};
 
-/// syntax 描述符支持的类型族。
+/// Type families supported by the syntax descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxType {
-    /// `<length>`（数值+长度单位；0 无单位合法）。
+    /// `<length>` (number + length unit; unitless 0 is valid).
     Length,
-    /// `<percentage>`。
+    /// `<percentage>`.
     Percentage,
-    /// `<length-percentage>`（length 或 percentage）。
+    /// `<length-percentage>` (length or percentage).
     LengthPercentage,
-    /// `<number>`。
+    /// `<number>`.
     Number,
-    /// `<integer>`。
+    /// `<integer>`.
     Integer,
-    /// `<color>`（真文法试探：parse_color）。
+    /// `<color>` (probed with the real grammar: parse_color).
     Color,
-    /// `<image>`（渐变/图片函数名集合近似）。
+    /// `<image>` (approximated by a set of gradient/image function names).
     Image,
-    /// `<url>`（url token / 字符串 / url() 函数）。
+    /// `<url>` (url token / string / url() function).
     Url,
-    /// `<angle>`（deg/grad/rad/turn）。
+    /// `<angle>` (deg/grad/rad/turn).
     Angle,
-    /// `<time>`（s/ms）。
+    /// `<time>` (s/ms).
     Time,
-    /// `<resolution>`（dpi/dpcm/dppx/x）。
+    /// `<resolution>` (dpi/dpcm/dppx/x).
     Resolution,
-    /// `<transform-function>`（已知变换函数名集合）。
+    /// `<transform-function>` (set of known transform function names).
     TransformFunction,
-    /// `<custom-ident>`（Ident 且非 CSS 宽关键字）。
+    /// `<custom-ident>` (an Ident that is not a CSS-wide keyword).
     CustomIdent,
-    /// `<string>`（QuotedString）。
+    /// `<string>` (QuotedString).
     String,
 }
 
-/// 多值组合子（css-properties-values-api §syntax 文法的 MVP 子集）。
+/// Multi-value combinators (MVP subset of the css-properties-values-api §syntax
+/// grammar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Multi {
-    /// 单值。
+    /// Single value.
     Single,
-    /// `+`：空白分隔多值（≥1）。
+    /// `+`: whitespace-separated multi-value (≥1).
     Space,
-    /// `#`：逗号分隔多值（≥1）。
+    /// `#`: comma-separated multi-value (≥1).
     Comma,
 }
 
-/// syntax 描述符解析产物。
+/// Parsed syntax descriptor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PropertySyntax {
-    /// `"*"`：任意值，不校验（缺省）。
+    /// `"*"`: any value, unchecked (default).
     Universal,
-    /// `<type>[+|#]?`。
+    /// `<type>[+|#]?`.
     Named {
-        /// 类型族。
+        /// Type family.
         ty: SyntaxType,
-        /// 多值组合子。
+        /// Multi-value combinator.
         multi: Multi,
     },
 }
 
-/// @property 规则（注册面 = 引擎 registered_props 合并前的解析产物）。
+/// An @property rule (registration surface: the parse product before the engine
+/// merges it into its registered_props).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyRule {
-    /// 注册名（`--` 前缀自定义属性名）。
+    /// Registered name (a `--`-prefixed custom property name).
     pub name: String,
-    /// syntax 描述符（缺省 universal）。
+    /// The syntax descriptor (defaults to universal).
     pub syntax: PropertySyntax,
-    /// inherits 描述符（缺省 false）。
+    /// The inherits descriptor (defaults to false).
     pub inherits: bool,
-    /// initial-value 原始 token（注册期已按 syntax 校验）。
+    /// Raw initial-value tokens (validated against the syntax at registration time).
     pub initial_value: Option<TokenBuf>,
 }
 
-/// CSS 全局关键字（css-cascade）：注册属性值含之 = 无效。
-/// 单源见 css/mod.rs `CSS_WIDE_KEYWORDS`。
+/// CSS-wide keywords (css-cascade): a registered property value containing one is
+/// invalid. Single source: `CSS_WIDE_KEYWORDS` in css/mod.rs.
 use super::CSS_WIDE_KEYWORDS;
 
 const LENGTH_UNITS: [&str; 24] = [
@@ -128,7 +131,8 @@ const TRANSFORM_FUNCS: [&str; 23] = [
     "translateY",
 ];
 
-/// syntax 字符串 → 文法树；不支持面（组合子嵌套等）→ None = 注册无效。
+/// syntax string → grammar tree; an unsupported surface (nested combinators etc.)
+/// → None = invalid registration.
 pub fn parse_syntax(s: &str) -> Option<PropertySyntax> {
     let s = s.trim();
     if s == "*" {
@@ -162,8 +166,9 @@ pub fn parse_syntax(s: &str) -> Option<PropertySyntax> {
     Some(PropertySyntax::Named { ty, multi })
 }
 
-/// @property 规则解析：name（prelude ident）+ 块体描述符循环。
-/// None = 规则无效（调用方 Dropped 告警 + 整块消费）。
+/// Parses an @property rule: name (prelude ident) + descriptor loop over the
+/// block body. None = invalid rule (the caller emits a Dropped warning and
+/// consumes the whole block).
 pub(crate) fn parse_property_rule(name: &str, input: &mut Parser<'_>) -> Option<PropertyRule> {
     // 名必须为自定义属性名（css-properties-values-api §1）。
     if !name.starts_with("--") || name.len() <= 2 {
@@ -238,7 +243,8 @@ pub(crate) fn parse_property_rule(name: &str, input: &mut Parser<'_>) -> Option<
     })
 }
 
-/// 语法匹配（initial-value 注册期 + 声明值计算期共用）。
+/// Syntax matching (shared by initial-value registration and declaration-value
+/// computation).
 pub fn syntax_matches(syn: &PropertySyntax, text: &str) -> bool {
     match syn {
         PropertySyntax::Universal => true,
@@ -256,7 +262,7 @@ pub fn syntax_matches(syn: &PropertySyntax, text: &str) -> bool {
     }
 }
 
-/// 括号深度 0 的顶层逗号切分（逗号多值组合子）。
+/// Splits on top-level commas at paren depth 0 (comma multi-value combinator).
 fn split_top_commas(text: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
@@ -282,7 +288,7 @@ fn split_top_commas(text: &str) -> Vec<String> {
     parts
 }
 
-/// 类型试探（字符串级；首 token 判定 + 尽量 exhausted）。
+/// Type probing (string-level; first-token check + exhaustion where possible).
 fn type_matches(ty: SyntaxType, s: &str) -> bool {
     match ty {
         SyntaxType::Number => exhausted(s, |p| p.expect_number()),
@@ -338,7 +344,7 @@ fn type_matches(ty: SyntaxType, s: &str) -> bool {
     }
 }
 
-/// 首-token 判定 + 可选 exhausted 要求。
+/// First-token check with an optional exhausted requirement.
 fn first_token_is(s: &str, f: impl Fn(&Token<'_>) -> bool, exhaust: bool) -> bool {
     let mut p = Parser::new(s);
     let ok = match p.next_including_whitespace() {
@@ -348,14 +354,14 @@ fn first_token_is(s: &str, f: impl Fn(&Token<'_>) -> bool, exhaust: bool) -> boo
     ok && (!exhaust || p.expect_exhausted().is_ok())
 }
 
-/// 数值探针（解析后必须耗尽；泛型兼容 expect_number/expect_integer 及
-/// 其 BasicParseError 错误类型）。
+/// Numeric probe (must be exhausted after parsing; generic over
+/// expect_number/expect_integer and their BasicParseError error type).
 fn exhausted<T, E>(s: &str, f: impl FnOnce(&mut Parser<'_>) -> Result<T, E>) -> bool {
     let mut p = Parser::new(s);
     f(&mut p).is_ok() && p.expect_exhausted().is_ok()
 }
 
-/// `<length>`：0（无单位）或带单位的 Dimension；`%` 不属 length。
+/// `<length>`: 0 (unitless) or a Dimension with a unit; `%` is not a length.
 fn unit_or_zero(s: &str, units: &[&str]) -> bool {
     first_token_is(
         s,
@@ -368,7 +374,7 @@ fn unit_or_zero(s: &str, units: &[&str]) -> bool {
     )
 }
 
-/// 带单位 Dimension 判定（angle/time/resolution）。
+/// Dimension-with-unit check (angle/time/resolution).
 fn dimension_unit_in(s: &str, units: &[&str]) -> bool {
     first_token_is(
         s,
@@ -377,7 +383,8 @@ fn dimension_unit_in(s: &str, units: &[&str]) -> bool {
     )
 }
 
-/// 去除 token 流首尾空白 token（custom property 同款处理）。
+/// Trims leading/trailing whitespace tokens from the token stream (same
+/// treatment as custom properties).
 fn trim_ws_edges(buf: &mut TokenBuf) {
     while buf
         .first()

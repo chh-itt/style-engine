@@ -1,21 +1,27 @@
-//! 最小 TrueType 读取器（纯 std）：soft sink 文本光栅化的字体源。
+//! Minimal TrueType reader (pure std): the font source for soft-sink text
+//! rasterization.
 //!
-//! 覆盖：sfnt 表目录、head/hhea/maxp 头、hmtx 步进、cmap format 4
-//! （BMP Unicode）、loca/glyf 简单字形与复合字形（平移 + 均匀/双轴缩放，
-//! 点匹配组件不支持）；二次曲线固定 16 段折线化（2048 upm 下偏差
-//! ≲0.06px@16px）。kerning/GSUB/提示一概不做（记录偏差——与 parley
-//! 测量的 advance 差异属 Class 1/2 预算内噪声）。
+//! Coverage: sfnt table directory, head/hhea/maxp headers, hmtx advances,
+//! cmap format 4 (BMP Unicode), loca/glyf simple and composite glyphs
+//! (translation + uniform/two-axis scaling; point-matched components are not
+//! supported). Quadratic curves are flattened to a fixed 16 segments per
+//! curve (deviation ≲0.06px at 16px with 2048 upm). No kerning/GSUB/hinting
+//! at all (documented deviation — the advance difference vs. parley
+//! measurements counts as Class 1/2 budget noise).
 //!
-//! 度量约定与 Chromium/引擎 ㉔ 对齐：ascender/descender 取 hhea
-//!（DejaVu 与 usWin 同值）；normal 行高 = round(asc)+round(desc)。
+//! Metrics conventions align with Chromium/engine ㉔: ascender/descender come
+//! from hhea (DejaVu matches the usWin values); normal line height =
+//! round(asc)+round(desc).
 
-/// 折线化后的字形轮廓（字体单位，y 向上；每轮廓为闭合折线顶点序列）。
+/// Flattened glyph outlines (font units, y-up; each outline is a closed
+/// polygon vertex sequence).
 pub type Outline = Vec<Vec<(f32, f32)>>;
 
-/// 二次曲线折线化段数（每段曲线 → 16 条线段）。
+/// Segments used to flatten a quadratic curve (each curve → 16 line segments).
 const QUAD_SUBDIV: usize = 16;
 
-/// 字形展开累积仿射（双轴缩放 + 平移，字体单位；复合字形逐层合成）。
+/// Accumulated affine for glyph expansion (two-axis scaling + translation, in
+/// font units; composed per level for composite glyphs).
 #[derive(Clone, Copy)]
 struct Xform {
     sxx: f32,
@@ -37,7 +43,8 @@ impl Xform {
         (self.dx + self.sxx * x, self.dy + self.syy * y)
     }
 
-    /// 组件变换合成：子组件坐标先经 (csx,csy,cdx,cdy)，再经 self。
+    /// Component transform composition: child component coordinates pass
+    /// through (csx,csy,cdx,cdy) first, then through self.
     #[inline]
     fn compose(&self, csx: f32, csy: f32, cdx: f32, cdy: f32) -> Self {
         Self {
@@ -60,7 +67,7 @@ pub struct SoftFont<'a> {
     hmtx: usize,
     loca: usize,
     glyf: usize,
-    /// 选定的 Unicode cmap 子表绝对偏移（format 4）。
+    /// Absolute offset of the selected Unicode cmap subtable (format 4).
     cmap_sub: usize,
 }
 
@@ -90,7 +97,8 @@ fn r_u32(d: &[u8], off: usize) -> u32 {
 }
 
 impl<'a> SoftFont<'a> {
-    /// 解析 sfnt 头与必需表（TrueType glyf 轮廓；CFF/OTTO 不支持）。
+    /// Parses the sfnt header and the required tables (TrueType glyf
+    /// outlines; CFF/OTTO is not supported).
     pub fn parse(data: &'a [u8]) -> Option<Self> {
         let ver = r_u32(data, 0);
         let is_ttf = ver == 0x0001_0000 || data.get(0..4) == Some(&b"true"[..]);
@@ -147,7 +155,8 @@ impl<'a> SoftFont<'a> {
         })
     }
 
-    /// 选 Unicode 子表：优先 (3,1) Windows BMP，其次 (0,*)，再取首个。
+    /// Picks a Unicode subtable: prefers (3,1) Windows BMP, then (0,*), then
+    /// the first available.
     fn pick_cmap_subtable(data: &[u8], cmap: usize) -> Option<usize> {
         let n = r_u16(data, cmap + 2) as usize;
         let mut fallback = None;
@@ -170,18 +179,19 @@ impl<'a> SoftFont<'a> {
         unicode_any.or(fallback)
     }
 
-    /// 字号 → 字体单位缩放系数。
+    /// Font size → font-unit scaling factor.
     pub fn scale_for(&self, font_size: f32) -> f32 {
         font_size / f32::from(self.units_per_em)
     }
 
-    /// 字形步进宽（px）。
+    /// Glyph advance width (px).
     pub fn advance(&self, gid: u16, scale: f32) -> f32 {
         let idx = gid.min(self.num_h_metrics.saturating_sub(1)) as usize;
         f32::from(r_u16(self.data, self.hmtx + idx * 4)) * scale
     }
 
-    /// cmap format 4 码点查找（未映射返回 notdef=0 由调用方决策）。
+    /// cmap format 4 code-point lookup (unmapped returns notdef=0 for the
+    /// caller to decide).
     pub fn lookup(&self, ch: char) -> Option<u16> {
         let c = u32::from(ch);
         if c > 0xFFFF {
@@ -224,7 +234,8 @@ impl<'a> SoftFont<'a> {
         None
     }
 
-    /// 字形轮廓（字体单位折线；复合字形递归展开）。
+    /// Glyph outlines (font-unit polygons; composite glyphs are expanded
+    /// recursively).
     pub fn outline(&self, gid: u16) -> Outline {
         let mut out = Vec::new();
         self.outline_rec(gid, Xform::IDENTITY, &mut out, 0);
@@ -263,7 +274,8 @@ impl<'a> SoftFont<'a> {
         }
     }
 
-    /// 简单字形：flags/x/y 解码 → 逐轮廓闭合折线（隐含中点 + 二次折线化）。
+    /// Simple glyph: flags/x/y decoding → closed polygon per outline (implicit
+    /// on-curve midpoints + quadratic flattening).
     fn simple_glyph(&self, g: usize, n: usize, xf: Xform, out: &mut Outline) {
         let end_base = g + 10;
         let mut end_pts = Vec::with_capacity(n);
@@ -341,8 +353,10 @@ impl<'a> SoftFont<'a> {
         }
     }
 
-    /// 复合字形：组件平移（字体单位）+ 均匀/双轴缩放递归展开；
-    /// 点匹配组件与 2×2 矩阵按单位矩阵近似（记录偏差）。
+    /// Composite glyph: recursive expansion with component translation (font
+    /// units) + uniform/two-axis scaling; point-matched components and 2×2
+    /// matrices are approximated with the identity matrix (documented
+    /// deviation).
     fn composite_glyph(&self, g: usize, xf: Xform, out: &mut Outline, depth: u8) {
         let mut p = g + 10;
         loop {
@@ -390,8 +404,9 @@ impl<'a> SoftFont<'a> {
     }
 }
 
-/// 闭合点环 → 折线（隐含 on-curve 中点；二次曲线 16 段折线化）。
-/// 输入 ring 顶点 (x, y, on_curve)，字体单位。
+/// Closed point ring → polygon (implicit on-curve midpoints; quadratic curves
+/// flattened to 16 segments). Input ring vertices are (x, y, on_curve), in
+/// font units.
 fn ring_to_polygon(ring: &[(i32, i32, bool)]) -> Vec<(f32, f32)> {
     let n = ring.len();
     if n == 0 {

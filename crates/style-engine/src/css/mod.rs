@@ -1,8 +1,10 @@
-//! CSS 语法层：真实 CSS 文本 → 规则/声明/值的内部表示（ADR-0004）。
+//! CSS syntax layer: real CSS text → internal representation of rules,
+//! declarations, and values (ADR-0004).
 //!
-//! 容错语义（ADR-0004/CONTEXT.md）：任何内容层错误（未知声明、无效值、
-//! 未知 at-rule）不中断解析，记录进 `ParseReport` 后跳过；契约错误不在
-//! 此层出现。
+//! Fault-tolerance semantics (ADR-0004/CONTEXT.md): any content-level error
+//! (unknown declaration, invalid value, unknown at-rule) does not abort
+//! parsing — it is recorded in `ParseReport` and skipped; contract errors
+//! never surface at this layer.
 
 pub mod decl;
 pub(crate) mod fontprobe;
@@ -11,9 +13,10 @@ pub mod property_rule;
 pub mod stylesheet;
 pub mod value;
 
-/// CSS 宽关键字全集（css-cascade）：描述符/注册属性值含之 = 无效。
-/// counter_style.rs 与 property_rule.rs 共用单源（消除双处重声明的
-/// 漂移面）。
+/// The full set of CSS-wide keywords (css-cascade): a descriptor or registered
+/// property value containing one is invalid. Single source shared by
+/// counter_style.rs and property_rule.rs (eliminates the drift surface of
+/// duplicate declarations).
 pub(crate) const CSS_WIDE_KEYWORDS: [&str; 5] =
     ["initial", "inherit", "unset", "revert", "revert-layer"];
 

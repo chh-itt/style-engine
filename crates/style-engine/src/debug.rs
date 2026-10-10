@@ -1,26 +1,35 @@
-//! 调试工具链（F3e，ADR-0027）：宿主侧人读视图。
+//! Debug tooling (F3e, ADR-0027): host-side human-readable views.
 //!
-//! 与 F3a2 serde dump（`paint_dump`，机器往返通道）互补：本模块产出
-//! **人类可读**的组织化文本——过滤、排序、缩进——供排查「为什么画错/
-//! 为什么布局不对」。全部复用 `Debug` derive 输出：`PaintOp` 等中立枚举
-//! 新增变体时本模块的穷尽 match 会被编译器强制更新（与 F3a2「同 crate
-//! 删通配臂」同一纪律），措辞零重复维护。
+//! Complementary to the F3a2 serde dumps (`paint_dump`, the machine
+//! round-trip channel): this module produces **human-readable** organized
+//! text — filtered, sorted, indented — for diagnosing "why is it painted
+//! wrong / why is the layout wrong". Everything reuses `Debug` derive output:
+//! when neutral enums such as `PaintOp` gain variants, the exhaustive matches
+//! in this module are forced to update by the compiler (the same discipline
+//! as F3a2's "no wildcard arms within the crate"), so the wording needs no
+//! duplicate maintenance.
 //!
-//! 三视图（ADR-0027 D1）：
-//! 1. `display_list_dump` —— DisplayList 树视图（Push/Pop 缩进）；
+//! Three views (ADR-0027 D1):
+//! 1. `display_list_dump` — the DisplayList tree view (Push/Pop
+//!    indentation);
 //! 2. [`ComputedStyle::debug_dump`](crate::computed::ComputedStyle::debug_dump)
-//!    —— 显式物化槽位 + custom properties（computed.rs，同类内聚）；
+//!    — explicitly materialized slots + custom properties (implemented in
+//!    computed.rs, cohesive with the slot table);
 //! 3. [`crate::StyleEngine::layout_tree_dump`] /
-//!    [`crate::engine::Frame::boxes_dump`] —— 结构树与几何盒两分离视图。
+//!    [`crate::engine::Frame::boxes_dump`] — two separate views: the
+//!    structure tree and the geometry boxes.
 
 use crate::paint::{DisplayList, PaintOp};
 
-/// DisplayList 人读视图：每 op 一行（`Debug` 输出），`Push*` 后缩进一级、
-/// `Pop*` 前反缩进一级，形成树视图；首行汇总 op 数与帧生成号。
+/// Human-readable DisplayList view: one op per line (`Debug` output),
+/// indented one level after each `Push*` and outdented one level before each
+/// `Pop*`, forming a tree view; the first line summarizes the op count and
+/// the frame generation number.
 ///
-/// 缩进语义与 `paint_node` 的层叠状态机对齐：clip/opacity/transform/scroll
-/// 四类状态推入即开启子作用域。op 序号（行前缀）供宿主对照
-/// [`crate::paint::HitTestHit`] 与录制回放定位。
+/// The indentation semantics align with `paint_node`'s stacking state
+/// machine: pushing clip/opacity/transform/scroll state opens a child scope.
+/// Op indices (line prefixes) let hosts correlate against
+/// [`crate::paint::HitTestHit`] and locate positions in recorded replays.
 pub fn display_list_dump(dl: &DisplayList) -> String {
     let mut out = format!(
         "DisplayList ops={} generation={}\n",

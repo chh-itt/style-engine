@@ -1,26 +1,34 @@
-//! `style-engine` — 框架无关的 CSS 语义样式层。
+//! `style-engine` — a framework-agnostic CSS semantic styling layer.
 //!
-//! 它解决一个问题：原生 GUI 想要 CSS 级别的样式表达力，却不想拖进一个
-//! 完整浏览器引擎。本 crate 承包 CSS 的"样式代数"与"布局"语义，并把
-//! "绘制"语义编译成中立的 `DisplayList`（绘制指令的有序序列）——渲染
-//! 由宿主接入任意后端，参考实现在 `style-engine-vello`。
+//! It solves one problem: native GUIs want CSS-level styling power without
+//! dragging in a full browser engine. This crate owns the CSS "style algebra"
+//! and "layout" semantics, and compiles the "paint" semantics into a neutral
+//! `DisplayList` (an ordered sequence of paint commands) — rendering is up to
+//! the host, which can plug in any backend; the reference implementation
+//! lives in `style-engine-vello`.
 //!
-//! # 分层（ADR-0001）
+//! # Layering (ADR-0001)
 //!
-//! - **L1 样式代数**：真实 CSS 文本解析（cssparser）、选择器匹配
-//!   （selectors）、级联/继承/custom properties，产出 `ComputedStyle`。
-//! - **L2 布局**（feature = "layout"）：ComputedStyle 映射到 taffy，
-//!   文本叶子由内置文本栈（parley）测量，产出 `LayoutTree`。
-//! - **L3 绘制**：布局结果编译为 `DisplayList`，按节点分段连续存放；
-//!   wgpu/vello 后端只存在于独立的 sink crate。
+//! - **L1 style algebra**: real CSS text parsing (cssparser), selector
+//!   matching (selectors), cascade/inheritance/custom properties, producing
+//!   `ComputedStyle`.
+//! - **L2 layout** (feature = "layout"): ComputedStyle is mapped onto taffy,
+//!   text leaves are measured by the built-in text stack (parley),
+//!   producing `LayoutTree`.
+//! - **L3 paint**: layout results are compiled into a `DisplayList`, stored
+//!   contiguously in per-node segments; wgpu/vello backends live only in the
+//!   separate sink crate.
 //!
-//! # 中立性契约（ADR-0001）
+//! # Neutrality contract (ADR-0001)
 //!
-//! crate 零副作用：时钟、窗口、输入、字体与图片字节全部由宿主推入；
-//! 帧计算是纯的（同输入同输出、幂等）。错误双轨：CSS 内容错误按规范
-//! 容错并记录在 [`ParseReport`]；宿主违约以 [`ContractError`] 上浮。
+//! The crate has zero side effects: clocks, windows, input, fonts, and image
+//! bytes are all pushed in by the host; frame computation is pure (same
+//! input, same output, idempotent). Errors are dual-tracked: CSS content
+//! errors are handled with the spec's fault-tolerant semantics and recorded
+//! in [`ParseReport`]; host contract violations surface as
+//! [`ContractError`].
 //!
-//! # 快速上手
+//! # Quick start
 //!
 //! ```rust
 //! use style_engine::{StyleEngine, StyleNode};
@@ -29,7 +37,7 @@
 //! let mut engine = StyleEngine::new();
 //! assert!(engine.set_stylesheet(".btn { background-color: #3366cc; }").is_clean());
 //!
-//! // 宿主树镜像：根 1 → 按钮 2（K 取宿主自己的 Copy + Eq + Hash 键）。
+//! // Host tree mirror: root 1 → button 2 (K is the host's own Copy + Eq + Hash key).
 //! engine.insert(None, 1, StyleNode::default())?;
 //! let mut btn = StyleNode::default();
 //! btn.name = Some("button".into());
@@ -43,31 +51,39 @@
 //! # }
 //! ```
 //!
-//! # API 冻结策略（C3）
+//! # API freeze policy (C3)
 //!
-//! - 公共枚举全量 `#[non_exhaustive]`（变体集=演进面，宿主 `match` 必带
-//!   通配臂）；结构体按宿主构造面决策——[`StyleNode`]
-//!   等宿主可构造类型保持穷举。
-//! - `#![deny(missing_docs)]`：公共项无文档即编译失败。
-//! - 线程承诺：`StyleEngine`/`Frame`/`ComputedStyle`/`DisplayList` 均
-//!   `Send + Sync`（静态断言锁定）。
-//! - `DisplayList` 序列化：经 `serde` feature（默认关）提供 `to_dump()`/
-//!   `to_display_list()` 类型化投影（`paint_dump` 模块）；serde 仅可选
-//!   依赖，默认构建零依赖面。
+//! - All public enums are `#[non_exhaustive]` (the variant set is the
+//!   evolution surface; host `match`es must carry a wildcard arm); structs
+//!   are decided by the host-construction surface — host-constructible types
+//!   such as [`StyleNode`] remain exhaustive.
+//! - `#![deny(missing_docs)]`: a public item without docs fails to compile.
+//! - Threading promise: `StyleEngine`/`Frame`/`ComputedStyle`/`DisplayList`
+//!   are all `Send + Sync` (locked in by static assertions).
+//! - `DisplayList` serialization: behind the `serde` feature (off by
+//!   default) the `to_dump()`/`to_display_list()` typed projections are
+//!   provided (`paint_dump` module); serde is an optional dependency only —
+//!   the default build has a zero-dependency surface.
 //!
-//! 设计文档见仓库根目录 `CONTEXT.md` 与 `docs/adr/`。
+//! Design docs live in the repository root: `CONTEXT.md` and `docs/adr/`.
 //!
-//! # 依赖策略（C4）
+//! # Dependency policy (C4)
 //!
-//! - **词汇表公有**：公有面唯一的第三方类型是 peniko 的色彩类型（下方
-//!   re-export）。宿主消费 [`DisplayList`]/[`ComputedStyle`] 色值**无需**
-//!   自行依赖 peniko——版本由本 crate 锚定，杜绝双份 peniko。DisplayList
-//!   几何全部是 `f32` 字段，kurbo 类型不出现在公有面（仅 peniko 传递）。
-//! - **重依赖隔离**：GPU/wgpu/winit 只存在于 sink crate（`style-engine-vello`）
-//!   与 demo；核心 crate 的 taffy/parley 经 `layout`/`text` feature 可选，
-//!   `--no-default-features` 下核心仅剩 CSS 解析/级联/绘制编译。
-//! - **基础设施不进核心**：serde 仅以可选 feature 存在（见 API 冻结策略
-//!   的 serde 决策）；诊断统一走 `tracing`（唯一观测依赖）。
+//! - **Public vocabulary**: the only third-party types on the public surface
+//!   are peniko's color types (re-exported below). Hosts consuming
+//!   [`DisplayList`]/[`ComputedStyle`] color values do **not** need to depend
+//!   on peniko themselves — the version is pinned by this crate, ruling out
+//!   duplicate peniko versions. DisplayList geometry is entirely plain `f32`
+//!   fields; kurbo types never appear on the public surface (only peniko,
+//!   transitively).
+//! - **Heavy dependency isolation**: GPU/wgpu/winit exist only in the sink
+//!   crate (`style-engine-vello`) and the demo; the core crate's
+//!   taffy/parley are optional behind the `layout`/`text` features, and with
+//!   `--no-default-features` the core compiles only CSS parsing, cascade,
+//!   and paint.
+//! - **No infrastructure in the core**: serde exists only as an optional
+//!   feature (see the serde decision under API freeze policy); diagnostics
+//!   go uniformly through `tracing` (the only observability dependency).
 
 // unsafe 策略：全 crate 禁止（deny），唯一豁免点 = engine.rs 的
 // SendSyncTaffy（taffy 0.14 CompactLength nan-boxing 非 Send/Sync 的
@@ -84,14 +100,16 @@ pub mod engine;
 #[cfg(feature = "layout")]
 pub mod layout;
 
-/// 内置 UA 起源样式表常量（P5，ADR-0033 D3）：默认不装载，宿主显式选择。
+/// Built-in UA-origin stylesheet constants (P5, ADR-0033 D3): not loaded by
+/// default; hosts opt in explicitly.
 pub mod builtins;
 pub mod cascade;
 pub mod computed;
 pub mod css;
-/// 调试工具链（F3e，ADR-0027）：宿主侧人读视图（DisplayList 树/布局树/
-/// 几何盒；ComputedStyle 视图在 `ComputedStyle::debug_dump`）。零新状态
-/// 纯投影，不参与级联/结算/绘制任何路径。
+/// Debug tooling (F3e, ADR-0027): host-side human-readable views (DisplayList
+/// tree / layout tree / geometry boxes; the ComputedStyle view lives in
+/// `ComputedStyle::debug_dump`). Pure projection with zero new state; it never
+/// participates in cascade, settlement, or paint paths.
 pub mod debug;
 pub mod error;
 pub mod paint;
@@ -102,7 +120,8 @@ pub mod tree;
 
 #[cfg(feature = "text")]
 pub mod text;
-/// text-transform 变换（C2；无 cfg 门——度量与绘制路径共用）。
+/// text-transform mapping (C2; not cfg-gated — shared by the measurement and
+/// paint paths).
 pub mod text_transform;
 
 pub use cascade::{Candidate, CascadeOutput, CustomCandidate, MatchedRule, Origin};

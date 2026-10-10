@@ -1,12 +1,18 @@
-//! 声明块解析：属性分派、简写展开、custom properties 与 var() 延迟解析。
+//! Declaration block parsing: property dispatch, shorthand expansion,
+//! custom properties, and deferred var() resolution.
 //!
-//! 语义要点（CSS Cascading/Variables 对齐）：
-//! - 无 `var()` 的声明解析失败 → 容错丢弃（warn + 不存储）；
-//! - 含 `var()` 的声明存原始 token 流，替换后重解析；替换失败（引用
-//!   不存在/成环）→ IACVT：该属性按 unset 处理（继承属性继承，否则
-//!   initial），而非丢弃整条声明；
-//! - 简写含 `var()` 时（阶段2②）按长手全集落挂起声明，计算值期代换
-//!   后展开，逐槽级联竞争。
+//! Semantic notes (aligned with CSS Cascading/Variables):
+//! - A declaration without `var()` that fails to parse is dropped
+//!   fault-tolerantly (warn + not stored);
+//! - A declaration containing `var()` is stored as its raw token stream and
+//!   re-parsed after substitution; if substitution fails (missing reference
+//!   or cycle) → IACVT: the property is treated as unset (inherited
+//!   properties inherit, otherwise initial) rather than dropping the whole
+//!   declaration;
+//! - When a shorthand contains `var()` (phase 2②), N pending declarations
+//!   are recorded for the shorthand's full longhand set, expanded after
+//!   substitution at computed-value time, competing per slot in the
+//!   cascade.
 
 use crate::css::property::{
     BorderStyle, ContainerType, DeclValue, GridLineSpec, OutlineStyle, PropertyId, WideKeyword,
@@ -21,19 +27,22 @@ use cssparser::{Parser, ParserState, ToCss, Token, TokenSerializationType, parse
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
-/// 拥有化的 token（自定义属性与 var() 值的存储形态）。
+/// An owned token (storage form for custom properties and var() values).
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnedToken {
-    /// token 源文本（反序列化形态）。
+    /// The token's source text (deserialized form).
     pub text: String,
-    /// 序列化类型（重组文本时判定是否需补分隔空白）。
+    /// Serialization type (used to decide whether separator whitespace must
+    /// be inserted when reassembling text).
     pub ser: TokenSerializationType,
 }
 
-/// token 流缓冲（custom property 与 var() 值的存储形态；栈内联 8 个）。
+/// Token stream buffer (storage form for custom properties and var()
+/// values; 8 entries inlined on the stack).
 pub type TokenBuf = SmallVec<[OwnedToken; 8]>;
 
-/// 把 token 流反序列化为字符串（保分隔语义），供替换后重解析。
+/// Deserializes a token stream into a string (preserving separator
+/// semantics), for re-parsing after substitution.
 pub fn token_buf_to_string(buf: &[OwnedToken]) -> String {
     let mut out = String::new();
     let mut prev: Option<TokenSerializationType> = None;
@@ -49,54 +58,68 @@ pub fn token_buf_to_string(buf: &[OwnedToken]) -> String {
     out
 }
 
-/// 单条声明。`important` 参与级联排序。
+/// A single declaration. `important` participates in cascade sorting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declaration {
-    /// 长手属性标识。
+    /// Longhand property identifier.
     pub id: PropertyId,
-    /// 是否带 !important（参与级联排序）。
+    /// Whether the declaration carries !important (participates in cascade
+    /// sorting).
     pub important: bool,
-    /// 声明值来源（已解析 / var() 挂起 / 简写挂起）。
+    /// Where the declaration value comes from (parsed / var() pending /
+    /// shorthand pending).
     pub value: DeclSource,
 }
 
-/// 声明值来源：无 var() 已解析直存；含 var() 存原始 token，计算值期代换。
+/// Where a declaration value comes from: without var() the parsed value is
+/// stored directly; with var() the raw tokens are stored and substituted at
+/// computed-value time.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum DeclSource {
-    /// 无 var()，已按属性文法解析成功。
+    /// No var(); already parsed successfully against the property grammar.
     Parsed(DeclValue),
-    /// 含 var()：存原始 token，替换后重解析。
+    /// Contains var(): the raw tokens are stored and re-parsed after
+    /// substitution.
     Var(TokenBuf),
-    /// 含 var() 的简写（阶段2②）：解析期无法槽位分配（如 TRBL 分量数
-    /// 未知），按简写长手全集落 N 条挂起声明；计算值期代换后走
-    /// expand_shorthand 展开，代换失败/文法失败 → 各长手 IACVT。
-    /// 级联按长手逐槽竞争（同块后写长手/高优先级长手覆盖对应槽）。
+    /// A shorthand containing var() (phase 2②): slots cannot be assigned at
+    /// parse time (e.g. the number of TRBL components is unknown), so N
+    /// pending declarations are recorded for the shorthand's full longhand
+    /// set; after substitution at computed-value time they go through
+    /// expand_shorthand, and a substitution/grammar failure → IACVT for
+    /// each longhand. The cascade competes slot by slot per longhand
+    /// (later longhands in the same block / higher-priority longhands
+    /// override the corresponding slot).
     PendingShorthand {
-        /// 简写名（小写，如 "margin"）。
+        /// Shorthand name (lowercase, e.g. "margin").
         shorthand: String,
-        /// 简写值原始 token（计算值期代换后展开）。
+        /// Raw tokens of the shorthand value (expanded after substitution at
+        /// computed-value time).
         tokens: TokenBuf,
     },
 }
 
-/// 一条样式规则（或内联 style）的声明块；同块内后写覆盖先写。
+/// The declaration block of a style rule (or inline style); later
+/// declarations in the same block override earlier ones.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeclarationBlock {
-    /// 长手声明（简写已展开；同块内后写覆盖先写）。
+    /// Longhand declarations (shorthands already expanded; later
+    /// declarations in the same block override earlier ones).
     pub decls: Vec<Declaration>,
-    /// custom properties（--*）：原始 token，按需替换。
+    /// Custom properties (--*): raw tokens, substituted on demand.
     pub custom: BTreeMap<String, TokenBuf>,
 }
 
 impl DeclarationBlock {
-    /// 无长手声明且无 custom property 时为 true。
+    /// True when there are no longhand declarations and no custom
+    /// properties.
     pub fn is_empty(&self) -> bool {
         self.decls.is_empty() && self.custom.is_empty()
     }
 }
 
-/// token 流里是否出现 var() 调用（Function token 序列化为 `var(`）。
+/// Whether a var() call appears in the token stream (a Function token
+/// serializing as `var(`).
 fn contains_var(buf: &[OwnedToken]) -> bool {
     buf.iter().any(|t| {
         t.text.len() >= 4
@@ -106,8 +129,9 @@ fn contains_var(buf: &[OwnedToken]) -> bool {
     })
 }
 
-/// 捕获 delimited 输入的全部 token（递归进函数/块；遇顶层 `!` 停止，
-/// 从而排除尾随的 `!important`）。注意 break 时 `!` 已被消费。
+/// Captures all tokens of delimited input (recursing into functions/blocks;
+/// stops at a top-level `!`, thereby excluding a trailing `!important`).
+/// Note that the `!` has already been consumed when breaking out.
 pub(crate) fn capture_tokens(p: &mut Parser<'_>, buf: &mut TokenBuf) {
     while let Ok(t) = p.next_including_whitespace() {
         if matches!(t, Token::Comment(_)) {
@@ -139,10 +163,12 @@ pub(crate) fn capture_tokens(p: &mut Parser<'_>, buf: &mut TokenBuf) {
     }
 }
 
-/// capture 之后处理声明尾部。capture_tokens 在顶层 `!` 处 break 且 `!`
-/// 已被消费，故 post_state 落在 `!` 之后——尾部只可能剩 ident
-/// `important`（可带空白）；其余尾 token → Err。返回 important 标记。
-/// （不能用 parse_important：它要求 `!` 仍在输入里。）
+/// Handles the declaration tail after capture. capture_tokens breaks at a
+/// top-level `!` and the `!` has already been consumed, so post_state sits
+/// right after the `!` — the tail can only contain the ident `important`
+/// (optionally with whitespace); any other trailing token → Err. Returns
+/// the important flag. (parse_important cannot be used here: it requires
+/// the `!` to still be in the input.)
 fn finish_after_capture(input: &mut Parser<'_>, post_state: &ParserState) -> Result<bool, ()> {
     input.reset(post_state);
     let important = input
@@ -152,10 +178,12 @@ fn finish_after_capture(input: &mut Parser<'_>, post_state: &ParserState) -> Res
     Ok(important)
 }
 
-/// 声明块解析器（配合 cssparser RuleBodyParser 驱动）。
+/// Declaration block parser (driven together with cssparser's
+/// RuleBodyParser).
 #[derive(Default)]
 pub struct DeclarationBlockParser {
-    /// 解析期容错警告（行:列 + 文本）。
+    /// Fault-tolerance warnings collected during parsing (line:column +
+    /// text).
     pub report: ParseReport,
     block: DeclarationBlock,
 }
@@ -362,7 +390,8 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationBlockParser {
     }
 }
 
-/// 值之后只允许可选的 `!important`，然后必须耗尽。返回 important 标记。
+/// After the value, only an optional `!important` is allowed, then the
+/// input must be exhausted. Returns the important flag.
 fn finish_tail(
     input: &mut Parser<'_>,
 ) -> Result<bool, cssparser::ParseError<cssparser::BasicParseError>> {
@@ -373,9 +402,11 @@ fn finish_tail(
     Ok(important)
 }
 
-/// B1：试探值是否恰为 CSS 宽关键字单 ident（css-values-4）。只消费
-/// ident token；尾部（`!important` 或耗尽）由调用方 finish_tail 处理。
-/// try_parse 失败自动回退输入位置（非宽关键字值走原路径）。
+/// B1: probes whether the value is exactly a CSS wide-keyword single ident
+/// (css-values-4). Only the ident token is consumed; the tail (`!important`
+/// or exhaustion) is handled by the caller's finish_tail. On failure
+/// try_parse automatically restores the input position (non-wide-keyword
+/// values take the original path).
 pub(crate) fn try_parse_wide_keyword(input: &mut Parser<'_>) -> Option<WideKeyword> {
     input
         .try_parse(
@@ -397,9 +428,11 @@ pub(crate) fn try_parse_wide_keyword(input: &mut Parser<'_>) -> Option<WideKeywo
         .ok()
 }
 
-/// B1-3：整 token 串是否恰为一个 CSS 宽关键字（无其余成分；大小写不敏）。
-/// custom property 终值判定用（computed.rs）——宽关键字在 custom property
-/// 自身生效而非作为文本被 var() 代换（css-variables-1 §3）。
+/// B1-3: whether the whole token string is exactly one CSS wide keyword (no
+/// other components; case-insensitive). Used for the final-value decision of
+/// custom properties (computed.rs) — wide keywords take effect on the custom
+/// property itself rather than being substituted as text by var()
+/// (css-variables-1 §3).
 pub(crate) fn whole_value_wide_keyword(text: &str) -> Option<WideKeyword> {
     let mut input = cssparser::Parser::new(text);
     let kw = try_parse_wide_keyword(&mut input)?;
@@ -429,22 +462,26 @@ impl<'i> cssparser::RuleBodyItemParser<'i, (), ()> for DeclarationBlockParser {
     }
 }
 
-/// 便捷入口：解析 style 属性文本（内联声明；容错同块解析）。
+/// Convenience entry point: parses style attribute text (inline
+/// declarations; fault tolerance identical to block parsing).
 pub fn parse_inline_declarations(source: &str) -> (DeclarationBlock, ParseReport) {
     let mut input = cssparser::Parser::new(source);
     parse_declaration_block(&mut input)
 }
 
 impl DeclarationBlockParser {
-    /// B3：取走累积声明块（嵌套体单声明直调 parse_value 后回收用——
-    /// block 字段私有，供 stylesheet.rs 嵌套隐式规则路径合并）。
+    /// B3: takes the accumulated declaration block (used to reclaim the
+    /// block after a nested body's single declaration calls parse_value
+    /// directly — the block field is private; consumed by stylesheet.rs to
+    /// merge the nested implicit-rule path).
     pub(crate) fn take_block(&mut self) -> DeclarationBlock {
         std::mem::take(&mut self.block)
     }
 }
 
-/// 解析声明列表（内联 style 或规则体）。返回声明块 + 容错报告。
-/// `p` 应定位在声明列表起点。
+/// Parses a declaration list (inline style or rule body). Returns the
+/// declaration block plus the fault-tolerance report. `p` should be
+/// positioned at the start of the declaration list.
 pub fn parse_declaration_block(p: &mut Parser<'_>) -> (DeclarationBlock, ParseReport) {
     let mut block_parser = DeclarationBlockParser::default();
     {
@@ -458,8 +495,9 @@ pub fn parse_declaration_block(p: &mut Parser<'_>) -> (DeclarationBlock, ParseRe
 
 // ---------- 简写展开（MVP 子集） ----------
 
-/// 支持的简写名（FEATURES.md；P9-2（ADR-0040）补齐 font/grid/grid-template，
-/// background 已由 F3b（ADR-0024）落地）。
+/// Supported shorthand names (FEATURES.md; P9-2 (ADR-0040) added
+/// font/grid/grid-template, and background had already landed via F3b
+/// (ADR-0024)).
 fn shorthand_exists(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -518,10 +556,13 @@ fn shorthand_exists(name: &str) -> bool {
     )
 }
 
-/// 简写 → 长手 PropertyId 全集（var() 简写挂起声明的落点）。锁测试
-/// shorthand_longhands_match_expand 用代表值展开防两表漂移；animation/
-/// flex-flow 展开可输出子集（未指定长手不重置=既有偏差），挂起路径下
-/// 子集成员取不到值 → IACVT 归初始，行为同既有子集语义。
+/// Shorthand → full set of longhand PropertyIds (the landing targets of
+/// var() shorthand pending declarations). The lock test
+/// shorthand_longhands_match_expand expands representative values to keep
+/// the two tables from drifting; animation/flex-flow expansion may emit a
+/// subset (unspecified longhands are not reset = existing deviation), and
+/// in the pending path a subset member without a value → IACVT to initial,
+/// matching the existing subset semantics.
 pub(crate) fn shorthand_longhands(name: &str) -> Option<Vec<PropertyId>> {
     use PropertyId as P;
     Some(match name.to_ascii_lowercase().as_str() {
@@ -722,8 +763,9 @@ fn as_len(v: DeclValue) -> Option<LengthPercentage> {
     }
 }
 
-/// 逐个收集 1–4 个分量并按 CSS TRBL 规则展开：
-/// 1→全同；2→[a,b,a,b]；3→[a,b,c,b]；4→原序（top right bottom left）。
+/// Collects 1–4 components one at a time and expands them per the CSS TRBL
+/// rules: 1→all identical; 2→[a,b,a,b]; 3→[a,b,c,b]; 4→original order (top
+/// right bottom left).
 fn collect_sides<T: Clone, F>(p: &mut Parser<'_>, mut f: F) -> ValResult<[T; 4]>
 where
     F: FnMut(&mut Parser<'_>) -> ValResult<T>,
@@ -738,8 +780,9 @@ where
     expand_sides(&vals).ok_or_else(|| p.new_error_for_next_token())
 }
 
-/// border-radius 分量组（第五批⑪椭圆圆角）：1~4 个 lp；遇 `/` 即止
-/// （状态回卷前瞻，`/` 留待斜杠检测消费）。
+/// border-radius component group (batch 5⑪ elliptical corners): 1–4 lp
+/// values; stops at `/` (lookahead with state rollback — the `/` is left
+/// for the slash detection to consume).
 fn collect_radius_sides(p: &mut Parser<'_>) -> ValResult<[LengthPercentage; 4]> {
     let mut vals: SmallVec<[LengthPercentage; 4]> = SmallVec::new();
     loop {
@@ -771,7 +814,8 @@ fn sides_decls(ids: [PropertyId; 4], vals: [DeclValue; 4]) -> Vec<(PropertyId, D
     ids.into_iter().zip(vals).collect()
 }
 
-/// 斜杠分隔符消费（grid 放置简写 / grid-area 用；失败 = 声明无效）。
+/// Consumes a slash separator (used by the grid placement shorthands /
+/// grid-area; failure = invalid declaration).
 fn expect_slash(p: &mut Parser<'_>) -> ValResult<()> {
     match p.next() {
         Ok(Token::Delim(d)) if *d == '/' => Ok(()),
@@ -779,10 +823,11 @@ fn expect_slash(p: &mut Parser<'_>) -> ValResult<()> {
     }
 }
 
-/// 边框简写部件（`border` 与四向 `border-top` 等，P4 ADR-0037）：
-/// `<'border-width'> || <'border-style'> || <'border-color'>` 任意顺序
-/// 贪心，缺省部件回初始——width medium、style none、color currentcolor
-/// （css-backgrounds-3 §4.1）。
+/// Border shorthand parts (`border` and the four directional
+/// `border-top` etc., P4 ADR-0037):
+/// `<'border-width'> || <'border-style'> || <'border-color'>` in any order,
+/// greedy; missing parts fall back to their initial values — width medium,
+/// style none, color currentcolor (css-backgrounds-3 §4.1).
 fn border_shorthand_parts(p: &mut Parser<'_>) -> ValResult<(DeclValue, DeclValue, DeclValue)> {
     let mut width: Option<DeclValue> = None;
     let mut style: Option<DeclValue> = None;
@@ -814,8 +859,10 @@ fn border_shorthand_parts(p: &mut Parser<'_>) -> ValResult<(DeclValue, DeclValue
     Ok((width, style, color))
 }
 
-/// 简写展开。名字非简写 → Ok(None)；文法错误 → Err（上层容错丢弃）。
-/// pub(crate)：computed.rs 在 var() 简写代换后复用（阶段2②）。
+/// Shorthand expansion. A name that is not a shorthand → Ok(None); a
+/// grammar error → Err (dropped fault-tolerantly by the caller).
+/// pub(crate): computed.rs reuses it after var() shorthand substitution
+/// (phase 2②).
 pub(crate) fn expand_shorthand(
     name: &str,
     p: &mut Parser<'_>,

@@ -1,9 +1,13 @@
-//! 样式表：规则解析（选择器预lude + 声明块）与 @media / @container 子集。
+//! Stylesheets: rule parsing (selector prelude + declaration block) and the
+//! @media / @container subsets.
 //!
-//! 支持：顶层规则、`@media`（一层嵌套；screen/all 类型；min-/max-width/
-//! height、prefers-color-scheme、prefers-reduced-motion）、`@container`
-//!（阶段2③：有名/无名容器、尺寸特性旧形与范围形、orientation；条件内
-//! not/or 未做，解析即告警跳过）。其余 at-rule 按容错跳过并告警。
+//! Supported: top-level rules, `@media` (one level of nesting; screen/all
+//! types; min-/max-width/height, prefers-color-scheme,
+//! prefers-reduced-motion), and `@container` (phase 2③: named/unnamed
+//! containers, legacy and range forms of size features, orientation; not/or
+//! inside conditions is not implemented and is skipped with a warning at
+//! parse time). All other at-rules are skipped fault-tolerantly with a
+//! warning.
 
 use crate::cascade::ContainerCtx;
 use crate::css::decl::{
@@ -15,210 +19,248 @@ use crate::error::ParseReport;
 use crate::selector::{StyleSelectorList, parse_selector_list};
 use cssparser::{BasicParseError, ParseError, Parser, ToCss, Token};
 
-/// E @counter-style：登记规则与解析（css-counter-styles-3 子集）。经
-/// `#[path]` 挂为 stylesheet 子模块（css/mod.rs 并行切片禁改——模块路径
-/// 实为 `crate::css::stylesheet::counter_style`）。
+/// E @counter-style: rule registration and parsing (css-counter-styles-3
+/// subset). Mounted as a stylesheet submodule via `#[path]` (css/mod.rs
+/// parallel slices must not be modified — the module path is actually
+/// `crate::css::stylesheet::counter_style`).
 #[path = "counter_style.rs"]
 pub mod counter_style;
 
-/// E 计数器样式格式化（css-counter-styles-3 §2 生成算法 + §6 内置子集）：
-/// engine.rs eval_pseudo_content 的 counter()/counters() 经此按样式名
-/// 渲染（`#[path]` 同上，模块路径实为
-/// `crate::css::stylesheet::counter_format`）。
+/// E counter style formatting (css-counter-styles-3 §2 generation algorithm
+/// + §6 built-in subset): counter()/counters() from engine.rs
+/// eval_pseudo_content are rendered here by style name (`#[path]` as above;
+/// the module path is actually `crate::css::stylesheet::counter_format`).
 #[path = "counter_format.rs"]
 pub mod counter_format;
 
 use self::counter_style::CounterStyleRule;
 
-/// 单条样式规则。
+/// A single style rule.
 #[derive(Debug, Clone)]
 pub struct Rule {
-    /// 选择器列表（已预解析）。
+    /// Selector list (pre-parsed).
     pub selectors: StyleSelectorList,
-    /// 规则源顺序（级联排序的次级键）。
+    /// Rule source order (secondary key for cascade sorting).
     pub order: u32,
-    /// 声明块（属性 → 值）。
+    /// Declaration block (property → value).
     pub declarations: crate::css::decl::DeclarationBlock,
-    /// 所属 @media 条件；None = 无条件。
+    /// The @media condition this rule belongs to; None = unconditional.
     pub media: Option<MediaQuery>,
-    /// 所属 @container 条件段列表（段间 OR）；None = 无条件。
+    /// The @container condition segment list this rule belongs to
+    /// (segments OR'd together); None = unconditional.
     pub container: Option<Vec<ContainerCondition>>,
-    /// B1 @layer：层序数（LayerRegistry 先现序前序位；u32::MAX = 未分层）。
-    /// important 轴由级联比较时反转（css-cascade-5 层序反转）。
+    /// B1 @layer: layer rank (LayerRegistry first-appearance pre-order;
+    /// u32::MAX = unlayered). The important axis is reversed during cascade
+    /// comparison (css-cascade-5 layer order reversal).
     pub layer_rank: u32,
 }
 
-/// 解析完成的样式表。
+/// A fully parsed stylesheet.
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
-    /// 样式规则列表（源顺序）。
+    /// Style rules (source order).
     pub rules: Vec<Rule>,
-    /// @keyframes 规则列表。
+    /// @keyframes rules.
     pub keyframes: Vec<KeyframesRule>,
-    /// 解析期告警与容错丢弃记录。
+    /// Parse-time warnings and fault-tolerant drop records.
     pub report: ParseReport,
-    /// 表内存在 @container 规则（engine 帧内收敛快路径判据，解析后单源导出）。
+    /// The sheet contains @container rules (the engine's criterion for the
+    /// intra-frame settle fast path; exported from a single source after
+    /// parsing).
     pub has_container_rules: bool,
-    /// B3：表内存在 `:has()` 相对选择器规则（engine 变更类失效升级全量
-    /// 重样式的判据——相对选择器命中依赖后代/兄弟结构，增量子树 restyle
-    /// 不感知远端变化；解析后单源导出）。
+    /// B3: the sheet contains rules with `:has()` relative selectors (the
+    /// engine's criterion for upgrading change-class invalidation to a full
+    /// restyle — relative selector matching depends on descendant/sibling
+    /// structure, so incremental subtree restyle does not notice remote
+    /// changes; exported from a single source after parsing).
     pub has_relative_selectors: bool,
-    /// C1（ADR-0015）：任一规则选择器含伪元素（::before/::after）——引擎
-    /// materialize_pseudos 实体化判据。
+    /// C1 (ADR-0015): some rule's selectors contain a pseudo-element
+    /// (::before/::after) — the engine's materialize_pseudos
+    /// materialization criterion.
     pub has_pseudo_rules: bool,
-    /// C4（ADR-0018）：任一规则的任一选择器含 ::selection 伪元素分量
-    /// （非盒生成通道规则判据；不触发 materialize_pseudos）。
+    /// C4 (ADR-0018): some rule has a selector containing a ::selection
+    /// pseudo-element component (non-box-generation channel criterion; does
+    /// not trigger materialize_pseudos).
     pub has_selection_rules: bool,
-    /// C4（ADR-0018）：任一规则的任一选择器含 ::placeholder 伪元素分量。
+    /// C4 (ADR-0018): some rule has a selector containing a ::placeholder
+    /// pseudo-element component.
     pub has_placeholder_rules: bool,
-    /// B2：顶层 @import 指令（出现序）；拼接在引擎附着期 resolve_imports 完成。
+    /// B2: top-level @import directives (in order of appearance); splicing
+    /// happens in the engine's attach phase via resolve_imports.
     pub imports: Vec<ImportDirective>,
-    /// B2：本表层树（解析期登记；附着期并入文档层树并重写 rank）。
+    /// B2: this sheet's layer tree (registered at parse time; merged into
+    /// the document layer tree at attach time with rank rewritten).
     pub layers: LayerRegistry,
-    /// B4 @property：注册规则（解析期收集；引擎附着期按源序并入文档级
-    /// 注册表 registered_props——同名后者胜）。
+    /// B4 @property: registration rules (collected at parse time; merged in
+    /// source order into the document-level registered_props registry at
+    /// the engine's attach phase — later rules win on name conflicts).
     pub property_rules: Vec<crate::css::property_rule::PropertyRule>,
-    /// F3d @font-face（ADR-0026 D4）：登记规则（解析期收集；导入拼接期
-    /// 子表并入；引擎附着期按 user→主表→附加表序并入文档级登记表
-    /// font_faces——同族后规则胜）。
+    /// F3d @font-face (ADR-0026 D4): registration rules (collected at parse
+    /// time; sub-sheets merged during import splicing; merged in
+    /// user→main-sheet→extra-sheet order into the document-level font_faces
+    /// registry at the engine's attach phase — later rules win within the
+    /// same family).
     pub font_faces: Vec<FontFaceRule>,
-    /// E @counter-style（css-counter-styles-3 子集）：登记规则（源顺序
-    /// Vec；查询 `counter_style()` 同名后写胜——与 @property/@font-face
-    /// 登记模式一致）。仅解析/存储，不参与计数器渲染。
+    /// E @counter-style (css-counter-styles-3 subset): registration rules
+    /// (source-order Vec; the `counter_style()` lookup lets the last rule
+    /// with the same name win — consistent with the @property/@font-face
+    /// registration pattern). Parsed/stored only; does not participate in
+    /// counter rendering.
     pub counter_styles: Vec<CounterStyleRule>,
 }
 
-/// B2：@import prelude 数据（url + 修饰子句）。
+/// B2: @import prelude data (url + modifier clauses).
 #[derive(Debug, Clone)]
 pub struct ImportPrelude {
-    /// 导入目标（字符串或 url() 内文）。
+    /// Import target (string or url() contents).
     pub url: String,
-    /// None = 无 layer 子句；Some(空) = 匿名层；Some(路径) = 指定层前缀。
+    /// None = no layer clause; Some(empty) = anonymous layer; Some(path) =
+    /// named layer prefix.
     pub layer: Option<Vec<String>>,
-    /// 尾随 media query（None = 未写 = all）。
+    /// Trailing media query (None = absent = all).
     pub media: Option<MediaQuery>,
-    /// supports() 子句解析期求值结果（false = 指令不生效，静默丢弃）。
+    /// Parse-time evaluation of the supports() clause (false = the
+    /// directive is inert and silently dropped).
     pub supported: bool,
 }
 
-/// B2：顶层 @import 指令（拼接锚点 = order，与 Rule.order 同尺度）。
+/// B2: top-level @import directive (splice anchor = order, on the same
+/// scale as Rule.order).
 #[derive(Debug, Clone)]
 pub struct ImportDirective {
-    /// 导入目标（字符串或 url() 内文）。
+    /// Import target (string or url() contents).
     pub url: String,
-    /// None = 无层；Some(空) = 匿名层（rule_without_block 期已固化唯一路径）；
-    /// Some(路径) = 指定层前缀（子表规则 current_layer 之前缀）。
+    /// None = no layer; Some(empty) = anonymous layer (the unique path was
+    /// fixed during rule_without_block); Some(path) = named layer prefix
+    /// (prepended to the sub-sheet rules' current_layer).
     pub layer: Option<Vec<String>>,
-    /// 指令级 media query（拼接期与规则 media 合取求值）。
+    /// Directive-level media query (ANDed with rule media at splice time).
     pub media: Option<MediaQuery>,
-    /// 指令出现位次（级联源序锚点；附着期按此与规则流交错拼接）。
+    /// Directive occurrence index (cascade source-order anchor; rules are
+    /// interleaved with the rule stream by this value at attach time).
     pub order: u32,
 }
 
 // ---------- @keyframes（第五批⑰） ----------
 
-/// @keyframes 规则：动画名 + 帧序表（offset 升序由采样端排序消费）。
+/// @keyframes rule: animation name + frame table (frames are sorted by
+/// ascending offset by the sampling side when consumed).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyframesRule {
-    /// 动画名（animation-name 引用）。
+    /// Animation name (referenced by animation-name).
     pub name: String,
-    /// 帧序列（offset 升序由采样端排序）。
+    /// Frame sequence (sorted by ascending offset by the sampling side).
     pub frames: Vec<Keyframe>,
 }
 
-/// 单帧：offset ∈ \[0,1\]（from=0、to=1、百分比/100）+ 声明块。
+/// A single frame: offset ∈ \[0,1\] (from=0, to=1, percentage/100) plus a
+/// declaration block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keyframe {
-    /// 帧位置 0.0–1.0（from=0、to=1、百分比/100）。
+    /// Frame position 0.0–1.0 (from=0, to=1, percentage/100).
     pub offset: f32,
-    /// 该帧声明块。
+    /// This frame's declaration block.
     pub declarations: DeclarationBlock,
 }
 
 // ---------- @font-face（F3d，ADR-0026 D4） ----------
 
-/// @font-face src 描述符单个源项（F3d）。
+/// A single source item of the @font-face src descriptor (F3d).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct FontFaceSource {
-    /// 源种类。
+    /// Source kind.
     pub kind: FontFaceSourceKind,
-    /// 可选 format(...) 提示（引号内容/ident 原样；未写 = None）。
+    /// Optional format(...) hint (quoted contents/ident verbatim; absent =
+    /// None).
     pub format: Option<String>,
 }
 
-/// @font-face 源种类。字体字节仍由宿主 add_font 推送（ADR-0026 契约不变）：
-/// url 文本 = 宿主匹配资源的注册表键，引擎不取源。
+/// @font-face source kind. Font bytes are still pushed by the host's
+/// add_font (the ADR-0026 contract is unchanged): the url text is the
+/// registry key the host matches the resource by; the engine never fetches
+/// sources itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FontFaceSourceKind {
-    /// url(...) 引号参数或 `<url>` 未引号裸 token（原文）。
+    /// The url(...) quoted argument or the unquoted raw `<url>` token
+    /// (verbatim).
     Url(String),
-    /// local(...) 本机字体名（ident 序列/引号串，空格拼接）。
+    /// The local(...) local font name (ident sequence/quoted string,
+    /// space-joined).
     Local(String),
 }
 
-/// @font-face 规则（F3d，ADR-0026 D4）：描述符登记表，供宿主查询映射字体
-/// 资源。缺 font-family 或 src = 规则无效（warn 丢弃）；未知描述符宽容
-/// 跳过（css-fonts-4 前向兼容）；已知描述符值非法 = 该描述符忽略、规则
-/// 存活（登记契约：只丢结构性缺失，不因可选描述符语法丢弃整规则）。
+/// @font-face rule (F3d, ADR-0026 D4): descriptor registry for the host to
+/// look up and map font resources. Missing font-family or src = invalid
+/// rule (dropped with a warn); unknown descriptors are leniently skipped
+/// (css-fonts-4 forward compatibility); an invalid value for a known
+/// descriptor = that descriptor is ignored and the rule survives
+/// (registration contract: only structural omissions drop the rule, never
+/// the syntax of an optional descriptor).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct FontFaceRule {
-    /// font-family 描述符（引用名；ident 序列以空格拼接；空串 = 缺失）。
+    /// font-family descriptor (reference name; ident sequence joined with
+    /// spaces; empty string = missing).
     pub family: String,
-    /// src 描述符源列表（空 = 缺失；首个可解析源 = 消费方采用项）。
+    /// src descriptor source list (empty = missing; the first parseable
+    /// source is what the consumer adopts).
     pub sources: Vec<FontFaceSource>,
-    /// font-style 描述符（小写原样："italic"/"oblique"/"oblique 14deg"；
-    /// None = 未写 = normal）。
+    /// font-style descriptor (lowercase verbatim:
+    /// "italic"/"oblique"/"oblique 14deg"; None = absent = normal).
     pub style: Option<String>,
-    /// font-weight 描述符区间 \[min,max\]（normal=400、bold=700；单值 =
-    /// 等值区间；None = 未写）。
+    /// font-weight descriptor range \[min,max\] (normal=400, bold=700; a
+    /// single value = an equal range; None = absent).
     pub weight: Option<(f32, f32)>,
-    /// font-stretch 描述符归一百分比（50–200；关键字映射、百分比钳制；
-    /// None = 未写 = 100）。
+    /// font-stretch descriptor normalized percentage (50–200; keyword
+    /// mapping, percentages clamped; None = absent = 100).
     pub stretch: Option<f32>,
-    /// font-display 描述符（小写原样 auto|block|swap|fallback|optional；
-    /// None = 未写）。
+    /// font-display descriptor (lowercase verbatim
+    /// auto|block|swap|fallback|optional; None = absent).
     pub display: Option<String>,
-    /// unicode-range 描述符区间列表（含端点；空 = 未写 = 全域）。
+    /// unicode-range descriptor range list (endpoints inclusive; empty =
+    /// absent = full range).
     pub unicode_ranges: Vec<(u32, u32)>,
-    /// font-feature-settings 描述符（tag,值）对（normal = 空表）。
+    /// font-feature-settings descriptor (tag,value) pairs (normal = empty).
     pub features: Vec<([u8; 4], u16)>,
-    /// font-variation-settings 描述符（tag,值）对（normal = 空表）。
+    /// font-variation-settings descriptor (tag,value) pairs (normal =
+    /// empty).
     pub variations: Vec<([u8; 4], f32)>,
-    /// ascent-override 描述符：`normal | <percentage>`（css-fonts-4 §4.6；
-    /// None = 未写 = normal；Some = 百分比 /100 存储）。
+    /// ascent-override descriptor: `normal | <percentage>` (css-fonts-4
+    /// §4.6; None = absent = normal; Some = stored as percentage/100).
     pub ascent_override: Option<f32>,
-    /// descent-override 描述符：`normal | <percentage>`（None = 未写）。
+    /// descent-override descriptor: `normal | <percentage>` (None =
+    /// absent).
     pub descent_override: Option<f32>,
-    /// line-gap-override 描述符：`normal | <percentage>`（None = 未写）。
+    /// line-gap-override descriptor: `normal | <percentage>` (None =
+    /// absent).
     pub line_gap_override: Option<f32>,
 }
 
 // ---------- @media 子集 ----------
 
-/// 配色方案偏好。
+/// Color scheme preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ColorScheme {
-    /// 浅色（prefers-color-scheme: light）。
+    /// Light (prefers-color-scheme: light).
     Light,
-    /// 深色（prefers-color-scheme: dark）。
+    /// Dark (prefers-color-scheme: dark).
     Dark,
 }
 
-/// 媒体特性方向（A7：orientation）。
+/// Media feature orientation (A7: orientation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Orientation {
-    /// 宽 ≥ 高。
+    /// Width ≥ height.
     Landscape,
-    /// 宽 < 高。
+    /// Width < height.
     Portrait,
 }
 
-/// L4 range 比较算子（A7）。
+/// L4 range comparison operator (A7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RangeOp {
@@ -232,7 +274,7 @@ pub enum RangeOp {
     Ge,
 }
 
-/// L4 range 特性轴（A7）。
+/// L4 range feature axis (A7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RangeName {
@@ -240,22 +282,23 @@ pub enum RangeName {
     Width,
     /// height
     Height,
-    /// aspect-ratio（w/h）
+    /// aspect-ratio (w/h)
     AspectRatio,
-    /// resolution（dppx）
+    /// resolution (dppx)
     Resolution,
 }
 
-/// L4 range 条件（A7）：`(400px <= width)`、`(width >= 400px)`、
-/// `(400px <= width <= 800px)`（双比较 AND）。
+/// L4 range condition (A7): `(400px <= width)`, `(width >= 400px)`,
+/// `(400px <= width <= 800px)` (double comparison ANDed).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct RangeCond {
-    /// 特性轴。
+    /// Feature axis.
     pub name: RangeName,
-    /// 左值侧 `<value> <op>`（值与特性间的比较符）。
+    /// Left-value side `<value> <op>` (the operator between the value and
+    /// the feature).
     pub lower: Option<(f32, RangeOp)>,
-    /// 右值侧 `<op> <value>`。
+    /// Right-value side `<op> <value>`.
     pub upper: Option<(RangeOp, f32)>,
 }
 
@@ -282,7 +325,7 @@ fn range_cmp(op: RangeOp, a: f32, b: f32) -> bool {
     }
 }
 
-/// 视口纵横比（w/h；h=0 防御为 0）。
+/// Viewport aspect ratio (w/h; h=0 defensively yields 0).
 fn media_aspect(env: &MediaEnv) -> f32 {
     if env.viewport_h != 0.0 {
         env.viewport_w / env.viewport_h
@@ -291,88 +334,93 @@ fn media_aspect(env: &MediaEnv) -> f32 {
     }
 }
 
-/// 浮点相等容差（媒体特性等值比较）。
+/// Floating-point equality tolerance (media feature equality comparison).
 fn feq(a: f32, b: f32) -> bool {
     (a - b).abs() < 1e-6
 }
 
-/// 单个媒体特性（MVP 子集 + A7 L4 range/新特性）。
+/// A single media feature (MVP subset + A7 L4 range/new features).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum MediaFeature {
-    /// `(width: v)`，v 为 px。
+    /// `(width: v)`, v in px.
     Width(f32),
-    /// `(min-width: v)`，v 为 px。
+    /// `(min-width: v)`, v in px.
     MinWidth(f32),
-    /// `(max-width: v)`，v 为 px。
+    /// `(max-width: v)`, v in px.
     MaxWidth(f32),
-    /// `(height: v)`，v 为 px。
+    /// `(height: v)`, v in px.
     Height(f32),
-    /// `(min-height: v)`，v 为 px。
+    /// `(min-height: v)`, v in px.
     MinHeight(f32),
-    /// `(max-height: v)`，v 为 px。
+    /// `(max-height: v)`, v in px.
     MaxHeight(f32),
-    /// `(prefers-color-scheme: …)`。
+    /// `(prefers-color-scheme: …)`.
     PrefersColorScheme(ColorScheme),
-    /// `(prefers-reduced-motion: …)`，true = reduce。
+    /// `(prefers-reduced-motion: …)`, true = reduce.
     PrefersReducedMotion(bool),
-    /// 指针精度（第五批⑱）：主输入设备。
+    /// Pointer precision (batch 5⑱): primary input device.
     Pointer(PointerKind),
-    /// 主输入设备是否支持悬停。
+    /// Whether the primary input device supports hover.
     Hover(bool),
-    /// 任意输入设备的指针精度（与 pointer 独立评估）。
+    /// Pointer precision of any input device (evaluated independently of
+    /// pointer).
     AnyPointer(PointerKind),
-    /// 任意输入设备是否支持悬停。
+    /// Whether any input device supports hover.
     AnyHover(bool),
-    /// L4 range 语法（A7）：`(width >= 400px)` 等。
+    /// L4 range syntax (A7): `(width >= 400px)` and the like.
     Range(RangeCond),
-    /// `(orientation: landscape | portrait)`（A7）。
+    /// `(orientation: landscape | portrait)` (A7).
     Orientation(Orientation),
-    /// `(aspect-ratio: w/h)`（A7）。
+    /// `(aspect-ratio: w/h)` (A7).
     AspectRatio(f32),
-    /// `(min-aspect-ratio: w/h)`（A7）。
+    /// `(min-aspect-ratio: w/h)` (A7).
     MinAspectRatio(f32),
-    /// `(max-aspect-ratio: w/h)`（A7）。
+    /// `(max-aspect-ratio: w/h)` (A7).
     MaxAspectRatio(f32),
-    /// `(resolution: v)`（A7，dppx）。
+    /// `(resolution: v)` (A7, dppx).
     Resolution(f32),
-    /// `(min-resolution: v)`（A7，dppx）。
+    /// `(min-resolution: v)` (A7, dppx).
     MinResolution(f32),
-    /// `(max-resolution: v)`（A7，dppx）。
+    /// `(max-resolution: v)` (A7, dppx).
     MaxResolution(f32),
-    /// 布尔语境 `(hover)`（A7）。
+    /// Boolean-context `(hover)` (A7).
     HoverBool(bool),
-    /// 布尔语境 `(any-hover)`（A7）。
+    /// Boolean-context `(any-hover)` (A7).
     AnyHoverBool(bool),
-    /// 布尔语境 `(pointer)`（A7）：true = 有指针。
+    /// Boolean-context `(pointer)` (A7): true = has a pointer.
     PointerBool(bool),
-    /// `(not <feature>)`（A7 布尔语境取反）。
+    /// `(not <feature>)` (A7 boolean-context negation).
     Not(Box<MediaFeature>),
 }
 
-/// 指针精度（第五批⑱媒体查询扩展：pointer/any-pointer）。
+/// Pointer precision (batch 5⑱ media query extension: pointer/any-pointer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PointerKind {
-    /// 无指针设备（主输入无指向能力）。
+    /// No pointing device (primary input has no pointing capability).
     None,
-    /// 粗指针（触屏等）。
+    /// Coarse pointer (touch screens etc.).
     Coarse,
-    /// 细指针（鼠标、触控笔等）。
+    /// Fine pointer (mouse, stylus, etc.).
     Fine,
 }
 
-/// 媒体查询：可选类型段 + AND 连接的特性列表，可整体取反。
+/// Media query: optional type segment plus an AND-connected feature list;
+/// the whole query can be negated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaQuery {
-    /// `not` 前缀。
+    /// `not` prefix.
     pub negate: bool,
-    /// 类型段求值结果（screen/all → true；print 等 → false）；None = 未写。
+    /// Type segment evaluation result (screen/all → true; print etc. →
+    /// false); None = absent.
     pub media_type: Option<bool>,
-    /// AND 连接的媒体特性列表。
+    /// Media features joined by AND.
     pub features: Vec<MediaFeature>,
-    /// B2：合取元（嵌套 @media 与 @import media 的 AND 组合）。各元独立
-    /// 求值（含自身 negate），全体 AND 后再被本层 negate 反转。
+    /// B2: conjuncts (AND combination of a nested @media with an @import
+    /// media). Each conjunct is evaluated independently (including its own
+    /// negate); after all are ANDed the result is flipped by this level's
+    /// negate.
     pub conjoin: Vec<MediaQuery>,
 }
 
@@ -415,7 +463,8 @@ impl MediaFeature {
 }
 
 impl MediaQuery {
-    /// 对环境求值。类型段为 false 或任一特性为假（含合取元）→ 整体不适用。
+    /// Evaluate against the environment. A false type segment or any false
+    /// feature (including conjuncts) → the query does not apply overall.
     pub fn eval(&self, env: &MediaEnv) -> bool {
         let applies = self.media_type.unwrap_or(true)
             && self.features.iter().all(|f| f.eval(env))
@@ -424,8 +473,10 @@ impl MediaQuery {
     }
 }
 
-/// B2：media 合取（@import 指令查询 ∩ 规则查询；嵌套 @media 同用——
-/// 修正旧"内层覆盖外层"为真 AND）。任一 None 透传；双 Some = 合取元追加。
+/// B2: media conjunction (@import directive query ∩ rule query; nested
+/// @media uses the same path — replaces the old "inner overrides outer"
+/// behavior with a true AND). Either side None passes through; both Some =
+/// a conjunct is appended.
 pub(crate) fn and_media(a: Option<MediaQuery>, b: Option<MediaQuery>) -> Option<MediaQuery> {
     match (a, b) {
         (None, x) | (x, None) => x,
@@ -436,31 +487,36 @@ pub(crate) fn and_media(a: Option<MediaQuery>, b: Option<MediaQuery>) -> Option<
     }
 }
 
-/// 媒体环境（宿主每帧推送）。
+/// Media environment (pushed by the host every frame).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MediaEnv {
-    /// 视口宽度 px。
+    /// Viewport width in px.
     pub viewport_w: f32,
-    /// 视口高度 px。
+    /// Viewport height in px.
     pub viewport_h: f32,
-    /// 是否深色配色方案（prefers-color-scheme）。
+    /// Whether the dark color scheme applies (prefers-color-scheme).
     pub dark: bool,
-    /// 是否偏好减少动态效果（prefers-reduced-motion）。
+    /// Whether reduced motion is preferred (prefers-reduced-motion).
     pub reduced_motion: bool,
-    /// 主输入设备指针精度（第五批⑱）。
+    /// Primary input device pointer precision (batch 5⑱).
     pub pointer: PointerKind,
-    /// 主输入设备是否支持悬停。
+    /// Whether the primary input device supports hover.
     pub hover: bool,
-    /// 任意输入设备指针精度。
+    /// Any input device pointer precision.
     pub any_pointer: PointerKind,
-    /// 任意输入设备是否支持悬停。
+    /// Whether any input device supports hover.
     pub any_hover: bool,
-    /// 设备分辨率（A7：dppx = 设备像素/CSS 像素；resolution 媒体特性）。
+    /// Device resolution (A7: dppx = device pixels per CSS pixel; the
+    /// resolution media feature).
     pub resolution: f32,
-    /// 根字号（rem 基准；引擎 map_env 统一按文档根计算字号填充，styles
-    /// 缺席/根自身 font-size 求值时回落初始值 16.0——CSS Values：rem 于
-    /// 根元素 font-size 按初始值解析）。媒体/容器查询**解析期**长度换算
-    /// 不经此字段（文档无关，恒按 16px 初始字号，见 parse_px_len）。
+    /// Root font size (rem basis; the engine's map_env fills this uniformly
+    /// from the document root's computed font size, falling back to the
+    /// initial 16.0 when styles are absent or when evaluating the root's
+    /// own font-size — CSS Values: rem resolves against the initial value
+    /// in the root element's font-size). Media/container query
+    /// **parse-time** length conversion does not go through this field
+    /// (document-independent, always the 16px initial size; see
+    /// parse_px_len).
     pub rem: f32,
 }
 
@@ -481,9 +537,10 @@ impl Default for MediaEnv {
     }
 }
 
-/// 解析 @media 预lude（delimited 到块前）。内部错误统一走
-/// `ParseError<BasicParseError>`（与值解析同一形态），在 at-rule 边界
-/// 收敛为 trait 的 `ParseError<()>`。
+/// Parse an @media prelude (delimited up to the block). Internal errors use
+/// `ParseError<BasicParseError>` uniformly (the same shape as value
+/// parsing) and collapse into the trait's `ParseError<()>` at the at-rule
+/// boundary.
 fn parse_media_query(p: &mut Parser<'_>) -> Result<MediaQuery, ParseError<BasicParseError>> {
     let mut negate = false;
     let mut media_type: Option<bool> = None;
@@ -565,15 +622,16 @@ fn parse_media_query(p: &mut Parser<'_>) -> Result<MediaQuery, ParseError<BasicP
     })
 }
 
-/// 解析 `(feature: value)`（负责消费 '('）。
+/// Parse `(feature: value)` (responsible for consuming '(').
 fn parse_media_feature(p: &mut Parser<'_>) -> Result<MediaFeature, ParseError<BasicParseError>> {
     // parse_nested_block 要求「刚消费块 token」——此处负责消费 '('
     p.expect_parenthesis_block()?;
     parse_feature_body(p)
 }
 
-/// 块体解析（'(' 已消费或由 try_parse 提交后进入）。A7 分派：值在前
-/// range 形 / not 布尔 / 特性名（旧 ':' 形、L4 range 右值形、布尔语境）。
+/// Parse the block body (entered after '(' is consumed or committed via
+/// try_parse). A7 dispatch: value-first range form / not boolean / feature
+/// name (legacy ':' form, L4 range right-value form, boolean context).
 fn parse_feature_body(p: &mut Parser<'_>) -> Result<MediaFeature, ParseError<BasicParseError>> {
     p.parse_nested_block(|p| {
         p.skip_whitespace();
@@ -600,7 +658,7 @@ fn parse_feature_body(p: &mut Parser<'_>) -> Result<MediaFeature, ParseError<Bas
     })
 }
 
-/// range 轴名映射（A7）。
+/// Range axis name mapping (A7).
 fn range_name_of(lname: &str) -> Option<RangeName> {
     match lname {
         "width" => Some(RangeName::Width),
@@ -611,8 +669,8 @@ fn range_name_of(lname: &str) -> Option<RangeName> {
     }
 }
 
-/// 特性名路径：旧 `:` 形 / L4 range 右值形 `(width >= 400px)` / 布尔语境
-/// `(hover)`。
+/// Feature name paths: legacy `:` form / L4 range right-value form
+/// `(width >= 400px)` / boolean context `(hover)`.
 fn parse_named_feature(
     p: &mut Parser<'_>,
     name: &str,
@@ -654,7 +712,8 @@ fn parse_named_feature(
     }
 }
 
-/// 旧 `:` 形取值（分派回既有臂 + A7 新特性臂）。
+/// Legacy `:` form value (dispatches to existing arms + A7 new feature
+/// arms).
 fn parse_colon_value(
     p: &mut Parser<'_>,
     lname: &str,
@@ -759,8 +818,9 @@ fn parse_colon_value(
     }
 }
 
-/// 媒体查询长度换算（`<length>` → px：em/rem 按 16px 初始字号；vw/vh 与
-/// 百分比依赖视口（解析期未知）→ 按 0 处理（偏差记录））。
+/// Media query length conversion (`<length>` → px: em/rem at the 16px
+/// initial size; vw/vh and percentages depend on the viewport (unknown at
+/// parse time) → treated as 0 (recorded deviation)).
 fn parse_px_len(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
     let lp = parse_length_percentage(p)?;
     lp.resolve(
@@ -776,7 +836,7 @@ fn parse_px_len(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> 
     .ok_or_else(|| p.new_error_for_next_token())
 }
 
-/// `<ratio>`（A7）：`<number>` | `<number>` / `<number>`。
+/// `<ratio>` (A7): `<number>` | `<number>` / `<number>`.
 fn parse_ratio(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
     let t = p.next()?.clone();
     let Token::Number { value: a, .. } = &t else {
@@ -802,7 +862,7 @@ fn parse_ratio(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
     })
 }
 
-/// `<resolution>`（A7）→ dppx：dpi/96、dpcm×2.54/96、dppx|x 直通。
+/// `<resolution>` (A7) → dppx: dpi/96, dpcm×2.54/96, dppx|x pass-through.
 fn parse_resolution(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
     let t = p.next()?.clone();
     match &t {
@@ -819,7 +879,8 @@ fn parse_resolution(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseErro
     }
 }
 
-/// L4 range 比较算子（`<`/`>` 后可选 `=`；`=` 间不容空格按宽容处理）。
+/// L4 range comparison operator (optional `=` after `<`/`>`; a space
+/// between them is not allowed but tolerated leniently).
 fn parse_range_op(p: &mut Parser<'_>) -> Result<RangeOp, ParseError<BasicParseError>> {
     let t = p.next()?.clone();
     let Token::Delim(d) = &t else {
@@ -846,7 +907,8 @@ fn parse_range_op(p: &mut Parser<'_>) -> Result<RangeOp, ParseError<BasicParseEr
     })
 }
 
-/// 通用媒体标量（A7 range 值）：px 长度 / 比值 / 分辨率 / 裸数字。
+/// Generic media scalar (A7 range values): px length / ratio / resolution /
+/// bare number.
 #[derive(Debug, Clone, Copy)]
 enum GenScalar {
     Px(f32),
@@ -855,7 +917,8 @@ enum GenScalar {
     Num(f32),
 }
 
-/// 按 token 解析通用标量（Number 后探 `/` 合成比值）。
+/// Parse a generic scalar from a token (probes `/` after a Number to
+/// compose a ratio).
 fn parse_generic_scalar(
     p: &mut Parser<'_>,
     tok: &Token,
@@ -895,7 +958,7 @@ fn parse_generic_scalar(
     }
 }
 
-/// 通用标量 → 轴标量（量纲校验）。
+/// Generic scalar → axis scalar (dimension check).
 fn map_scalar(
     p: &mut Parser<'_>,
     s: GenScalar,
@@ -911,7 +974,7 @@ fn map_scalar(
     })
 }
 
-/// range 轴标量解析（右值形）。
+/// Range axis scalar parsing (right-value form).
 fn parse_range_scalar(
     p: &mut Parser<'_>,
     rn: RangeName,
@@ -923,7 +986,8 @@ fn parse_range_scalar(
     }
 }
 
-/// 值在前 range 形：`(<value> <op> name [<op> <value>])`（first token 已取）。
+/// Value-first range form: `(<value> <op> name [<op> <value>])` (first
+/// token already taken).
 fn parse_range_value_first(
     p: &mut Parser<'_>,
     first: &Token,
@@ -962,47 +1026,48 @@ fn parse_range_value_first(
 
 // ---------- @container 子集（阶段2③） ----------
 
-/// 容器查询尺寸轴。
+/// Container query size axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContainerAxis {
-    /// 行内轴（inline-size）。
+    /// Inline axis (inline-size).
     Inline,
-    /// 块轴（block-size）。
+    /// Block axis (block-size).
     Block,
 }
 
-/// 容器查询比较算子（min-*/max-* 旧形与 > < >= <= 范围形统一物化；
-/// ':' 即相等比较）。
+/// Container query comparison operator (legacy min-*/max-* forms and the
+/// > < >= <= range forms are materialized uniformly; ':' is equality).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContainerOp {
-    /// 相等（`:` 旧形）。
+    /// Equal (legacy `:` form).
     Eq,
-    /// 小于（`<`）。
+    /// Less than (`<`).
     Lt,
-    /// 小于等于（`<=`）。
+    /// Less than or equal (`<=`).
     Le,
-    /// 大于（`>`）。
+    /// Greater than (`>`).
     Gt,
-    /// 大于等于（`>=`）。
+    /// Greater than or equal (`>=`).
     Ge,
 }
 
-/// 单个容器查询特性（v1：尺寸特性 + orientation）。
+/// A single container query feature (v1: size features + orientation).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum ContainerFeature {
-    /// 尺寸特性（width/height 旧形与范围形统一物化）。
+    /// Size feature (legacy width/height forms and range forms are
+    /// materialized uniformly).
     Size {
-        /// 查询的尺寸轴。
+        /// The size axis being queried.
         axis: ContainerAxis,
-        /// 比较算子。
+        /// Comparison operator.
         op: ContainerOp,
-        /// 比较基准 px。
+        /// Comparison value in px.
         value: f32,
     },
-    /// orientation: portrait（true）/ landscape（false）。
+    /// orientation: portrait (true) / landscape (false).
     Orientation(bool),
 }
 
@@ -1045,18 +1110,22 @@ impl ContainerFeature {
     }
 }
 
-/// 单个 @container 条件段：可选容器名 + AND 特性列表；段间逗号 = OR。
+/// A single @container condition segment: optional container name + AND
+/// feature list; commas between segments = OR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContainerCondition {
-    /// 容器名（container-name）；None = 无名段（取最近容器）。
+    /// Container name (container-name); None = unnamed segment (nearest
+    /// container).
     pub name: Option<String>,
-    /// AND 连接的特性列表。
+    /// Features joined by AND.
     pub features: Vec<ContainerFeature>,
 }
 
 impl ContainerCondition {
-    /// 求值：有名段自最近祖先向外找名字匹配的容器（跳过无名/异名容器），
-    /// 无名段取最近容器；无可用容器 → 不匹配。
+    /// Evaluate: a named segment searches ancestors from the nearest
+    /// outward for a container with a matching name (skipping unnamed/
+    /// differently named containers); an unnamed segment takes the nearest
+    /// container; no usable container → no match.
     pub(crate) fn eval(&self, ctx: &[ContainerCtx]) -> bool {
         let entry = match &self.name {
             Some(n) => ctx.iter().rev().find(|e| e.names.iter().any(|m| m == n)),
@@ -1071,7 +1140,8 @@ impl ContainerCondition {
 
 // ---------- @container 条件解析（阶段2③） ----------
 
-/// 特性名 → 尺寸轴（width/inline-size = 行轴，height/block-size = 块轴）。
+/// Feature name → size axis (width/inline-size = inline axis,
+/// height/block-size = block axis).
 fn container_axis(name: &str) -> Option<ContainerAxis> {
     match name {
         "width" | "inline-size" => Some(ContainerAxis::Inline),
@@ -1080,10 +1150,13 @@ fn container_axis(name: &str) -> Option<ContainerAxis> {
     }
 }
 
-/// 解析 @container prelude：`<container-condition>#`。
-/// 段 = [容器名]? 特性(and 特性)*（特性并置同为 AND）；段间逗号 = OR；
-/// 容器名 = custom-ident（not/and/or 为查询保留字）。条件内 not/or 未做——
-/// 解析即报错（整规则跳过告警）。仅容器名（无名特性查询）合法。
+/// Parse an @container prelude: `<container-condition>#`.
+/// Segment = [container-name]? feature (and feature)* (juxtaposed features
+/// are AND too); commas between segments = OR; container name =
+/// custom-ident (not/and/or are query reserved words). not/or inside
+/// conditions is not implemented — a parse error is raised outright (the
+/// whole rule is dropped with a warning). A bare container name
+/// (featureless query) is legal.
 fn parse_container_conditions(
     p: &mut Parser<'_>,
 ) -> Result<Vec<ContainerCondition>, ParseError<BasicParseError>> {
@@ -1152,9 +1225,11 @@ fn parse_container_conditions(
     Ok(segments)
 }
 
-/// 解析单个容器特性（消费 '('）：`(orientation: portrait|landscape)`；
-/// `(width|height|inline-size|block-size <op> <length>)` 及值在前的反序
-/// `(400px <= width)`；旧形 `(min-*/max-*: <length>)`。':' 即相等比较。
+/// Parse a single container feature (consumes '('):
+/// `(orientation: portrait|landscape)`;
+/// `(width|height|inline-size|block-size <op> <length>)` and the
+/// value-first reversed form `(400px <= width)`; legacy form
+/// `(min-*/max-*: <length>)`. ':' is equality.
 fn parse_container_feature(
     p: &mut Parser<'_>,
 ) -> Result<ContainerFeature, ParseError<BasicParseError>> {
@@ -1227,7 +1302,8 @@ fn parse_container_feature(
     })
 }
 
-/// 比较算子：':'/'=' = 相等，'<' '>' 可跟 '='（<= >=）。
+/// Comparison operator: ':'/'=' = equal, '<' '>' optionally followed by
+/// '=' (<= >=).
 fn parse_container_op(p: &mut Parser<'_>) -> Result<ContainerOp, ParseError<BasicParseError>> {
     p.skip_whitespace();
     let t = p.next()?.clone();
@@ -1254,8 +1330,8 @@ fn parse_container_op(p: &mut Parser<'_>) -> Result<ContainerOp, ParseError<Basi
     }
 }
 
-/// 特性长度（px 直接取值；em/rem 按 16px 基准，与 @media 长度一致；
-/// viewport 单位在此无上下文 → 0）。
+/// Feature length (px taken directly; em/rem at the 16px basis, same as
+/// @media lengths; viewport units have no context here → 0).
 fn parse_container_len(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseError>> {
     let lp = parse_length_percentage(p)?;
     lp.resolve(
@@ -1275,18 +1351,24 @@ fn parse_container_len(p: &mut Parser<'_>) -> Result<f32, ParseError<BasicParseE
 
 // ---------- @layer（B1，css-cascade-5） ----------
 
-/// 层路径先现序注册表：层树按前序（父层直含样式先于子层、同父兄弟按
-/// 先现序）登记，序数在解析期定死——规则携带 u32（未分层=u32::MAX）
-/// 参与级联序键，级联期零查表。序数即字典序前缀序：父层序数 < 子层
-///（子层胜父层直含样式）、未分层序数最大（normal 轴胜一切分层）。
+/// First-appearance pre-order registry of layer paths: the layer tree is
+/// registered in pre-order (a parent's directly-held styles come before its
+/// children; same-parent siblings in first-appearance order) and the
+/// ordinal is fixed at parse time — rules carry a u32 (unlayered =
+/// u32::MAX) into the cascade order key, so the cascade phase does zero
+/// table lookups. The ordinal is the lexicographic prefix order: parent
+/// ordinal < child ordinal (children beat the parent's directly-held
+/// styles); unlayered has the largest ordinal (the normal axis beats every
+/// layered one).
 #[derive(Debug, Clone, Default)]
 pub struct LayerRegistry {
-    /// 已登记层路径（前序）。
+    /// Registered layer paths (pre-order).
     paths: Vec<Vec<String>>,
 }
 
 impl LayerRegistry {
-    /// 登记层路径（幂等；缺失祖先按父先子后补登记）。返回该路径序数。
+    /// Register a layer path (idempotent; missing ancestors are registered
+    /// parent-first). Returns the path's ordinal.
     pub(crate) fn intern(&mut self, path: Vec<String>) -> u32 {
         for i in 1..=path.len() {
             let prefix = path[..i].to_vec();
@@ -1297,15 +1379,16 @@ impl LayerRegistry {
         self.ordinal(&path)
     }
 
-    /// 匿名层：生成不可引用的唯一路径（编码含空格与 '/'，非合法 ident，
-    /// 与用户命名层永不冲突）并登记。
+    /// Anonymous layer: generates an unreferencable unique path (the
+    /// encoding contains spaces and '/', which is not a legal ident, so it
+    /// never collides with user-named layers) and registers it.
     pub(crate) fn fresh_anonymous(&mut self) -> Vec<String> {
         let path = vec![format!(" anon/{}", self.paths.len())];
         self.intern(path.clone());
         path
     }
 
-    /// 层路径 → 序数（空 = 未分层 = u32::MAX）。
+    /// Layer path → ordinal (empty = unlayered = u32::MAX).
     pub(crate) fn ordinal(&self, path: &[String]) -> u32 {
         if path.is_empty() {
             return u32::MAX;
@@ -1317,7 +1400,8 @@ impl LayerRegistry {
             .unwrap_or(u32::MAX)
     }
 
-    /// 子解析器注册表并回父表（保持先现序：追加未见表项）。
+    /// Merge a sub-parser's registry back into the parent (preserving
+    /// first-appearance order: unseen entries are appended).
     pub(crate) fn merge(&mut self, other: LayerRegistry) {
         for p in other.paths {
             if !self.paths.contains(&p) {
@@ -1327,59 +1411,80 @@ impl LayerRegistry {
     }
 }
 
-/// 顶层/媒体块/容器块共用的规则解析器。
+/// Rule parser shared by the top level, media blocks, and container blocks.
 #[derive(Default)]
 struct StylesheetParser {
     report: ParseReport,
     rules: Vec<Rule>,
     keyframes: Vec<KeyframesRule>,
     media: Option<MediaQuery>,
-    /// 处于 @container 块内时携带的条件段列表（嵌套扁平 AND：每段独立查容器）。
+    /// Condition segment list while inside an @container block (nested
+    /// segments flatten to AND: each segment queries containers
+    /// independently).
     container: Vec<ContainerCondition>,
     order: u32,
-    /// B1 @layer：层注册表（子块 clone、解析后并回——先现序全局一致）。
+    /// B1 @layer: layer registry (child blocks clone it and merge back
+    /// after parsing — first-appearance order stays globally consistent).
     layers: LayerRegistry,
-    /// B1 @layer：当前层路径（@layer 块内解析的规则携带其后代路径）。
+    /// B1 @layer: current layer path (rules parsed inside an @layer block
+    /// carry its descendant path).
     current_layer: Vec<String>,
-    /// B2 @import：仅顶层语句形登记（子块内出现 = 合并期告警丢弃）。
+    /// B2 @import: only top-level statement-form registration (an
+    /// occurrence inside a sub-block = dropped with a warning during
+    /// merge).
     imports: Vec<ImportDirective>,
-    /// B4 @property：顶层注册规则（嵌套/条件组语境下守卫拒绝，恒空）。
+    /// B4 @property: top-level registration rules (guarded and rejected in
+    /// nested/condition-group contexts; always empty there).
     property_rules: Vec<crate::css::property_rule::PropertyRule>,
-    /// F3d @font-face：登记规则（顶层/条件组/嵌套体均登记——宽容静默）。
+    /// F3d @font-face: registration rules (registered in the top level,
+    /// condition groups, and nested bodies alike — lenient silence).
     font_faces: Vec<FontFaceRule>,
-    /// B3 CSS Nesting：父规则有效选择器源（None = 非嵌套语境——顶层或
-    /// 顶层 at-rule 体）。Some 时块体声明合法（隐式 & 规则）且嵌套规则
-    /// prelude 经 desugar（& → :is(父)）。
+    /// B3 CSS Nesting: parent rule's effective selector source (None = not
+    /// in a nesting context — top level or a top-level at-rule body). When
+    /// Some, block-body declarations are legal (implicit `&` rule) and
+    /// nested rule preludes are desugared (& → :is(parent)).
     nesting_parent: Option<String>,
-    /// B3：嵌套深度（parse_block 进入子体 +1；≥ MAX_NESTING_DEPTH 拒绝）。
+    /// B3: nesting depth (+1 when parse_block enters a child body; ≥
+    /// MAX_NESTING_DEPTH is rejected).
     nesting_depth: u32,
-    /// B3：当前规则 desugar 后有效选择器源（parse_prelude 产出、parse_block
-    /// 消费为子体 nesting_parent）。
+    /// B3: current rule's post-desugar effective selector source (produced
+    /// by parse_prelude, consumed by parse_block as the child body's
+    /// nesting_parent).
     pending_effective: String,
-    /// B3：外层样式规则已解析选择器列表（隐式 & 声明规则的复用源）。
-    /// 在 parse_block 构造子解析器时一次性写入、此后不再变异——嵌套规则
-    /// 的 parse_prelude 不得污染它（否则体尾 flush 取错选择器）。
-    /// SelectorList 无 Default，故 Option 包装以保结构体派生 Default。
+    /// B3: enclosing style rule's parsed selector list (reuse source for
+    /// implicit `&` declaration rules). Written once when parse_block
+    /// constructs a sub-parser and never mutated afterwards — a nested
+    /// rule's parse_prelude must not pollute it (otherwise the body-end
+    /// flush would take the wrong selectors). SelectorList has no Default,
+    /// hence the Option wrapper to keep the struct's derived Default.
     enclosing_prelude: Option<StyleSelectorList>,
-    /// B3：嵌套层累积声明（体尾 flush 为单条隐式规则；B 级：声明组不按
-    /// 规则插入点分裂）。
+    /// B3: accumulated nested-layer declarations (flushed as a single
+    /// implicit rule at body end; Tier B: declaration groups do not split
+    /// at nested-rule insertion points).
     pending_decls: crate::css::decl::DeclarationBlock,
-    /// E css-nesting-1 隐式最外层样式规则：顶层裸声明容错开关。仅样式表
-    /// 主解析器为 true（Default = false）；子解析器（嵌套体/条件组臂）在
-    /// 字面量处显式 false——裸声明在嵌套/条件组语境维持无效语义。
+    /// E css-nesting-1 implicit outermost style rule: fault-tolerance
+    /// switch for top-level bare declarations. Only the stylesheet's main
+    /// parser is true (Default = false); sub-parsers (nested bodies/
+    /// condition-group arms) are explicitly false at the literal — bare
+    /// declarations keep their invalid semantics in nested/condition-group
+    /// contexts.
     implicit_outer_decls: bool,
-    /// E @counter-style：登记规则（顶层/条件组/嵌套体均登记，宽容语义同
-    /// @font-face；来源序 Vec，同名后写胜）。
+    /// E @counter-style: registration rules (registered in the top level,
+    /// condition groups, and nested bodies alike; lenient semantics same as
+    /// @font-face; source-order Vec, last same-name wins).
     counter_styles: Vec<CounterStyleRule>,
 }
 
-/// B3：嵌套深度上限（防爆炸；超出 = 规则丢弃 + 告警）。
+/// B3: nesting depth cap (explosion guard; exceeding it = the rule is
+/// dropped + warning).
 const MAX_NESTING_DEPTH: u32 = 32;
 
-/// B3 CSS Nesting 嵌套 prelude desugar：token 级 `&`（Delim('&') 序列化恰
-/// 为 "&"，字符串/URL 内的 & 是完整 token 文本不受影响）→ `:is(父有效源)`
-/// （css-nesting-1：& ≡ :is(parent)，特异性取 :is 最特定参数）；无 `&`
-/// 时 = 隐式后代 `:is(父) <源>`（组合器开头 `> .x` 同式——`:is(父) > .x`）。
+/// B3 CSS Nesting nested prelude desugar: token-level `&` (Delim('&')
+/// serializes to exactly "&"; & inside strings/URLs is complete token text
+/// and unaffected) → `:is(parent effective source)`
+/// (css-nesting-1: & ≡ :is(parent), specificity taken as the most specific
+/// :is argument); without `&` = implicit descendant `:is(parent) <source>`
+/// (combinator-leading `> .x` likewise — `:is(parent) > .x`).
 fn desugar_nested_prelude(buf: &[crate::css::decl::OwnedToken], parent: &str) -> String {
     let is_amp = |t: &crate::css::decl::OwnedToken| t.text == "&";
     let has_amp = buf.iter().any(is_amp);
@@ -1411,9 +1516,10 @@ fn desugar_nested_prelude(buf: &[crate::css::decl::OwnedToken], parent: &str) ->
 }
 
 impl StylesheetParser {
-    /// B3 CSS Nesting：嵌套层累积声明 flush 为单条隐式 `&` 规则（选择器 =
-    /// 本规则 prelude；序数 = 体尾——嵌套规则之后；块内声明先后经
-    /// DeclarationBlock 顺序保持）。
+    /// B3 CSS Nesting: flush accumulated nested-layer declarations as a
+    /// single implicit `&` rule (selector = this rule's prelude; ordinal =
+    /// body end — after nested rules; declaration order within the block is
+    /// preserved via DeclarationBlock).
     fn flush_pending_decls(&mut self) {
         if self.pending_decls.is_empty() {
             return;
@@ -2186,35 +2292,44 @@ impl<'i> cssparser::AtRuleParser<'i> for StylesheetParser {
     }
 }
 
-/// at-rule prelude 分类（第五批⑰扩展：media / keyframes；阶段2③：
-/// container；B1：layer；B2：import / supports；F3d：font-face / property）。
+/// At-rule prelude classification (batch 5⑰ extensions: media / keyframes;
+/// phase 2③: container; B1: layer; B2: import / supports; F3d: font-face /
+/// property).
 #[derive(Debug, Clone)]
 enum AtPrelude {
     Media(MediaQuery),
     Container(Vec<ContainerCondition>),
     Keyframes(String),
-    /// @layer（B1）：逗号分隔点名路径列表（空 = 匿名块形或无效语句形）。
+    /// @layer (B1): comma-separated dotted-name path list (empty = the
+    /// anonymous block form or an invalid statement form).
     Layer(Vec<Vec<String>>),
-    /// @import（B2）：语句形指令数据（url + layer/supports/media 子句）。
+    /// @import (B2): statement-form directive data (url + layer/supports/
+    /// media clauses).
     Import(ImportPrelude),
-    /// @supports（B2）：解析期条件求值结果（true = 块规则照常产出）。
+    /// @supports (B2): parse-time condition evaluation result (true = the
+    /// block's rules are produced as usual).
     Supports(bool),
-    /// B4 @property（css-properties-values-api）：注册名（--ident）。
+    /// B4 @property (css-properties-values-api): registration name
+    /// (--ident).
     Property(String),
-    /// @font-face（F3d，ADR-0026 D4）：块体描述符登记（原第五批⑯静默
-    /// 跳过演进为登记表——字体字节仍由宿主 add_font 推送）。
+    /// @font-face (F3d, ADR-0026 D4): block-body descriptor registration
+    /// (evolved from batch 5⑯'s silent skip into a registry — font bytes
+    /// are still pushed by the host's add_font).
     FontFace,
-    /// E @counter-style（css-counter-styles-3 子集）：计数样式名（prelude
-    /// 已验证 custom-ident 且非 `none`；块体描述符在 parse_block 登记）。
+    /// E @counter-style (css-counter-styles-3 subset): counter style name
+    /// (prelude already validated as custom-ident and not `none`; block
+    /// descriptors are registered in parse_block).
     CounterStyle(String),
 }
 
 // ---------- @font-face 块体解析（F3d，ADR-0026 D4） ----------
 
-/// @font-face 块体描述符解析（css-fonts-4 §4 语法）。描述符 =
-/// `<descriptor> ':' <值> ';'`，值域取至 ';' 或块尾。契约：缺
-/// font-family / src = 规则无效（warn + None）；已知描述符值非法 =
-/// 该描述符忽略、规则存活；未知描述符宽容跳过（前向兼容）。
+/// @font-face block-body descriptor parsing (css-fonts-4 §4 syntax). A
+/// descriptor = `<descriptor> ':' <value> ';'`, the value range extends to
+/// ';' or the block end. Contract: missing font-family / src = invalid rule
+/// (warn + None); an invalid value for a known descriptor = that descriptor
+/// is ignored and the rule survives; unknown descriptors are leniently
+/// skipped (forward compatibility).
 fn parse_font_face_block(input: &mut Parser<'_>) -> Option<FontFaceRule> {
     let mut rule = FontFaceRule {
         family: String::new(),
@@ -2278,8 +2393,9 @@ fn parse_font_face_block(input: &mut Parser<'_>) -> Option<FontFaceRule> {
     Some(rule)
 }
 
-/// 单个描述符值段解析（子解析器域 = 至 ';' 或块尾）。false = 值语法
-/// 无效（该描述符忽略、规则存活）。
+/// Parse a single descriptor value segment (sub-parser scope = up to ';'
+/// or the block end). false = invalid value syntax (that descriptor is
+/// ignored, the rule survives).
 fn parse_font_face_descriptor(name: &str, v: &mut Parser<'_>, rule: &mut FontFaceRule) -> bool {
     if name.eq_ignore_ascii_case("font-family") {
         // <family-name>：ident 序列（空格拼接）或引号串（断序）
@@ -2505,8 +2621,9 @@ fn parse_font_face_descriptor(name: &str, v: &mut Parser<'_>, rule: &mut FontFac
     false
 }
 
-/// `normal | <percentage>` 单描述符值解析（css-fonts-4 §4.6 override 家族）。
-/// None = normal；Some = 百分比 /100。false = 值非法（该描述符忽略）。
+/// `normal | <percentage>` single-descriptor value parsing (css-fonts-4
+/// §4.6 override family). None = normal; Some = percentage/100. false =
+/// invalid value (that descriptor is ignored).
 fn parse_font_face_override(v: &mut Parser<'_>, set: impl FnOnce(Option<f32>)) -> bool {
     v.skip_whitespace();
     match v.next() {
@@ -2522,9 +2639,9 @@ fn parse_font_face_override(v: &mut Parser<'_>, set: impl FnOnce(Option<f32>)) -
     }
 }
 
-/// `<urange>` 字符文法（css-fonts-4）：`U+XXXX` | `U+XXXX-YYYY` | `U+X??`
-///（'?' 通配 nibble——单段以 0/F 填充成区间；两段均可含通配）。
-/// 非法 = None。
+/// `<urange>` codepoint grammar (css-fonts-4): `U+XXXX` | `U+XXXX-YYYY` |
+/// `U+X??` ('?' wildcards a nibble — a single segment is padded with 0/F
+/// into a range; both segments may contain wildcards). Invalid = None.
 fn parse_urange_token(text: &str) -> Option<(u32, u32)> {
     let rest = text.strip_prefix(['U', 'u'])?;
     let rest = rest.strip_prefix('+')?;
@@ -2553,7 +2670,8 @@ fn parse_urange_token(text: &str) -> Option<(u32, u32)> {
     (lo <= hi).then_some((lo, hi))
 }
 
-/// 畸形描述符容错：值段（含嵌套块）消费至 ';' 或块尾。
+/// Malformed-descriptor tolerance: consume the value segment (including
+/// nested blocks) up to ';' or the block end.
 fn skip_until_semicolon(input: &mut Parser<'_>) {
     loop {
         match input.next() {
@@ -2570,7 +2688,7 @@ fn skip_until_semicolon(input: &mut Parser<'_>) {
     }
 }
 
-/// @keyframes 块体解析器：帧选择器 → 声明块。
+/// @keyframes block-body parser: frame selectors → declaration blocks.
 #[derive(Default)]
 struct KeyframesParser {
     report: ParseReport,
@@ -2673,10 +2791,13 @@ impl<'i> cssparser::DeclarationParser<'i> for StylesheetParser {
     type Declaration = ();
     type Error = ();
 
-    /// B3 CSS Nesting：块体声明仅嵌套语境合法（隐式 `& { decls }`——
-    /// css-nesting-1 嵌套条件组体内声明同语义）；顶层裸声明仍默认拒绝。
-    /// parse_until_after(Semicolon) 界定下 parse_declaration_block 恰取
-    /// 本条声明的 token；累积到 pending_decls，体尾 flush 为隐式规则。
+    /// B3 CSS Nesting: block-body declarations are legal only in a nesting
+    /// context (implicit `& { decls }` — declarations in nested
+    /// condition-group bodies share the same semantics); top-level bare
+    /// declarations are still rejected by default. Bounded by
+    /// parse_until_after(Semicolon), parse_declaration_block takes exactly
+    /// this declaration's tokens; accumulated into pending_decls and
+    /// flushed as an implicit rule at body end.
     fn parse_value(
         &mut self,
         name: cssparser::CowRcStr<'i>,
@@ -2704,8 +2825,10 @@ impl<'i> cssparser::DeclarationParser<'i> for StylesheetParser {
 }
 
 impl<'i> cssparser::RuleBodyItemParser<'i, (), ()> for StylesheetParser {
-    /// B3：嵌套语境（nesting_parent 在场）块体声明合法——cssparser 的
-    /// "Ident → 声明，失败重试限定规则" 消歧（:296-308）随之激活。
+    /// B3: block-body declarations are legal in a nesting context (when
+    /// nesting_parent is present) — cssparser's "Ident → declaration,
+    /// retry as a qualified rule on failure" disambiguation (:296-308) is
+    /// thereby activated.
     fn parse_declarations(&self) -> bool {
         self.nesting_parent.is_some()
     }
@@ -2714,8 +2837,8 @@ impl<'i> cssparser::RuleBodyItemParser<'i, (), ()> for StylesheetParser {
     }
 }
 
-/// B3：选择器列表是否含 `:has()` 相对选择器组件（深扫——iter_raw 含
-/// :is/:not/:has 内层组件）。
+/// B3: whether the selector list contains a `:has()` relative selector
+/// component (deep scan — iter_raw covers :is/:not/:has inner components).
 fn selector_list_has_relative(list: &StyleSelectorList) -> bool {
     list.slice().iter().any(|sel| {
         sel.iter_raw_match_order()
@@ -2723,10 +2846,12 @@ fn selector_list_has_relative(list: &StyleSelectorList) -> bool {
     })
 }
 
-/// C1（ADR-0015）：选择器列表是否含盒生成伪元素分量（::before/::after）——
-/// 引擎 materialize_pseudos 实体化判据（Stylesheet.has_pseudo_rules）。
-/// C4（ADR-0018）：过滤收紧为仅盒生成变体——::selection/::placeholder
-/// 为非盒生成通道规则，不得触发实体化。
+/// C1 (ADR-0015): whether the selector list contains a box-generating
+/// pseudo-element component (::before/::after) — the engine's
+/// materialize_pseudos materialization criterion
+/// (Stylesheet.has_pseudo_rules). C4 (ADR-0018): the filter is tightened to
+/// box-generating variants only — ::selection/::placeholder are non-box-
+/// generation channel rules and must not trigger materialization.
 fn selector_list_has_pseudo(list: &StyleSelectorList) -> bool {
     list.slice().iter().any(|sel| {
         sel.iter_raw_match_order().any(|c| {
@@ -2740,8 +2865,9 @@ fn selector_list_has_pseudo(list: &StyleSelectorList) -> bool {
     })
 }
 
-/// C4（ADR-0018）：选择器列表是否含指定非盒生成伪元素分量（通道规则
-/// 判据；与 selector_list_has_pseudo 的盒生成判据分离）。
+/// C4 (ADR-0018): whether the selector list contains the given non-box-
+/// generation pseudo-element component (channel-rule criterion; kept
+/// separate from selector_list_has_pseudo's box-generation criterion).
 fn rule_has_channel(list: &StyleSelectorList, want: crate::selector::PseudoElement) -> bool {
     list.slice().iter().any(|sel| {
         sel.iter_raw_match_order()
@@ -2749,13 +2875,15 @@ fn rule_has_channel(list: &StyleSelectorList, want: crate::selector::PseudoEleme
     })
 }
 
-/// 解析样式表源文本（容错：坏规则跳过并记入 report）。
+/// Parse stylesheet source text (fault-tolerant: bad rules are skipped and
+/// recorded in report).
 pub fn parse_stylesheet(source: &str) -> Stylesheet {
     parse_stylesheet_in_layer(source, Vec::new())
 }
 
-/// B2：以初始层路径解析样式表（@import 拼接期子表用——指令 layer 前缀
-/// 作为子表规则的 current_layer 注入）。
+/// B2: parse a stylesheet with an initial layer path (used for @import
+/// splice sub-sheets — the directive's layer prefix is injected as the
+/// sub-sheet rules' current_layer).
 pub fn parse_stylesheet_in_layer(source: &str, current_layer: Vec<String>) -> Stylesheet {
     let mut input = Parser::new(source);
     let mut sp = StylesheetParser {
@@ -2814,11 +2942,13 @@ pub fn parse_stylesheet_in_layer(source: &str, current_layer: Vec<String>) -> St
 
 // ---------- B2：@supports 求值器 + @import prelude ----------
 
-/// @supports 条件解析期求值：`<supports-condition>` = `<supports-in-parens>`
-/// [ and | or `<supports-in-parens>` ]*（同级运算符不得混用，与浏览器一致）；
-/// `<supports-in-parens>` = 'not' `<…>` | '(' `<decl 或嵌套条件>` ')' |
-/// selector( `<选择器>` )。求值器 = 构建期静态能力：属性文法试探（自定义
-/// 属性恒真）+ 选择器文法试探。None = 条件语法无效。
+/// @supports condition parse-time evaluation: `<supports-condition>` =
+/// `<supports-in-parens>` [ and | or `<supports-in-parens>` ]* (same-level
+/// operators must not be mixed, matching browsers);
+/// `<supports-in-parens>` = 'not' `<…>` | '(' `<decl or nested condition>`
+/// ')' | selector( `<selector>` ). The evaluator = build-time static
+/// capability: property grammar probing (custom properties always true) +
+/// selector grammar probing. None = invalid condition syntax.
 fn parse_supports_condition(input: &mut Parser<'_>) -> Option<bool> {
     let mut value = parse_supports_in_parens(input)?;
     let mut op: Option<bool> = None; // Some(true)=and，Some(false)=or
@@ -2845,7 +2975,8 @@ fn parse_supports_condition(input: &mut Parser<'_>) -> Option<bool> {
     Some(value)
 }
 
-/// `<supports-in-parens>`：not 前缀 / 括号块 / selector() 函数。
+/// `<supports-in-parens>`: not prefix / parenthesized block / selector()
+/// function.
 fn parse_supports_in_parens(input: &mut Parser<'_>) -> Option<bool> {
     input.skip_whitespace();
     let save = input.state();
@@ -2871,8 +3002,8 @@ fn parse_supports_in_parens(input: &mut Parser<'_>) -> Option<bool> {
     }
 }
 
-/// '(' 嵌套块内内容：嵌套条件（not / '(' / 函数）或声明测试（`<ident>` ':'
-/// `<值序列>`）。
+/// Content of a '(' nested block: a nested condition (not / '(' / function)
+/// or a declaration test (`<ident>` ':' `<value sequence>`).
 fn parse_supports_inner(p: &mut Parser<'_>) -> Result<Option<bool>, ParseError<()>> {
     p.skip_whitespace();
     let probe = p.state();
@@ -2900,8 +3031,9 @@ fn parse_supports_inner(p: &mut Parser<'_>) -> Result<Option<bool>, ParseError<(
     Ok(Some(supports_declaration(&prop, &value)))
 }
 
-/// 声明支持性试探：自定义属性恒真；属性未知 = false；否则值文法试探
-///（parse_declaration 通过 = 支持）。
+/// Declaration support probe: custom properties always true; unknown
+/// property = false; otherwise value grammar probing (parse_declaration
+/// passing = supported).
 fn supports_declaration(prop: &str, value: &str) -> bool {
     if prop.starts_with("--") {
         return true;
@@ -2913,8 +3045,8 @@ fn supports_declaration(prop: &str, value: &str) -> bool {
     crate::css::property::parse_declaration(pid, &mut input).is_ok()
 }
 
-/// 捕获当前（嵌套块限定）作用域内剩余 token 的序列化文本（空白归一为
-/// 单空格）。
+/// Capture the serialized text of the remaining tokens in the current
+/// (nested-block-bounded) scope (whitespace normalized to single spaces).
 fn capture_remaining_source(p: &mut Parser<'_>) -> String {
     let mut s = String::new();
     loop {
@@ -2935,9 +3067,10 @@ fn capture_remaining_source(p: &mut Parser<'_>) -> String {
     s
 }
 
-/// @import prelude（B2，css-cascade-5 §3）：`@import [ <string> | url() ]
-/// [ layer | layer(`<name>`) ]? [ supports(`<condition>`) ]? `<media-query>`?`。
-/// 仅消费自身 prelude（不触 ';' 终止符）；语法失败 = Err（调用方告警）。
+/// @import prelude (B2, css-cascade-5 §3): `@import [ <string> | url() ]
+/// [ layer | layer(`<name>`) ]? [ supports(`<condition>`) ]? `<media-query>`?`.
+/// Consumes only its own prelude (does not touch the ';' terminator);
+/// syntax failure = Err (the caller warns).
 fn parse_import_prelude(input: &mut Parser<'_>) -> Result<ImportPrelude, ParseError<()>> {
     input.skip_whitespace();
     let url = match input.next()?.clone() {
@@ -3009,7 +3142,8 @@ fn parse_import_prelude(input: &mut Parser<'_>) -> Result<ImportPrelude, ParseEr
     })
 }
 
-/// 层名路径（a.b.c）解析（@import layer(...) 嵌套块内用）。
+/// Layer name path (a.b.c) parsing (used inside the @import layer(...)
+/// nested block).
 fn parse_layer_name_inner(p: &mut Parser<'_>) -> Result<Vec<String>, ParseError<()>> {
     p.skip_whitespace();
     let mut path: Vec<String> = Vec::new();
@@ -3034,8 +3168,10 @@ fn parse_layer_name_inner(p: &mut Parser<'_>) -> Result<Vec<String>, ParseError<
 // ---------- B2：@import 附着期拼接 + 文档层树 ----------
 
 impl Stylesheet {
-    /// B2：本表层树并入文档层树并重写全部 rule.layer_rank（跨表层序数
-    /// 不可比——文档全局先现序 = 附着序）。未分层 u32::MAX 不变。
+    /// B2: merge this sheet's layer tree into the document layer tree and
+    /// rewrite all rule.layer_rank (cross-sheet ordinals are not comparable
+    /// — document-global first-appearance order = attach order). Unlayered
+    /// u32::MAX stays unchanged.
     pub fn remap_layers_to_doc(&mut self, doc: &mut LayerRegistry) {
         for path in &self.layers.paths {
             doc.intern(path.clone());
@@ -3048,19 +3184,23 @@ impl Stylesheet {
         }
     }
 
-    /// E @counter-style：按名称查询登记规则（css-counter-styles-3）。
-    /// 语义：同名后写胜（源顺序 Vec 逆序查找，与 @property/@font-face
-    /// 登记模式一致）；名称匹配大小写敏感（counter-style-name spec 语义，
-    /// 与属性名不区分大小写不同——在案决策）。
+    /// E @counter-style: query registration rules by name
+    /// (css-counter-styles-3). Semantics: the last rule with the same name
+    /// wins (reverse scan over the source-order Vec, matching the
+    /// @property/@font-face registration pattern); name matching is
+    /// case-sensitive (counter-style-name spec semantics, unlike
+    /// case-insensitive property names — documented in SINK-MATRIX.md).
     pub fn counter_style(&self, name: &str) -> Option<&CounterStyleRule> {
         self.counter_styles.iter().rev().find(|r| r.name == name)
     }
 }
 
-/// @import 拼接（引擎附着期；css-cascade-5：导入规则视同写在导入点）。
-/// 按 order 与规则流交错拼接；循环守卫 = `seen` URL 栈 + 深度上限 32；
-/// 子表以 `current_layer = layer_prefix ∪ 指令层` 解析，其层树/keyframes/
-/// report 并入本表，规则 media 与指令 media 合取（and_media）。
+/// @import splicing (engine attach phase; css-cascade-5: imported rules
+/// behave as if written at the import site). Interleaved with the rule
+/// stream by order; cycle guard = a `seen` URL stack + depth limit 32;
+/// sub-sheets are parsed with `current_layer = layer_prefix ∪ directive
+/// layer`, their layer tree/keyframes/report are merged into this sheet,
+/// and rule media is conjoined with directive media (and_media).
 pub fn resolve_imports(
     sheet: &mut Stylesheet,
     resolve: &mut dyn FnMut(&str) -> Option<String>,
@@ -3126,9 +3266,10 @@ pub fn resolve_imports(
     }
 }
 
-/// 单条 @import：取源 → 层前缀解析 → 递归拼接子表导入 → 并表 → media
-/// 合取。循环 = Skipped 告警 + 空产出；未解析 = None（指令保留待重拼接，
-/// 由调用方回填 sheet.imports）。
+/// A single @import: fetch source → layer-prefix resolution → recursively
+/// splice the sub-sheet's imports → merge sheets → conjoin media. Cycle =
+/// Skipped warning + empty output; unresolved = None (the directive is
+/// kept for re-splicing; the caller refills sheet.imports).
 fn import_one(
     sheet: &mut Stylesheet,
     d: ImportDirective,

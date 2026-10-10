@@ -1,17 +1,25 @@
-//! `style-engine-vello` — style-engine DisplayList 的 Vello (wgpu) 绘制后端。
+//! `style-engine-vello` — Vello (wgpu) paint backend for the style-engine
+//! DisplayList.
 //!
-//! ADR-0002：颜色为 sRGB 直传（第五批㉕双预测探针实测，vello 0.10 探针
-//! 时值、0.11 复核零漂移：RGBA8Unorm 目标上 vello 以 sRGB 编码值直接合成
-//! =G/CSS 默认，半透明叠加无色彩空间分歧；宽色域/HDR 目标路径若引入线性
-//! 合成需重测）；滚动偏移折叠为坐标平移；裁剪走 vello 图层（Mix::Clip）。
+//! ADR-0002: colors are passed through as sRGB (measured by the batch-5 ㉕
+//! dual-prediction probe: value as probed on vello 0.10, zero drift on the
+//! 0.11 recheck — on an RGBA8Unorm target vello composites directly with
+//! sRGB-encoded values, i.e. the Chromium/CSS default, so semi-transparent
+//! stacking shows no color-space divergence; wide-gamut/HDR target paths
+//! would need re-measurement if linear compositing is introduced). Scroll
+//! offsets collapse into coordinate translation; clipping uses vello layers
+//! (Mix::Clip).
 //!
-//! MVP 偏差（FEATURES.md 同步）：
-//! - Shadow 模糊非真高斯（vello 无内置模糊，0.11 复核同 0.10）——box-shadow
-//!   以多重同心扩张环、text-shadow 以多重同心偏移环近似：环 α =
-//!   1−(1−a)^(1/N)（N 层复合恰为总 a），text 环数随 blur 自适应
-//!   （≤0 单环=锐利副本）；
-//! - Text 全量接入（`render_ops_with_text`，parley VelloTextSystem）；
-//!   无字体系统入参的 `render_ops`/`render` 遇 Text op 跳过（无文本变体）。
+//! MVP deviations (kept in sync with FEATURES.md):
+//! - Shadow blur is not a true Gaussian (vello has no built-in blur; the
+//!   0.11 recheck matches 0.10) — box-shadow is approximated with multiple
+//!   concentric expanding rings, text-shadow with multiple concentric
+//!   offset rings: ring α = 1−(1−a)^(1/N) (N stacked rings compose to
+//!   exactly the total a), and the text ring count adapts to the blur
+//!   (≤0 → single ring = sharp copy);
+//! - Text is fully wired in (`render_ops_with_text`, parley
+//!   VelloTextSystem); `render_ops`/`render` without a font system input
+//!   skip Text ops (the no-text variants).
 
 use style_engine::css::property::TextDecoStyleKind;
 use style_engine::css::value::ColorValue;
@@ -27,14 +35,19 @@ use vello::peniko::{
 
 #[cfg(test)]
 mod tests {
-    //! ㉕ 色彩空间双预测探针（wgpu 离屏回读，64×64）：红底 + 50% 白罩
-    //! 全覆盖单像素。预测两档——
-    //!   sRGB 混合（Chromium/CSS 默认合成）：G = 0.5·0 + 0.5·255 = 127.5 → 127/128；
-    //!   线性混合：linear 0.5 → sRGB 编码 ≈ 187.5 → 187/188。
-    //! 实测分辨率（第五批㉕）：vello 0.10 render_to_texture 在 Rgba8Unorm
-    //! 目标上以 sRGB 编码值直接合成——实测 G=128 落 sRGB 档，与 Chromium/
-    //! CSS 默认一致，半透明叠加无色彩空间分歧（ADR-0002 旧注「vello 按
-    //! 线性混合」据此修正；宽色域/HDR 目标路径若引入线性合成需重测）。
+    //! ㉕ Color-space dual-prediction probe (wgpu offscreen readback,
+    //! 64×64): red background with a single fully covered 50% white overlay
+    //! pixel. Two predictions —
+    //!   sRGB blending (Chromium/CSS default compositing):
+    //!     G = 0.5·0 + 0.5·255 = 127.5 → 127/128;
+    //!   linear blending: linear 0.5 → sRGB encoded ≈ 187.5 → 187/188.
+    //! Measured resolution (batch-5 ㉕): vello 0.10 render_to_texture on an
+    //! Rgba8Unorm target composites directly with sRGB-encoded values —
+    //! the measured G=128 falls in the sRGB band, matching the
+    //! Chromium/CSS default, so semi-transparent stacking shows no
+    //! color-space divergence (the old ADR-0002 note "vello blends
+    //! linearly" was corrected on this basis; wide-gamut/HDR target paths
+    //! would need re-measurement if linear compositing is introduced).
 
     use style_engine::StyleEngine;
     use style_engine::tree::StyleNode;
@@ -430,7 +443,8 @@ mod tests {
     }
 }
 
-/// 将绘制清单写入 vello 场景（追加语义；调用方持有场景生命周期）。
+/// Writes the display list into a vello scene (append semantics; the caller
+/// owns the scene's lifetime).
 pub fn render_ops(list: &DisplayList, scene: &mut Scene) {
     let mut state = RenderState::default();
     for op in &list.ops {
@@ -438,7 +452,8 @@ pub fn render_ops(list: &DisplayList, scene: &mut Scene) {
     }
 }
 
-/// 带文本绘制形态：Text 基元经 sink 侧 parley 排版 + DrawGlyphs 落字形。
+/// Paint variant with text: Text primitives go through sink-side parley
+/// layout and DrawGlyphs glyph emission.
 pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut VelloTextSystem) {
     let mut state = RenderState::default();
     for op in &list.ops {
@@ -540,7 +555,7 @@ pub fn render_ops_with_text(list: &DisplayList, scene: &mut Scene, text: &mut Ve
     }
 }
 
-/// text-align → parley Alignment（第五批⑳；变体一一对应）。
+/// text-align → parley Alignment (batch-5 ⑳; variant-to-variant mapping).
 fn map_align(a: style_engine::css::property::TextAlign) -> parley::layout::Alignment {
     use style_engine::css::property::TextAlign as T;
     match a {
@@ -555,7 +570,7 @@ fn map_align(a: style_engine::css::property::TextAlign) -> parley::layout::Align
     }
 }
 
-/// 家族名归一（与 core text.rs 同一映射）。
+/// Family name normalization (same mapping as core text.rs).
 fn family_of(list: &style_engine::css::property::FontFamilyList) -> std::borrow::Cow<'static, str> {
     match list.0.iter().next() {
         Some(style_engine::css::property::FamilyName::Named(s)) => s.clone().into(),
@@ -571,15 +586,17 @@ fn family_of(list: &style_engine::css::property::FontFamilyList) -> std::borrow:
     }
 }
 
-/// 同心环近似共享 α（box-shadow 与 text-shadow 共用）：N 层各以 α_r 复合，
-/// 结果 1−(1−α_r)^N —— 反解 α_r = 1−(1−a)^(1/N) 使 N 层复合恰为总 a
-/// （a=1 时 α_r=1，N 层实心不透）。
+/// Shared ring alpha for the concentric-ring approximation (used by both
+/// box-shadow and text-shadow): N layers each compositing with α_r produce
+/// 1−(1−α_r)^N — solving backwards gives α_r = 1−(1−a)^(1/N) so N layers
+/// compose to exactly the total a (a=1 → α_r=1: N fully opaque layers).
 fn ring_alpha(total: f32, n: f32) -> f32 {
     1.0 - (1.0 - total).powf(1.0 / n)
 }
 
-/// text-shadow 环数随 blur 自适应：blur ≤ 0 → 1（单环=原锐利副本，回归
-/// 一致）；小模糊 → 3；大模糊（≥ 8）→ 8。
+/// text-shadow ring count adapts to blur: blur ≤ 0 → 1 (single ring = the
+/// original sharp copy, bit-identical fallback); small blur → 3; large blur
+/// (≥ 8) → 8.
 fn text_shadow_ring_count(blur: f32) -> usize {
     if blur <= 0.0 {
         1
@@ -590,9 +607,10 @@ fn text_shadow_ring_count(blur: f32) -> usize {
     }
 }
 
-/// 各环偏移：第 i 环（1..=n）在 (dx,dy) 基础上沿其单位方向外推
-/// blur·i/n（负外推截为 0，blur≤0 单环恰落 (dx,dy)）；(dx,dy)=(0,0)
-/// 时各环重合——复合 α = a，即无模糊锐影。
+/// Per-ring offsets: ring i (1..=n) extrapolates from (dx,dy) along its unit
+/// direction by blur·i/n (negative extrapolation clamps to 0; with blur ≤ 0
+/// the single ring lands exactly on (dx,dy)). With (dx,dy)=(0,0) all rings
+/// coincide — composited α = a, i.e. a sharp shadow without blur.
 fn text_shadow_ring_offsets(dx: f32, dy: f32, blur: f32, n: usize) -> Vec<(f32, f32)> {
     let n = n.max(1);
     let nf = n as f32;
@@ -610,7 +628,8 @@ fn text_shadow_ring_offsets(dx: f32, dy: f32, blur: f32, n: usize) -> Vec<(f32, 
         .collect()
 }
 
-/// sink 侧文本系统（零副作用：系统字体禁用，字体由宿主推入）。
+/// Sink-side text system (side-effect free: system fonts disabled, fonts
+/// pushed in by the host).
 pub struct VelloTextSystem {
     font_cx: parley::FontContext,
     layout_cx: parley::LayoutContext<()>,
@@ -644,8 +663,9 @@ impl VelloTextSystem {
             .register_fonts(parley::fontique::Blob::new(std::sync::Arc::new(data)), None);
     }
 
-    /// 绘制单个 Text 基元（run_transform = 偏移/变换合成后的字形 run 变换；
-    /// 无字体时为无字形 no-op）。
+    /// Paints a single Text primitive (run_transform = the glyph run
+    /// transform after offset/transform composition; with no fonts this is
+    /// a no-op that emits no glyphs).
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,
@@ -933,7 +953,8 @@ impl VelloTextSystem {
     }
 }
 
-/// 装饰线矩形带填充（P4 D3）：[x0,x1]×[y−half, y+half] 于变换 `tr` 下。
+/// Fills a text-decoration rectangle band (P4 D3): [x0,x1]×[y−half,
+/// y+half] under transform `tr`.
 fn fill_deco_rect(
     scene: &mut Scene,
     color: AlphaColor<Srgb>,
@@ -952,8 +973,10 @@ fn fill_deco_rect(
     scene.fill(Fill::NonZero, tr, color, None, &r);
 }
 
-/// 装饰线波带填充（P4 D3）：周期 6t、振幅 2t、每周期 8 段、带厚沿波
-/// 平移；上缘 sin 去程 + 下缘平移 t 回程闭环。
+/// Fills a text-decoration wavy band (P4 D3): period 6t, amplitude 2t, 8
+/// segments per period, band thickness translated along the wave; the top
+/// edge runs the sin path out and the bottom edge returns shifted by t,
+/// closing the loop.
 fn fill_deco_wavy(
     scene: &mut Scene,
     color: AlphaColor<Srgb>,
@@ -993,24 +1016,28 @@ fn fill_deco_wavy(
     scene.fill(Fill::NonZero, tr, color, None, &path);
 }
 
-/// 构建独立场景。
+/// Builds a standalone scene.
 pub fn render(list: &DisplayList) -> Scene {
     let mut scene = Scene::new();
     render_ops(list, &mut scene);
     scene
 }
 
-/// 离屏渲染（像素回归/快照通路）：DisplayList → RGBA8（行主序紧密排列，
-/// 8bit sRGB 编码值——与 soft sink / Chromium 截图同语义）。
+/// Offscreen rendering (pixel-regression/snapshot path): DisplayList →
+/// RGBA8 (tightly packed row-major, 8-bit sRGB-encoded values — same
+/// semantics as the soft sink / Chromium screenshots).
 ///
-/// 返回 `None` = 无可用 GPU 适配器（无头 CI 等环境受限场景，调用方决定
-/// 跳过语义）。`STYLE_ENGINE_NO_GPU_PROBE=1` 的短路由调用方执行——windows
-/// CI 的 WARP 设备创建段错误无法进程内捕获，必须环境级跳过（探针惯例
-/// 见本文件 tests 注释）。`scale` 用于设备像素对齐（DisplayList 坐标为
-/// 逻辑 px，golden 截图 = 视口 × scale）。
+/// `None` = no usable GPU adapter (environment-restricted settings such as
+/// headless CI; the caller decides the skip semantics). The
+/// `STYLE_ENGINE_NO_GPU_PROBE=1` short circuit exists for callers — the
+/// WARP device-creation segfault on windows CI cannot be caught in-process
+/// and must be skipped at the environment level (probe convention in this
+/// file's test comments). `scale` aligns to device pixels (DisplayList
+/// coordinates are logical px; golden screenshots = viewport × scale).
 ///
-/// 错误双轨：适配器缺失回 `Ok(None)`；设备/渲染器/回读失败为 `Err`
-/// （真适配器在场的失败属环境异常，不上浮为跳过语义）。
+/// Dual-track errors: missing adapter returns `Ok(None)`; device/renderer/
+/// readback failures return `Err` (failures with a real adapter present are
+/// environmental anomalies and are not promoted to skip semantics).
 pub fn render_offscreen(
     list: &DisplayList,
     text: &mut VelloTextSystem,
@@ -1150,25 +1177,30 @@ pub fn render_offscreen(
 
 #[derive(Default)]
 struct RenderState {
-    /// 累计滚动平移（PushScroll/PopScroll 栈）。
+    /// Accumulated scroll translation (PushScroll/PopScroll stack).
     offset: Vec2,
     stack: Vec<Vec2>,
-    /// 2D 仿射栈（ADR-0009 PushTransform/PopTransform）：屏幕空间合成，
-    /// 与手动叠加的偏移平移正交（形状坐标已偏移、见 effective() 共轭）。
+    /// 2D affine stack (ADR-0009 PushTransform/PopTransform): composited in
+    /// screen space, orthogonal to the manually stacked offset translation
+    /// (shape coordinates already carry the offset; see the effective()
+    /// conjugation).
     xforms: Vec<Affine>,
 }
 
 impl RenderState {
-    /// 变换栈顶（无变换层 = 恒等）。
+    /// Top of the transform stack (no transform layer = identity).
     fn xform(&self) -> Affine {
         self.xforms.last().copied().unwrap_or(Affine::IDENTITY)
     }
 
-    /// 形状类绘制的 per-call 变换：形状构造时已手动叠加偏移平移，
-    /// 故变换层须与当前偏移共轭——eff(v) = offset + T·(v − offset)。
-    /// 无变换层时返回恒等（与变换前行为逐位一致）。
-    /// 已知近似：同一节点上 transform × 自身滚动（CSS 语义滚动在变换内）
-    /// 的次序由偏移共轭近似，记录于 FEATURES。
+    /// Per-call transform for shape painting: shapes already manually stack
+    /// the offset translation at construction, so the transform layer must
+    /// be conjugated with the current offset — eff(v) = offset +
+    /// T·(v − offset). With no transform layer, returns identity (bit-
+    /// identical to the pre-transform behavior).
+    /// Known approximation: on the same node, the ordering of transform ×
+    /// its own scroll (CSS semantics scroll inside the transform) is
+    /// approximated by the offset conjugation; recorded in FEATURES.
     fn effective(&self) -> Affine {
         let top = self.xform();
         if top == Affine::IDENTITY {
@@ -1180,10 +1212,12 @@ impl RenderState {
     }
 }
 
-/// 圆角矩形路径（第五批⑪椭圆圆角）：radius = 每角 (横, 纵)——tl.x tl.y
-/// tr.x tr.y br.x br.y bl.x bl.y；x==y 时即圆形角。四分之一椭圆以 kappa
-/// cubic 逼近；半径按 CSS 重叠规则等比缩放（任一边上相邻两角半径和超过
-/// 边长时全组乘 f），负值截断。
+/// Rounded-rect path (batch-5 ⑪ elliptical corners): radius = per-corner
+/// (x, y) — tl.x tl.y tr.x tr.y br.x br.y bl.x bl.y; x==y is a circular
+/// corner. Quarter ellipses are approximated with the kappa cubic; radii
+/// are scaled uniformly by the CSS overlap rule (when the sum of adjacent
+/// corner radii on any edge exceeds the edge length, the whole group is
+/// multiplied by f), and negative values are clamped.
 fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radius: [f32; 8]) -> BezPath {
     let raw = [
         (radius[0], radius[1]),
@@ -1633,7 +1667,8 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
     }
 }
 
-/// 滤镜降级 warn-once（ADR-0031 D5）：每进程一次，避免逐帧刷屏。
+/// Filter degrade warn-once (ADR-0031 D5): once per process, avoiding
+/// per-frame log spam.
 static FILTER_DEGRADED: std::sync::Once = std::sync::Once::new();
 fn warn_filter_degraded() {
     FILTER_DEGRADED.call_once(|| {
@@ -1644,7 +1679,7 @@ fn warn_filter_degraded() {
     });
 }
 
-/// backdrop-filter 不支持 warn-once（ADR-0031 D5）。
+/// backdrop-filter unsupported warn-once (ADR-0031 D5).
 static BACKDROP_UNSUPPORTED: std::sync::Once = std::sync::Once::new();
 fn warn_backdrop_unsupported() {
     BACKDROP_UNSUPPORTED.call_once(|| {
@@ -1655,8 +1690,10 @@ fn warn_backdrop_unsupported() {
     });
 }
 
-/// 引擎 Gradient → peniko Gradient（CSS 渐变线几何；stop 位置按线长/半径
-/// 归一为 0..1 offset，缺省位置自动均布，显式逆序前停夹取）。
+/// Engine Gradient → peniko Gradient (CSS gradient-line geometry; stop
+/// positions normalized to 0..1 offsets along the line/radius, missing
+/// positions evenly spaced automatically, out-of-order earlier stops
+/// clamped).
 #[allow(clippy::too_many_arguments)] // 渐变几何直传（radial/conic/linear 三族并列）
 fn peniko_gradient(
     g: &style_engine::css::property::Gradient,
@@ -1787,13 +1824,19 @@ fn peniko_gradient(
     out
 }
 
-/// repeating-*-gradient（css-images-3，P1-3）vello 终结：把画刷几何收缩为
-/// 「一个周期」——线性=首末停点间线段、径向=r0/r1 两圆（`new_two_point`，
-/// r0 承载首停相位）、sweep=起终角弧段——stop 位置平移归一到周期内，
-/// `Extend::Repeat` 沿参数轴无限平铺（垂直条带方向不重复，与 CSS repeating
-/// 语义一致）。周期 ≤ 0（显式停点经 §4.5.2 抬升后首末重合等）按规范渲染
-/// 透明黑——source-over 之下等价无操作。停点全缺省（自动均布 0..1）时
-/// 周期=全长，平铺退化为与非 repeating 等价（无偏差）。
+/// repeating-*-gradient (css-images-3, P1-3) terminal handling in vello:
+/// shrink the brush geometry to "one period" — linear = the segment between
+/// the first and last stops, radial = the two circles r0/r1
+/// (`new_two_point`, with r0 carrying the first-stop phase), sweep = the
+/// arc from the start to end angle — then shift stop positions to
+/// normalize them into the period and let `Extend::Repeat` tile infinitely
+/// along the parameter axis (the perpendicular band direction is not
+/// repeated, matching CSS repeating semantics). A period ≤ 0 (e.g. the
+/// first and last stops coincide after the §4.5.2 raise of explicit stops)
+/// renders transparent black per the spec — a no-op under source-over.
+/// When all stop positions are missing (auto even spacing 0..1) the period
+/// spans the full line, so tiling degenerates to the non-repeating result
+/// (no deviation).
 fn repeating_peniko(mut out: Gradient, stops: Vec<(f32, AlphaColor<Srgb>)>) -> Gradient {
     let first = stops.first().map_or(0.0, |s| s.0);
     let period = stops.last().map_or(0.0, |s| s.0) - first;
@@ -1842,8 +1885,9 @@ fn repeating_peniko(mut out: Gradient, stops: Vec<(f32, AlphaColor<Srgb>)>) -> G
     out
 }
 
-/// 核心 BlendMode → peniko Mix（P1-2）。16 标准模式一一对应；
-/// PlusLighter/PlusDarker 不在 Mix 枚举内，退 Normal（B 级偏差在案）。
+/// Core BlendMode → peniko Mix (P1-2). The 16 standard modes map
+/// one-to-one; PlusLighter/PlusDarker are not in the Mix enum and degrade
+/// to Normal (Tier B deviation, documented in FEATURES.md).
 fn to_peniko_mix(mode: &style_engine::css::property::BlendMode) -> Mix {
     use style_engine::css::property::BlendMode as B;
     match mode {
@@ -1867,15 +1911,20 @@ fn to_peniko_mix(mode: &style_engine::css::property::BlendMode) -> Mix {
     }
 }
 
-/// 按补齐 CSS 语义的 stop 位置构建 (offset, sRGB 颜色) 序列（P9-1a）。
-/// Px=沿渐变线 px → 按线长归一为 0..1 offset（vello stop 语义）；
-/// Percent 存储即线长分数直取；其余单位（em/rem/cq…）sink 侧无
-/// 字体/容器上下文——位置交核心共享均布 `distribute_stop_positions`
-/// （首 0 末 1、缺位段邻点间均布、显式位置逆序按 css-images-3 §4.5.2
-/// 抬升），色彩提示交核心 `apply_gradient_hints` 展开（em/rem/cq
-/// 提示无上下文单位整体丢弃 = 线性回退，soft sink 同约定）。
-/// 非 Absolute 停点色防御性视作不透明黑（与 soft sink 统一；引擎
-/// 契约=绘制发射前 `resolve_color` 已终结全部停点色）。
+/// Builds the (offset, sRGB color) sequence with CSS-completed stop
+/// positions (P9-1a). Px = px along the gradient line → normalized to a
+/// 0..1 offset by line length (vello stop semantics); Percent is stored as
+/// a line-length fraction and taken directly; all other units
+/// (em/rem/cq…) have no font/container context on the sink side — their
+/// positions go through the core's shared even-spacing
+/// `distribute_stop_positions` (first 0, last 1, missing positions evenly
+/// spaced between neighbors, out-of-order explicit positions raised per
+/// css-images-3 §4.5.2), and color hints go through the core's
+/// `apply_gradient_hints` expansion (hints in em/rem/cq lack context units
+/// and are dropped wholesale = linear fallback, same convention as the
+/// soft sink). Non-Absolute stop colors are defensively treated as opaque
+/// black (unified with the soft sink; the engine contract is that
+/// `resolve_color` finalizes all stop colors before paint emission).
 fn distribute_stops(
     stops: &[style_engine::css::property::ColorStop],
     hints: &[style_engine::css::property::GradientHint],
@@ -1929,15 +1978,19 @@ fn distribute_stops(
     style_engine::css::property::apply_gradient_hints(&table, &hs)
 }
 
-/// 圆弧上另起一段（起点 move_to，不绘制；y-down，θ 递增 = 屏幕顺时针）。
+/// Starts a new segment on the arc (move_to the start point, nothing drawn;
+/// y-down, increasing θ = clockwise on screen).
 fn arc_move_to(path: &mut BezPath, cx: f64, cy: f64, r: f64, deg: f64) {
     let a = deg.to_radians();
     path.move_to(Point::new(cx + a.cos() * r, cy + a.sin() * r));
 }
 
-/// 任意跨度圆弧的三次贝塞尔近似（y-down，θ 递增 = 屏幕顺时针；起点须已
-/// move_to）。跨角 >90° 时按 ≤90° 分段，每段控制系数 k = 4/3·tan(Δθ/4)
-/// （90° 时即经典 k=0.5522847，与旧 quarter_arc 同精度）；零跨度 no-op。
+/// Cubic Bézier approximation of an arc over an arbitrary span (y-down,
+/// increasing θ = clockwise on screen; the start point must already be
+/// move_to'd). Spans >90° are split into ≤90° segments, each with control
+/// coefficient k = 4/3·tan(Δθ/4) (at 90° this is the classic
+/// k=0.5522847, same precision as the old quarter_arc); zero span is a
+/// no-op.
 fn arc_segment(path: &mut BezPath, cx: f64, cy: f64, r: f64, start_deg: f64, end_deg: f64) {
     let span = (end_deg - start_deg).to_radians();
     if span.abs() < 1e-9 {
@@ -1963,19 +2016,25 @@ fn arc_segment(path: &mut BezPath, cx: f64, cy: f64, r: f64, start_deg: f64, end
     }
 }
 
-/// 角部颜色分界对角线在角局部系的方向角（度）：对角线自外角指向内角，
-/// 分量 = (邻接边有效宽, 拥有边有效宽)，方向角 = atan2(拥有, 邻接)；
-/// 等宽 → 45°（与方角 fill_tri 对角线一致）。
+/// Direction angle (degrees) of the corner color-boundary diagonal in the
+/// corner-local frame: the diagonal runs from the outer corner toward the
+/// inner corner with components (adjacent edge effective width, owning edge
+/// effective width), angle = atan2(owning, adjacent); equal widths → 45°
+/// (matching the square-corner fill_tri diagonal).
 fn corner_diagonal_deg(w_u: f64, w_v: f64) -> f64 {
     w_v.atan2(w_u).to_degrees()
 }
 
-/// 颜色分界对角线与角弧（圆心 K=(r,r)、半径 rc）的交点方位角（角局部系，
-/// 钳入 [180°, 270°] 象限）。射线 t·(a,b)（(a,b)=单位对角方向）代入
-/// |P−K|=rc：t² − 2t·r·(a+b) + 2r² − rc² = 0，取近根
-/// t = r(a+b) − √(rc² − r²(a−b)²)；判别式 < 0（对角线与该中心线弧无交，
-/// 见于一边独厚）或 t < 0 时退化为最近点 t* = r(a+b)——方位角经钳制
-/// 自然落在 180°（宽边独占整象限）或 270°（窄边让出整象限）。
+/// Azimuth where the color-boundary diagonal crosses the corner arc (center
+/// K=(r,r), radius rc) in the corner-local frame, clamped into the
+/// [180°, 270°] quadrant. Substituting the ray t·(a,b) ((a,b) = unit
+/// diagonal direction) into |P−K|=rc gives
+/// t² − 2t·r·(a+b) + 2r² − rc² = 0; take the near root
+/// t = r(a+b) − √(rc² − r²(a−b)²). When the discriminant < 0 (the diagonal
+/// misses that centerline arc — seen when one edge is much thicker) or
+/// t < 0, degenerate to the nearest point t* = r(a+b) — the clamped azimuth
+/// then naturally lands on 180° (the wide edge owns the whole quadrant) or
+/// 270° (the narrow edge cedes the whole quadrant).
 fn diagonal_arc_crossing_deg(r: f64, rc: f64, w_u: f64, w_v: f64) -> f64 {
     let len = (w_u * w_u + w_v * w_v).sqrt();
     if len <= 0.0 {
@@ -1993,16 +2052,21 @@ fn diagonal_arc_crossing_deg(r: f64, rc: f64, w_u: f64, w_v: f64) -> f64 {
     angle.clamp(180.0, 270.0)
 }
 
-/// 边带中心线弧半径：r − w/2（下限 0.5 防退化；与旧直算一致）。
+/// Edge-band centerline arc radius: r − w/2 (floored at 0.5 to avoid
+/// degeneracy; matches the old direct computation).
 fn centerline_radius(r: f32, w: f32) -> f64 {
     f64::from((r - w / 2.0).max(0.5))
 }
 
-/// 角部两条弧段的分界角（屏幕系，已归一 [0°, 360°)）：返回
-/// (邻接段终点角, 拥有段起点角)。每段取自身中心线弧（半径 r−w/2）与
-/// 同一对角线的交点——两段在其各自弧上分别与对角线相接，且各自与所邻
-/// 直线段切向连续。等宽时两角重合于对角线 45° 方位（225°+shift）。
-/// shift = 角局部系到屏幕系的方位平移（TL 0°、TR 90°、BR 180°、BL 270°）。
+/// Boundary angles between a corner's two arc segments (screen frame,
+/// normalized to [0°, 360°)): returns (adjacent-segment end angle,
+/// owning-segment start angle). Each segment takes the intersection of its
+/// own centerline arc (radius r−w/2) with the same diagonal — the two
+/// segments meet the diagonal on their respective arcs, and each stays
+/// tangentially continuous with its adjacent straight side. With equal
+/// widths both angles coincide on the diagonal's 45° azimuth (225°+shift).
+/// shift = the azimuth translation from the corner-local to the screen
+/// frame (TL 0°, TR 90°, BR 180°, BL 270°).
 fn corner_arc_bounds(r: f32, w_owner: f32, w_neighbor: f32, shift_deg: f64) -> (f64, f64) {
     let rf = f64::from(r);
     let th_n = diagonal_arc_crossing_deg(
@@ -2023,9 +2087,10 @@ fn corner_arc_bounds(r: f32, w_owner: f32, w_neighbor: f32, shift_deg: f64) -> (
     )
 }
 
-/// css-backgrounds-3 §4.5「Overlapping Curves」角弧重叠收缩：
-/// f = min(Lᵢ/Sᵢ)（仅 Sᵢ > Lᵢ 的边参与；Ltop=Lbottom=盒宽，Lleft=Lright=
-/// 盒高，Sᵢ = 该边两端角半径之和）；f < 1 时全部角半径乘 f。
+/// css-backgrounds-3 §4.5 "Overlapping Curves" corner-arc overlap shrink:
+/// f = min(Lᵢ/Sᵢ) (only edges with Sᵢ > Lᵢ participate; Ltop=Lbottom=box
+/// width, Lleft=Lright=box height, Sᵢ = the sum of the two corner radii on
+/// that edge); when f < 1 all corner radii are multiplied by f.
 fn shrink_corner_radii(w: f32, h: f32, radius: [f32; 4]) -> [f32; 4] {
     let [tl, tr, br, bl] = radius;
     let mut f = 1.0f32;
@@ -2066,11 +2131,17 @@ fn stroke_side(
     scene.stroke(&stroke, xform, s.color, None, path);
 }
 
-/// 方角（radius≈0）角部对角线二分（第四批⑤）：外角→内角对角线把角部方块
-/// 分给相邻两边（CSS 语义）；单边存在整块归该边；同色整块一次填充——消除
-/// 旧「全边长直线交叉」的半透明双重着色与「后画方」角色偏差。圆角弧段同以
-/// 该颜色分界对角线分界（方向 = (邻边宽, 拥有边宽)，见 corner_arc_bounds）；
-/// 极端宽窄比下沿对角线可余细缝/后画边覆盖窄边一条——近似记 FEATURES。
+/// Square-corner (radius≈0) diagonal bisection (batch-4 ⑤): the diagonal
+/// from the outer corner to the inner corner splits the corner square
+/// between the two adjacent sides (CSS semantics); with only one side
+/// present the whole block goes to that side; same-color blocks are filled
+/// in one pass — eliminating the old "full-edge-length line crossing"
+/// double-shading of semi-transparent colors and the "later side wins"
+/// ownership bias. Rounded corner arcs are likewise split along this
+/// color-boundary diagonal (direction = (adjacent width, owning width),
+/// see corner_arc_bounds); at extreme width ratios a thin seam may remain
+/// along the diagonal / the later-painted side may cover one edge of the
+/// narrow side — approximation recorded in FEATURES.
 fn fill_tri(scene: &mut Scene, xform: Affine, pts: [[f32; 2]; 3], color: AlphaColor<Srgb>) {
     let mut path = BezPath::new();
     path.move_to(Point::new(f64::from(pts[0][0]), f64::from(pts[0][1])));
@@ -2087,15 +2158,22 @@ fn fill_quad(scene: &mut Scene, xform: Affine, sq: [f32; 4], color: AlphaColor<S
     fill_tri(scene, xform, [[x0, y0], [x1, y1], [x0, y1]], color);
 }
 
-/// 方角角部条目：(圆角判定, 拥有边, 相邻边, 方块, 拥有边三角, 相邻边三角)。
+/// Square-corner corner entry: (rounded-corner radius, owning side,
+/// adjacent side, square, owning-side triangle, adjacent-side triangle).
 type CornerSpec = (f32, usize, usize, [f32; 4], [[f32; 2]; 3], [[f32; 2]; 3]);
 
-/// 四边分画（T4b）：每边一条「角弧段 + 直线」描边路径；角弧按顺时针归属
-/// （TL→top、TR→right、BR→bottom、BL→left）。不等宽时各角两段弧以颜色分界
-/// 对角线（方向 = (邻边有效宽, 拥有边有效宽)，等宽=45°）与该边中心线弧的
-/// 交点为界（corner_arc_bounds）——各段与所邻直线切向连续；半径和超出边长
-/// 先按 css-backgrounds §4.5 等比收缩（shrink_corner_radii）。极端宽窄比下
-/// 两段弧半径不同，接缝沿对角线可余细缝/后画边覆盖窄边一条——近似记 FEATURES。
+/// Four-side split painting (T4b): each side gets one stroke path of "corner
+/// arc segments + straight line"; corner arcs are assigned clockwise
+/// (TL→top, TR→right, BR→bottom, BL→left). With unequal widths, the two arc
+/// segments at each corner are bounded by where the color-boundary diagonal
+/// (direction = (adjacent effective width, owning effective width), 45°
+/// when equal) crosses that side's centerline arc (corner_arc_bounds) —
+/// each segment stays tangentially continuous with its adjacent straight
+/// side; when the radius sum exceeds the edge length, radii are first
+/// scaled down per css-backgrounds §4.5 (shrink_corner_radii). At extreme
+/// width ratios the two arc segments have different radii, so the seam may
+/// leave a thin gap along the diagonal / the later-painted side may cover
+/// one edge of the narrow side — approximation recorded in FEATURES.
 #[allow(clippy::too_many_arguments)]
 fn draw_border(
     scene: &mut Scene,

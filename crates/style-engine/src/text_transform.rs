@@ -1,28 +1,34 @@
-//! text-transform 变换（C2，css-text-3 / ADR-0016）。
+//! text-transform transformations (C2, css-text-3 / ADR-0016).
 //!
-//! 纯字符串变换（无 cfg 门——度量路径 text.rs 与绘制路径 paint.rs 共用）：
-//! 按 span 边界切段、每段用管辖样式的 text_transform（CSS 语义 = 变换按
-//! 元素框独立，词界不跨框）；逐字符执行并记录 old→new 字节映射（ß→SS 等
-//! 扩缩安全），span 偏移经映射重写。capitalize 词界按 css-text-4 取
-//! UAX#29（unicode-segmentation）：每词段首个排印字母单元大写。树内
-//! node.text 恒存原文（唯一真源），变换为幂等消费。
+//! Pure string transformation (no cfg gate — shared by the measurement path
+//! text.rs and the paint path paint.rs): segments are cut at span boundaries and
+//! each segment uses the text_transform of its governing style (CSS semantics =
+//! transformation is per element box, word boundaries do not cross boxes);
+//! executed per character while recording the old→new byte mapping (expansion-
+//! safe for ß→SS etc.), with span offsets rewritten through the mapping.
+//! capitalize word boundaries follow css-text-4 via UAX#29
+//! (unicode-segmentation): the first typographic letter unit of each word
+//! segment is uppercased. node.text in the tree always stores the original text
+//! (single source of truth); transformation is an idempotent consumer.
 
 use crate::computed::ComputedStyle;
 use crate::css::property::{FontVariantCapsKind, TextTransformKind};
 use unicode_segmentation::UnicodeSegmentation;
 
-/// 变换结果：变换后文本 + 逐字符 old→new 字节映射。
+/// Transformation result: transformed text + per-character old→new byte mapping.
 pub(crate) struct TransformedText {
-    /// 变换后文本。
+    /// Transformed text.
     pub text: String,
-    /// 每字符的旧起始字节（char 序）。
+    /// Old start byte of each character (char order).
     old_starts: Vec<usize>,
-    /// 每字符的新起始字节（char 序）；末位补总长（末字符 end）。
+    /// New start byte of each character (char order); a final entry holds the
+    /// total length (the last character's end).
     new_starts: Vec<usize>,
 }
 
 impl TransformedText {
-    /// 旧字节偏移（须落在字符边界；text.len() = 文本末尾）→ 新字节偏移。
+    /// Old byte offset (must land on a character boundary; text.len() = end of
+    /// the text) → new byte offset.
     pub fn map(&self, old: usize) -> usize {
         match self.old_starts.binary_search(&old) {
             Ok(i) => self.new_starts[i],
@@ -38,7 +44,8 @@ impl TransformedText {
     }
 }
 
-/// 快路径判据：基样式与全部 span 均为 none → 无需变换（零成本直通）。
+/// Fast-path predicate: base style and all spans are none → no transformation
+/// needed (zero-cost passthrough).
 pub(crate) fn needs_transform(base: &ComputedStyle, spans: &[(u32, u32, &ComputedStyle)]) -> bool {
     base.text_transform() != TextTransformKind::None
         || spans
@@ -46,9 +53,10 @@ pub(crate) fn needs_transform(base: &ComputedStyle, spans: &[(u32, u32, &Compute
             .any(|(_, _, cs)| cs.text_transform() != TextTransformKind::None)
 }
 
-/// 分段计划：切点 = {0, len} ∪ span 端点（clamp/去空/排序去重），连续
-/// 覆盖全文本；每段 kind = 覆盖该段的 span 样式 text_transform，否则基
-/// 样式（未覆盖区间 = 基样式）。
+/// Segment plan: cut points = {0, len} ∪ span endpoints (clamped, empties
+/// removed, sorted and deduplicated), contiguously covering the whole text; each
+/// segment's kind = the text_transform of the span style covering it, otherwise
+/// the base style (uncovered ranges = base style).
 pub(crate) fn segments(
     text: &str,
     base: &ComputedStyle,
@@ -79,10 +87,12 @@ pub(crate) fn segments(
     out
 }
 
-/// 分段变换。segments = (旧字节起点, 旧字节终点, 种类)（互斥升序；未覆盖
-/// 字符按 None）。capitalize 段内按 UAX#29 词界分词（css-text-4：每词段
-/// 首个排印字母单元大写，即使词前有标点），词界状态跨段重置（变换按元素
-/// 框独立）。
+/// Segmented transformation. segments = (old byte start, old byte end, kind)
+/// (mutually exclusive, ascending; uncovered characters get None). Within a
+/// capitalize segment, words are split on UAX#29 word boundaries (css-text-4:
+/// the first typographic letter unit of each word segment is uppercased, even
+/// when punctuation precedes the word); word-boundary state resets across
+/// segments (transformation is per element box).
 pub(crate) fn transform(
     text: &str,
     segments: &[(usize, usize, TextTransformKind)],
@@ -125,9 +135,11 @@ pub(crate) fn transform(
     }
 }
 
-/// 单字符变换（capitalize：词段内首个排印字母单元已由 transform 按
-/// UAX#29 词界预标记，first_alpha 时整字 to_uppercase 展开，其余原样——
-/// 词界判定在分词侧，此处只执行）。
+/// Single-character transformation (capitalize: the first typographic letter
+/// unit of a word segment has been pre-marked by transform on UAX#29 word
+/// boundaries; when first_alpha the whole character expands via to_uppercase,
+/// otherwise it passes through unchanged — word-boundary detection lives on the
+/// segmentation side, this only executes).
 fn push_transformed(out: &mut String, ch: char, kind: TextTransformKind, first_alpha: bool) {
     match kind {
         TextTransformKind::None => out.push(ch),
@@ -162,20 +174,22 @@ fn push_transformed(out: &mut String, ch: char, kind: TextTransformKind, first_a
 // text.rs 与绘制路径 paint.rs 共用），树内原文不受影响。
 // ---------------------------------------------------------------------------
 
-/// 合成区间字号缩放系数（CSS Fonts 4 合成 small-caps 近似）。
+/// Font-size scaling factor for synthesized ranges (CSS Fonts 4 synthetic
+/// small-caps approximation).
 pub(crate) const SYNTH_CAPS_SCALE: f32 = 0.8;
 
-/// 合成模式：Small = 小写→大写并缩放（大写原样不动）；AllSmall =
-/// 全部大小写字母统一大写并缩放。
+/// Synthesis mode: Small = lowercase → uppercase and scaled (uppercase left
+/// untouched); AllSmall = all letters, both cases, uppercased and scaled.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CapsMode {
     Small,
     AllSmall,
 }
 
-/// font-variant-caps 种类 → 合成模式（Petite/AllPetite 合成走 Small/
-/// AllSmall——字体缺 petite 字形时 CSS 回退 small-caps，合成同源，
-/// B 级近似在案）。
+/// font-variant-caps kind → synthesis mode (Petite/AllPetite synthesis goes
+/// through Small/AllSmall — when the font lacks petite glyphs CSS falls back to
+/// small-caps, and synthesis shares that source; Tier B approximation, documented
+/// in FEATURES.md/SINK-MATRIX.md).
 pub(crate) fn caps_mode(kind: FontVariantCapsKind) -> Option<CapsMode> {
     match kind {
         FontVariantCapsKind::SmallCaps | FontVariantCapsKind::PetiteCaps => Some(CapsMode::Small),
@@ -188,7 +202,8 @@ pub(crate) fn caps_mode(kind: FontVariantCapsKind) -> Option<CapsMode> {
     }
 }
 
-/// 快路径判据：基样式与任一 span 启用可合成 caps → 需要合成。
+/// Fast-path predicate: base style or any span enables synthesizable caps →
+/// synthesis needed.
 pub(crate) fn needs_caps_synth(base: &ComputedStyle, spans: &[(u32, u32, &ComputedStyle)]) -> bool {
     caps_mode(base.font_variant_caps()).is_some()
         || spans
@@ -196,22 +211,27 @@ pub(crate) fn needs_caps_synth(base: &ComputedStyle, spans: &[(u32, u32, &Comput
             .any(|(_, _, cs)| caps_mode(cs.font_variant_caps()).is_some())
 }
 
-/// 合成结果：合成后文本 + 逐字符 old→new 字节映射 + 0.8× 缩放区间
-///（新坐标、互斥升序；相邻字符仅当覆盖同一 span 时并邻，第三元为区间
-/// 首字符的旧字节起点——绘制侧按原文域查覆盖 span 取样式）。
+/// Synthesis result: synthesized text + per-character old→new byte mapping +
+/// 0.8× scaled ranges (new coordinates, mutually exclusive ascending; adjacent
+/// characters are merged only when covered by the same span, the third element is
+/// the old byte start of the range's first character — the paint side looks up
+/// the covering span's style against the original-text domain).
 pub(crate) struct CapsSynthesis {
-    /// 合成后文本。
+    /// Synthesized text.
     pub text: String,
-    /// 每字符的旧起始字节（char 序）。
+    /// Old start byte of each character (char order).
     old_starts: Vec<usize>,
-    /// 每字符的新起始字节（char 序）；末位补总长（末字符 end）。
+    /// New start byte of each character (char order); a final entry holds the
+    /// total length (the last character's end).
     new_starts: Vec<usize>,
-    /// 缩放字符区间（新文本坐标 + 首字符旧字节起点）。
+    /// Scaled character ranges (new text coordinates + old byte start of the
+    /// first character).
     pub scaled: Vec<(u32, u32, usize)>,
 }
 
 impl CapsSynthesis {
-    /// 旧字节偏移（须落在字符边界；text.len() = 文本末尾）→ 新字节偏移。
+    /// Old byte offset (must land on a character boundary; text.len() = end of
+    /// the text) → new byte offset.
     pub fn map(&self, old: usize) -> usize {
         match self.old_starts.binary_search(&old) {
             Ok(i) => self.new_starts[i],
@@ -226,12 +246,14 @@ impl CapsSynthesis {
     }
 }
 
-/// 小型大写合成。模式 = 覆盖该字符的 span 样式 font_variant_caps，未覆盖
-/// 区间用基样式（与 text-transform 分段语义一致）。CSS 顺序 = 先
-/// text-transform 后合成（uppercase 变换 + small-caps → 全大写不缩放，
-/// 与 Chromium 一致——合成只看变换后的字符）。仅大小写字母参与：小写→
-/// 大写（ß→SS 扩缩安全）记缩放；AllSmall 下大写原样保留但缩放；数字/
-/// 标点/CJK 等无大小写字符不受影响。
+/// Small-caps synthesis. Mode = the font_variant_caps of the span style covering
+/// the character, base style for uncovered ranges (same segmentation semantics as
+/// text-transform). CSS order = text-transform first, then synthesis (uppercase
+/// transform + small-caps → all uppercase, unscaled, matching Chromium —
+/// synthesis only sees post-transform characters). Only cased letters
+/// participate: lowercase → uppercase (expansion-safe for ß→SS) is recorded as
+/// scaled; under AllSmall uppercase letters stay as-is but are scaled; digits,
+/// punctuation, CJK and other caseless characters are unaffected.
 pub(crate) fn synth_caps(
     text: &str,
     base: &ComputedStyle,
@@ -298,7 +320,8 @@ mod tests {
     use crate::css::stylesheet::{MediaEnv, parse_stylesheet};
     use crate::tree::{StyleNode, StyleTree};
 
-    /// 样式构造：#n = none、#u = uppercase、#c = capitalize、#f = full-width。
+    /// Style builder: #n = none, #u = uppercase, #c = capitalize, #f =
+    /// full-width.
     fn style_of(name: &str) -> ComputedStyle {
         let sheet = parse_stylesheet(
             "#n { text-transform: none; } #u { text-transform: uppercase; } #c { text-transform: capitalize; } #f { text-transform: full-width; }",
@@ -464,7 +487,8 @@ mod tests {
 
     // F3d（ADR-0026 D5）：caps 合成 ------------------------------------------------
 
-    /// caps 样式构造：#n = normal、#sc = small-caps、#asc = all-small-caps。
+    /// caps style builder: #n = normal, #sc = small-caps, #asc =
+    /// all-small-caps.
     fn caps_style(name: &str) -> ComputedStyle {
         let sheet = parse_stylesheet(
             "#n { font-variant-caps: normal; } #sc { font-variant-caps: small-caps; } #asc { font-variant-caps: all-small-caps; }",

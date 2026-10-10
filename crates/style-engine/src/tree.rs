@@ -1,8 +1,10 @@
-//! 样式树：宿主推送输入的镜像（ADR-0005 mirror-push-sync）。
+//! The style tree: a mirror of host-pushed input (ADR-0005
+//! mirror-push-sync).
 //!
-//! StyleTree 只存储「样式输入」（类型名/id/类/状态/内联声明/文本），
-//! 不含布局与绘制状态；宿主通过 push 同步协议维持镜像一致。键为
-//! slotmap `NodeId`（稳定、Copy、可哈希），供选择器匹配与引擎索引。
+//! StyleTree stores only "style input" (type name/id/classes/state/inline
+//! declarations/text) and no layout or paint state; the host keeps the mirror
+//! consistent through the push sync protocol. Keys are slotmap `NodeId`s
+//! (stable, Copy, hashable), used for selector matching and engine indexing.
 
 use crate::css::decl::DeclarationBlock;
 use bitflags::bitflags;
@@ -10,27 +12,28 @@ use slotmap::{SecondaryMap, SlotMap, new_key_type};
 use smallvec::SmallVec;
 
 new_key_type! {
-    /// 样式树节点键。
+    /// A style-tree node key.
     pub struct NodeId;
 }
 
 bitflags! {
-    /// 交互状态位（宿主推送；非树结构伪类匹配依据）。
+    /// Interaction state bits (pushed by the host; the basis for matching
+    /// non-structural pseudo-classes).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct NodeState: u16 {
-        /// :hover（悬停）。
+        /// :hover (hovering).
         const HOVER = 1 << 0;
-        /// :active（按下）。
+        /// :active (pressed).
         const ACTIVE = 1 << 1;
-        /// :focus（聚焦）。
+        /// :focus (focused).
         const FOCUS = 1 << 2;
-        /// :focus-visible（键盘聚焦可见）。
+        /// :focus-visible (keyboard focus, visible).
         const FOCUS_VISIBLE = 1 << 3;
-        /// :focus-within（自身或后代聚焦）。
+        /// :focus-within (self or a descendant focused).
         const FOCUS_WITHIN = 1 << 4;
-        /// :disabled（禁用）。
+        /// :disabled (disabled).
         const DISABLED = 1 << 5;
-        /// :checked（选中）。
+        /// :checked (checked).
         const CHECKED = 1 << 6;
     }
 }
@@ -41,68 +44,83 @@ impl Default for NodeState {
     }
 }
 
-/// 伪元素变体（C1/ADR-0015、P9-3）：宿主不可构造——引擎
-/// materialize_pseudos 专用。tree.rs 自定义（selector.rs 引用映射，避免
-/// 反向依赖）。
+/// Pseudo-element variants (C1/ADR-0015, P9-3): not host-constructible —
+/// reserved for the engine's materialize_pseudos. Defined in tree.rs
+/// (selector.rs references the mapping, avoiding a reverse dependency).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PseudoWhich {
-    /// ::before（首子伪节点）。
+    /// ::before (first-child pseudo node).
     Before,
-    /// ::after（末子伪节点）。
+    /// ::after (last-child pseudo node).
     After,
-    /// ::marker（P9-3，css-lists-3 §3.1）：列表项标记伪节点——宿主首子、
-    /// ::before 之前；文本由引擎按宿主 list-style-* 机器合成（§3.2 内容
-    /// 算法），非 list-item 宿主的内容计算为 none（抑制成盒）。
+    /// ::marker (P9-3, css-lists-3 §3.1): the list-item marker pseudo node —
+    /// hosted as the first child, before ::before; its text is machine
+    /// synthesized by the engine from the host's list-style-* values (the
+    /// §3.2 content algorithm); for hosts that are not list-item, the
+    /// content computes to none (suppressing the box).
     Marker,
 }
 
-/// 单个节点的样式输入（宿主拥有语义，引擎镜像存储）。
+/// Style input for a single node (the host owns the semantics; the engine
+/// mirrors the storage).
 #[derive(Debug, Clone, Default)]
 pub struct StyleNode {
-    /// 元素类型名（如 "button"）；None 则不参与类型选择器匹配。
+    /// Element type name (e.g. "button"); None means no type-selector
+    /// matching.
     pub name: Option<String>,
-    /// 文档内唯一 id（#foo）。
+    /// Document-unique id (#foo).
     pub id: Option<String>,
-    /// class 列表（按精确项匹配）。
+    /// class list (matched by exact item).
     pub classes: SmallVec<[String; 4]>,
-    /// 交互状态位。
+    /// Interaction state bits.
     pub state: NodeState,
-    /// 内联声明（style 属性语义）。
+    /// Inline declarations (style attribute semantics).
     pub declarations: DeclarationBlock,
-    /// 文本内容（叶节点；:empty 判定与 T5 文本布局用）。
+    /// Text content (leaf nodes; used for :empty checks and T5 text layout).
     pub text: Option<String>,
-    /// 替换内容图像引用（C3，css-images-3；ADR-0017）：宿主经 `add_image`
-    /// 预注册的引用名；None = 非替换元素。绘制期按 object-fit/object-position
-    /// 适配内容盒；固有尺寸自动注入（未手动 set_leaf_intrinsic 时）。
+    /// Replaced-content image reference (C3, css-images-3; ADR-0017): a
+    /// reference name pre-registered by the host via `add_image`; None = not
+    /// a replaced element. Painted by fitting into the content box per
+    /// object-fit/object-position; intrinsic sizing is injected
+    /// automatically (when set_leaf_intrinsic was not called manually).
     pub image: Option<String>,
-    /// 属性表（第五批⑮属性选择器数据源）：宿主供 \[attr\]/\[attr=value\] 匹配；
-    /// BTreeMap 保证遍历序确定。GUI 树无命名空间、值大小写敏感。
+    /// Attribute table (fifth batch ⑮, the attribute-selector data source):
+    /// the host supplies \[attr\]/\[attr=value\] matching data; BTreeMap
+    /// guarantees deterministic iteration order. GUI trees have no
+    /// namespaces, and values are case-sensitive.
     pub attrs: std::collections::BTreeMap<String, String>,
-    /// 富文本 span（T5c）：声明覆盖文本的字节区间 [range.0, range.1)。
+    /// Rich-text spans (T5c): declarations overriding the byte range
+    /// [range.0, range.1) of the text.
     pub spans: SmallVec<[TextSpan; 2]>,
-    /// 伪元素标记（C1）：Some = 引擎实体化的伪节点（无宿主语义、不参与
-    /// 结构伪类计数/宿主镜像；文本由 content 计算值供给）。
+    /// Pseudo-element marker (C1): Some = a pseudo node materialized by the
+    /// engine (no host semantics, excluded from structural pseudo-class
+    /// counting / the host mirror; text is supplied by the content computed
+    /// value).
     pub pseudo: Option<PseudoWhich>,
 }
 
-/// span 级富文本：区间内声明以级联覆盖基样式（引擎复用 compute_node 求解，
-/// 以节点基样式为 parent，得到与选择器规则一致的覆盖语义）。
+/// Span-level rich text: declarations within the range override the base
+/// style through the cascade (the engine reuses compute_node, with the
+/// node's base style as parent, giving override semantics consistent with
+/// selector rules).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpan {
-    /// 文本字节区间 [range.0, range.1)。
+    /// Text byte range [range.0, range.1).
     pub range: (u32, u32),
-    /// 区间内覆盖基样式的声明（以节点基样式为父级联）。
+    /// Declarations overriding the base style within the range (cascaded
+    /// with the node's base style as parent).
     pub declarations: DeclarationBlock,
 }
 
 impl StyleNode {
-    /// :empty 语义：无元素子节点且无非空文本。
+    /// :empty semantics: no element children and no non-empty text.
     pub fn is_empty(&self) -> bool {
         self.text.as_ref().is_none_or(|t| t.is_empty())
     }
 }
 
-/// 样式树镜像。根节点固定存在（宿主 UI 树的根容器）。
+/// The style-tree mirror. The root node always exists (the root container of
+/// the host UI tree).
 #[derive(Debug)]
 pub struct StyleTree {
     nodes: SlotMap<NodeId, StyleNode>,
@@ -118,7 +136,7 @@ impl Default for StyleTree {
 }
 
 impl StyleTree {
-    /// 新建镜像树（根节点固定存在）。
+    /// Creates a new mirror tree (the root node always exists).
     pub fn new() -> Self {
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(StyleNode::default());
@@ -130,27 +148,30 @@ impl StyleTree {
         }
     }
 
-    /// 根节点键。
+    /// The root node key.
     pub fn root(&self) -> NodeId {
         self.root
     }
 
-    /// 按键读节点样式输入。
+    /// Reads a node's style input by key.
     pub fn node(&self, id: NodeId) -> &StyleNode {
         &self.nodes[id]
     }
 
-    /// 按键读写节点样式输入（宿主推送镜像通道）。
+    /// Reads/writes a node's style input by key (the host push-mirror
+    /// channel).
     pub fn node_mut(&mut self, id: NodeId) -> &mut StyleNode {
         &mut self.nodes[id]
     }
 
-    /// 节点存储位置引用（opaque 身份用：slotmap 存储地址稳定且唯一）。
+    /// A reference to the node's storage slot (for opaque identity: slotmap
+    /// storage addresses are stable and unique).
     pub(crate) fn node_ref(&self, id: NodeId) -> &StyleNode {
         &self.nodes[id]
     }
 
-    /// 插入子节点（追加到 children 末尾），返回新 NodeId。
+    /// Inserts a child (appended to the end of children), returning the new
+    /// NodeId.
     pub fn insert_child(&mut self, parent: NodeId, node: StyleNode) -> NodeId {
         let id = self.nodes.insert(node);
         self.parent.insert(id, Some(parent));
@@ -161,7 +182,8 @@ impl StyleTree {
         id
     }
 
-    /// 重设子节点顺序（镜像宿主顺序；id 须已是该父节点的子节点）。
+    /// Resets the child order (mirroring the host order; ids must already be
+    /// children of this parent).
     pub fn set_children(&mut self, parent: NodeId, ids: &[NodeId]) {
         if !self.children.contains_key(parent) {
             self.children.insert(parent, Vec::new());
@@ -171,7 +193,8 @@ impl StyleTree {
         list.extend_from_slice(ids);
     }
 
-    /// 移除节点及其整个子树，并从父链摘除。
+    /// Removes a node and its entire subtree, detaching it from the parent
+    /// chain.
     pub fn remove(&mut self, id: NodeId) {
         let mut stack = vec![id];
         let mut doomed = Vec::new();
@@ -193,40 +216,43 @@ impl StyleTree {
         }
     }
 
-    /// 父节点键（根为 None）。
+    /// The parent node key (None at the root).
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.parent.get(id).copied().flatten()
     }
 
-    /// 子节点键（镜像宿主顺序）。
+    /// Child node keys (mirroring the host order).
     pub fn children(&self, id: NodeId) -> &[NodeId] {
         self.children.get(id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// 是否为引擎实体化的伪元素节点（C1）。
+    /// Whether this is an engine-materialized pseudo-element node (C1).
     pub fn is_pseudo(&self, id: NodeId) -> bool {
         self.nodes.get(id).is_some_and(|n| n.pseudo.is_some())
     }
 
-    /// 节点总数（含根）。
+    /// Total node count (including the root).
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    /// 是否为空（根恒存在，故恒为 false）。
+    /// Whether the tree is empty (the root always exists, so always false).
     pub fn is_empty(&self) -> bool {
         self.nodes.len() == 0
     }
 
-    /// 是否为根节点（用户根：父=合成超根）。
+    /// Whether this is a root node (a user root: parent = the synthetic
+    /// super root).
     ///
-    /// ADR-0010：arena 根槽为合成超根（永不绑定 key、样式恒空），
-    /// 用户根是其子节点——`:root` 伪类匹配全部用户根。
+    /// ADR-0010: the arena root slot is a synthetic super root (never bound
+    /// to a key, always empty styles), and user roots are its children — the
+    /// `:root` pseudo-class matches all user roots.
     pub fn is_root(&self, id: NodeId) -> bool {
         id != self.root && self.parent(id) == Some(self.root)
     }
 
-    /// 是否为合成超根（arena 根槽；不参与级联/绘制语义，仅作挂载点）。
+    /// Whether this is the synthetic super root (the arena root slot; takes
+    /// part in no cascade/paint semantics, serving only as a mount point).
     pub fn is_super_root(&self, id: NodeId) -> bool {
         id == self.root
     }

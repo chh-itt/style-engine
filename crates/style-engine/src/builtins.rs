@@ -1,22 +1,28 @@
-//! 内置 UA 起源样式表常量（P5，ADR-0033 D3）。
+//! Built-in UA-origin stylesheet constants (P5, ADR-0033 D3).
 //!
-//! 中立契约：引擎默认**不**装载任何 UA 表——缺省呈现是宿主策略。本模块
-//! 提供一份 HTML 语义最小缺省表（`DEFAULT_UA_SHEET`），宿主可通过
-//! [`crate::StyleEngine::set_ua_stylesheet`] 自行装载。
+//! Neutrality contract: by default the engine loads **no** UA sheet — the
+//! default presentation is host policy. This module provides a minimal
+//! HTML-semantics default sheet (`DEFAULT_UA_SHEET`), which a host may load
+//! itself via [`crate::StyleEngine::set_ua_stylesheet`].
 //!
-//! 范围界定（ADR-0033 D3）：块级清单、标题阶梯、短语语义（粗/斜/装饰/
-//! 缩放/对齐）、pre 空白与等宽族。P9-3（css-lists-3）：列表 marker 生成
-//! 与 `display: list-item` 已落地——li 发 list-item，ul/ol 按嵌套深度
-//! 换标记（ul: disc/circle/square，ol: decimal，对齐 Chromium UA）。
-//! 不做：hr 3D、表内 UA 细节（单元格内边距/表头居中）。
+//! Scope (ADR-0033 D3): the block-level list, the heading scale, phrasing
+//! semantics (bold/italic/decoration/scaling/alignment), and `pre`
+//! whitespace with a monospace family. P9-3 (css-lists-3): list marker
+//! generation and `display: list-item` are implemented — li emits list-item,
+//! and ul/ol switch markers by nesting depth (ul: disc/circle/square, ol:
+//! decimal, aligned with the Chromium UA sheet).
+//! Not done: hr 3D and in-table UA details (cell padding / header centering).
 //!
-//! 偏差【B】（P9-1c 已消除 small/big 一项）：HTML `small/big` 规范语义
-//! 为相对字号（smaller/larger，css-fonts-4 `<<relative-size>>`）——本表
-//! 已按规范改义；outside 标记悬挂按 inside 渲染（ADR-0041，B 级）。
+//! Deviations [Tier B] (P9-1c removed the small/big entry): the HTML
+//! `small/big` spec semantics are relative font sizes (smaller/larger,
+//! css-fonts-4 `<<relative-size>>`) — this sheet already follows the spec
+//! meaning; outside markers hang rendered as inside (ADR-0041, Tier B).
 
-/// HTML 语义最小缺省表（UA 层，css-cascade-5 UserAgent origin）。
+/// The minimal HTML-semantics default sheet (UA layer, css-cascade-5
+/// UserAgent origin).
 ///
-/// 解析契约：交由 `parse_stylesheet` 零错误零警告（锁定测试断言）。
+/// Parsing contract: fed to `parse_stylesheet` it yields zero errors and
+/// zero warnings (locked in by a test assertion).
 pub const DEFAULT_UA_SHEET: &str = r###"
 /* -- 块级清单（html-5 渲染建议的物化子集）；li=list-item（P9-3） -- */
 address, article, aside, blockquote, body, dd, details, dialog, div,

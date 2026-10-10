@@ -1,12 +1,15 @@
-//! F3a2（ADR-0023）：DisplayList 可序列化投影（feature = "serde" 门控）。
+//! F3a2 (ADR-0023): serializable projection of a DisplayList (gated by
+//! feature = "serde").
 //!
-//! PaintOp 全 20 变体的 typed tagged-enum 镜像（serde derive；色=\[f32;4\]
-//! sRGBA 分量、ImageRes 像素=`Vec<u8>` 直序列）；枚举值以 canonical 名字符
-//! 串承载（重建=名匹配+缺省回退——non_exhaustive 值族演进的诚实边界：
-//! 未知 op/单位/枚举名降级或跳过，不 panic）。
+//! A typed tagged-enum mirror of all 20 PaintOp variants (serde derive; colors =
+//! \[f32;4\] sRGBA components, ImageRes pixels = `Vec<u8>` serialized directly);
+//! enum values are carried as canonical name strings (reconstruction = name
+//! matching with default fallback — the honest boundary of evolving
+//! non_exhaustive value families: unknown ops/units/enum names degrade or are
+//! skipped, never panic).
 //!
-//! 入口：[`DisplayList::to_dump`]（序列化源）/ [`DisplayListDump::
-//! to_display_list`]（重建）。
+//! Entry points: [`DisplayList::to_dump`] (serialization source) /
+//! [`DisplayListDump::to_display_list`] (reconstruction).
 
 use serde::{Deserialize, Serialize};
 
@@ -20,18 +23,20 @@ use crate::paint::{
     TextShadowPaint, TextSpanPaint,
 };
 
-/// 颜色投影 = sRGBA 分量（AlphaColor\<Srgb\>.components 直序列）。
+/// Color projection = sRGBA components (serialized directly from
+/// AlphaColor\<Srgb\>.components).
 type ColorDump = [f32; 4];
 
 // ===== 值族镜像 =====
 
-/// `<length-percentage>` 投影：单位名+数值。non_exhaustive 值族——未知
-/// 变体以 unit="unknown" 记录并置零（重建丢弃=诚实边界）。
+/// `<length-percentage>` projection: unit name + value. A non_exhaustive value
+/// family — unknown variants are recorded with unit="unknown" and a zero value
+/// (dropped on reconstruction = the honest boundary).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LPDump {
-    /// 单位名：px/em/rem/%/vw/vh/cqw/cqh/cqi（未知="unknown"）。
+    /// Unit name: px/em/rem/%/vw/vh/cqw/cqh/cqi (unknown = "unknown").
     pub unit: String,
-    /// 数值。
+    /// Value.
     pub value: f32,
 }
 
@@ -78,15 +83,16 @@ fn lp_load(d: &LPDump) -> Option<LengthPercentage> {
     })
 }
 
-/// ColorValue 投影（non_exhaustive——未知变体降级 CurrentColor）。
+/// ColorValue projection (non_exhaustive — unknown variants degrade to
+/// CurrentColor).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "v")]
 pub enum ColorValueDump {
-    /// currentcolor。
+    /// currentcolor.
     CurrentColor,
-    /// 绝对 sRGBA。
+    /// Absolute sRGBA.
     Absolute(ColorDump),
-    /// light-dark() 两侧。
+    /// Both sides of light-dark().
     LightDark(ColorDump, ColorDump),
 }
 
@@ -109,114 +115,119 @@ fn color_load(d: &ColorValueDump) -> ColorValue {
     }
 }
 
-/// 渐变投影。
+/// Gradient projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GradientDump {
-    /// 类型+几何。
+    /// Type + geometry.
     pub kind: GradientKindDump,
-    /// repeating（css-images-3，P1-3；缺省 false 兼容旧 dump）。
+    /// repeating (css-images-3, P1-3; defaults to false for old-dump
+    /// compatibility).
     #[serde(default)]
     pub repeating: bool,
-    /// 停靠点。
+    /// Gradient stops.
     pub stops: Vec<ColorStopDump>,
-    /// 色彩提示（css-images-3，P9-1a；缺省空兼容旧 dump）。
+    /// Color hints (css-images-3, P9-1a; defaults to empty for old-dump
+    /// compatibility).
     #[serde(default)]
     pub hints: Vec<GradientHintDump>,
 }
 
-/// 色彩提示投影。
+/// Color hint projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GradientHintDump {
-    /// 提示位于该索引停点之前。
+    /// The hint sits before the stop at this index.
     pub after_stop: usize,
-    /// 提示位置。
+    /// Hint position.
     pub position: LPDump,
 }
 
-/// 渐变类型投影（non_exhaustive——未知变体降级 Linear 180deg）。
+/// Gradient kind projection (non_exhaustive — unknown variants degrade to
+/// Linear 180deg).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GradientKindDump {
-    /// 线性（角度°，Angle 度语义）。
+    /// Linear (angle in degrees, Angle degree semantics).
     Linear {
-        /// 角度（°）。
+        /// Angle (°).
         deg: f32,
     },
-    /// 径向。
+    /// Radial.
     Radial {
-        /// circle/ellipse（未知="unknown"）。
+        /// circle/ellipse (unknown = "unknown").
         shape: String,
-        /// 尺寸。
+        /// Size.
         size: RadialSizeDump,
-        /// 圆心 [x, y]。
+        /// Center [x, y].
         position: [LPDump; 2],
     },
-    /// 锥形。
+    /// Conic.
     Conic {
-        /// 起始角（°）。
+        /// Start angle (°).
         from_deg: f32,
-        /// 圆心 [x, y]。
+        /// Center [x, y].
         position: [LPDump; 2],
     },
 }
 
-/// 径向尺寸投影（non_exhaustive——未知变体降级 Named("unknown")）。
+/// Radial size projection (non_exhaustive — unknown variants degrade to
+/// Named("unknown")).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RadialSizeDump {
-    /// 关键字：closest-side/closest-corner/farthest-side/farthest-corner。
+    /// Keyword: closest-side/closest-corner/farthest-side/farthest-corner.
     Named(String),
-    /// 显式半径。
+    /// Explicit radii.
     Explicit {
-        /// 水平半径。
+        /// Horizontal radius.
         rx: LPDump,
-        /// 垂直半径（椭圆第二个；缺省 None）。
+        /// Vertical radius (the ellipse's second one; defaults to None).
         ry: Option<LPDump>,
     },
 }
 
-/// 混合模式投影（P1-2；kebab-case 序列化，与 CSS 关键字同名）。
+/// Blend mode projection (P1-2; serialized as kebab-case, matching the CSS
+/// keyword names).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BlendModeDump {
-    /// normal。
+    /// normal.
     Normal,
-    /// multiply。
+    /// multiply.
     Multiply,
-    /// screen。
+    /// screen.
     Screen,
-    /// overlay。
+    /// overlay.
     Overlay,
-    /// darken。
+    /// darken.
     Darken,
-    /// lighten。
+    /// lighten.
     Lighten,
-    /// color-dodge。
+    /// color-dodge.
     ColorDodge,
-    /// color-burn。
+    /// color-burn.
     ColorBurn,
-    /// hard-light。
+    /// hard-light.
     HardLight,
-    /// soft-light。
+    /// soft-light.
     SoftLight,
-    /// difference。
+    /// difference.
     Difference,
-    /// exclusion。
+    /// exclusion.
     Exclusion,
-    /// hue。
+    /// hue.
     Hue,
-    /// saturation。
+    /// saturation.
     Saturation,
-    /// color。
+    /// color.
     Color,
-    /// luminosity。
+    /// luminosity.
     Luminosity,
-    /// plus-lighter。
+    /// plus-lighter.
     PlusLighter,
-    /// plus-darker。
+    /// plus-darker.
     PlusDarker,
 }
 
 impl BlendModeDump {
-    /// 核心 BlendMode → 投影。
+    /// Core BlendMode → projection.
     pub(crate) fn from_core(m: &crate::css::property::BlendMode) -> Self {
         use crate::css::property::BlendMode as B;
         match m {
@@ -241,7 +252,7 @@ impl BlendModeDump {
         }
     }
 
-    /// 投影 → 核心 BlendMode。
+    /// Projection → core BlendMode.
     pub(crate) fn to_core(self) -> crate::css::property::BlendMode {
         use crate::css::property::BlendMode as B;
         match self {
@@ -267,72 +278,74 @@ impl BlendModeDump {
     }
 }
 
-/// 滤镜效果投影（P2，ADR-0031 D6）：绘制域 `FilterEffect` 的 serde
-/// 形态（tag = `fn`，kebab-case 函数名与 CSS 文法对应；数值语义同核心）。
+/// Filter effect projection (P2, ADR-0031 D6): serde form of the paint-domain
+/// `FilterEffect` (tag = `fn`, kebab-case function names matching the CSS
+/// grammar; numeric semantics identical to the core).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "fn", rename_all = "kebab-case")]
 pub enum FilterEffectDump {
-    /// blur（半径 px，σ = 半径/2 由 sink 换算）。
+    /// blur (radius px; σ = radius/2 converted by the sink).
     Blur {
-        /// 半径 px。
+        /// Radius px.
         radius: f32,
     },
-    /// brightness。
+    /// brightness.
     Brightness {
-        /// 乘数。
+        /// Multiplier.
         amount: f32,
     },
-    /// contrast。
+    /// contrast.
     Contrast {
-        /// 系数。
+        /// Coefficient.
         amount: f32,
     },
-    /// grayscale。
+    /// grayscale.
     Grayscale {
-        /// 插值比。
+        /// Interpolation ratio.
         amount: f32,
     },
-    /// sepia。
+    /// sepia.
     Sepia {
-        /// 插值比。
+        /// Interpolation ratio.
         amount: f32,
     },
-    /// saturate。
+    /// saturate.
     Saturate {
-        /// 系数。
+        /// Coefficient.
         amount: f32,
     },
-    /// invert。
+    /// invert.
     Invert {
-        /// 插值比。
+        /// Interpolation ratio.
         amount: f32,
     },
-    /// opacity。
+    /// opacity.
     Opacity {
-        /// alpha 乘数。
+        /// Alpha multiplier.
         amount: f32,
     },
-    /// hue-rotate（度）。
+    /// hue-rotate (degrees).
     HueRotate {
-        /// 角度。
+        /// Angle.
         degrees: f32,
     },
-    /// drop-shadow。
+    /// drop-shadow.
     DropShadow {
-        /// x 偏移 px。
+        /// x offset px.
         dx: f32,
-        /// y 偏移 px。
+        /// y offset px.
         dy: f32,
-        /// 模糊半径 px。
+        /// Blur radius px.
         blur: f32,
-        /// 终结 sRGBA。
+        /// Resolved sRGBA.
         color: [f32; 4],
     },
 }
 
 impl FilterEffectDump {
-    /// 核心 FilterEffect → 投影（unknown 兜底不可达于同 crate；
-    /// 前向兼容占位 = brightness 1.0 恒等）。
+    /// Core FilterEffect → projection (the unknown catch-all is unreachable
+    /// within the same crate; forward-compatibility placeholder = the identity
+    /// brightness 1.0).
     pub(crate) fn from_core(f: &crate::paint::FilterEffect) -> Self {
         use crate::paint::FilterEffect as F;
         #[allow(unreachable_patterns)]
@@ -361,7 +374,8 @@ impl FilterEffectDump {
         }
     }
 
-    /// 投影 → 核心 FilterEffect；未知变体 → None（重建跳过）。
+    /// Projection → core FilterEffect; unknown variants → None (skipped on
+    /// reconstruction).
     pub(crate) fn to_core(self) -> Option<crate::paint::FilterEffect> {
         use crate::paint::FilterEffect as F;
         match self {
@@ -389,12 +403,12 @@ impl FilterEffectDump {
     }
 }
 
-/// 停靠点投影。
+/// Gradient stop projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorStopDump {
-    /// 颜色。
+    /// Color.
     pub color: ColorValueDump,
-    /// 位置（None=沿轴自动均布）。
+    /// Position (None = evenly spaced along the axis).
     pub position: Option<LPDump>,
 }
 
@@ -509,14 +523,14 @@ fn gradient_load(d: &GradientDump) -> Gradient {
 
 // ===== 绘制面镜像 =====
 
-/// 单边边框投影。
+/// Single border side projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BorderSideDump {
-    /// 边宽 px。
+    /// Border width px.
     pub width: f32,
-    /// 边框样式名（none/solid/dashed/dotted；未知="none"）。
+    /// Border style name (none/solid/dashed/dotted; unknown = "none").
     pub style: String,
-    /// 边框色。
+    /// Border color.
     pub color: ColorDump,
 }
 
@@ -538,87 +552,89 @@ fn border_style_load(s: &str) -> BorderStyle {
     }
 }
 
-/// 径向几何投影（paint 层已解析绝对 px）。
+/// Radial geometry projection (absolute px resolved by the paint layer).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RadialGeomDump {
-    /// 圆心 x。
+    /// Center x.
     pub cx: f32,
-    /// 圆心 y。
+    /// Center y.
     pub cy: f32,
-    /// 水平半径。
+    /// Horizontal radius.
     pub rx: f32,
-    /// 垂直半径。
+    /// Vertical radius.
     pub ry: f32,
 }
 
-/// 锥形几何投影（paint 层已解析）。
+/// Conic geometry projection (resolved by the paint layer).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ConicGeomDump {
-    /// 圆心 x。
+    /// Center x.
     pub cx: f32,
-    /// 圆心 y。
+    /// Center y.
     pub cy: f32,
-    /// 起始角（弧度）。
+    /// Start angle (radians).
     pub start: f32,
 }
 
-/// 线性几何投影（F3d，ADR-0026；paint 层已解析渐变线绝对端点）。
+/// Linear geometry projection (F3d, ADR-0026; gradient-line absolute endpoints
+/// resolved by the paint layer).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LinearGeomDump {
-    /// 渐变线起点 (x, y)。
+    /// Gradient-line start (x, y).
     pub start: [f32; 2],
-    /// 渐变线终点 (x, y)。
+    /// Gradient-line end (x, y).
     pub end: [f32; 2],
 }
 
-/// 富文本 span 投影。
+/// Rich-text span projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextSpanDump {
-    /// span 起始字节偏移（含）。
+    /// Span start byte offset (inclusive).
     pub start: u32,
-    /// span 结束字节偏移（不含）。
+    /// Span end byte offset (exclusive).
     pub end: u32,
-    /// 文本色。
+    /// Text color.
     pub color: ColorDump,
-    /// 字号 px。
+    /// Font size px.
     pub font_size: f32,
-    /// 字重。
+    /// Font weight.
     pub font_weight: f32,
-    /// 斜体。
+    /// Italic.
     pub italic: bool,
-    /// 字体族列表。
+    /// Font family list.
     pub font_family: Vec<String>,
-    /// span 字距 px（P9-5；缺省 0 = 旧 dump 兼容）。
+    /// Span letter spacing px (P9-5; defaults to 0 for old-dump compatibility).
     #[serde(default)]
     pub letter_spacing: f32,
-    /// span 行高 px（P9-5；缺省 None = normal，旧 dump 兼容）。
+    /// Span line height px (P9-5; defaults to None = normal, old-dump
+    /// compatibility).
     #[serde(default)]
     pub line_height: Option<f32>,
 }
 
-/// 文本装饰投影。
+/// Text decoration projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextDecorationDump {
-    /// 行位集（1=underline 2=overline 4=line-through）。
+    /// Line bit set (1=underline 2=overline 4=line-through).
     pub line: u8,
-    /// 线型名（solid/double/dotted/dashed/wavy；未知="solid"）。
+    /// Line style name (solid/double/dotted/dashed/wavy; unknown = "solid").
     pub style: String,
-    /// 装饰色。
+    /// Decoration color.
     pub color: ColorDump,
-    /// 厚度 px。
+    /// Thickness px.
     pub thickness_px: f32,
 }
 
-/// 文本阴影投影。
+/// Text shadow projection.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TextShadowDump {
-    /// 水平偏移 px。
+    /// Horizontal offset px.
     pub dx: f32,
-    /// 垂直偏移 px。
+    /// Vertical offset px.
     pub dy: f32,
-    /// 模糊半径 px。
+    /// Blur radius px.
     pub blur: f32,
-    /// 阴影色。
+    /// Shadow color.
     pub color: ColorDump,
 }
 
@@ -744,279 +760,283 @@ fn shadow_dump(s: &TextShadowPaint) -> TextShadowDump {
 
 // ===== op 投影 =====
 
-/// 单 op 投影（typed tagged enum——与 PaintOp 变体一一对应；PaintOp
-/// non_exhaustive，未来变体降级 [`OpDump::Unknown`]，重建跳过）。
+/// Single-op projection (typed tagged enum — one-to-one with the PaintOp
+/// variants; PaintOp is non_exhaustive, so future variants degrade to
+/// [`OpDump::Unknown`] and are skipped on reconstruction).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum OpDump {
-    /// FillRect。
+    /// FillRect.
     #[serde(rename = "fill_rect")]
     FillRect {
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
-        /// 圆角 [f32; 8]。
+        /// Corner radii [f32; 8].
         radius: [f32; 8],
-        /// 填充色。
+        /// Fill color.
         color: ColorDump,
     },
-    /// Gradient。
+    /// Gradient.
     #[serde(rename = "gradient")]
     Gradient {
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
-        /// 圆角 [f32; 8]。
+        /// Corner radii [f32; 8].
         radius: [f32; 8],
-        /// 渐变。
+        /// Gradient.
         gradient: GradientDump,
-        /// 径向几何。
+        /// Radial geometry.
         radial: Option<RadialGeomDump>,
-        /// 锥形几何。
+        /// Conic geometry.
         conic: Option<ConicGeomDump>,
-        /// 线性几何（F3d，ADR-0026）：渐变线绝对端点（非线性为 None）。
+        /// Linear geometry (F3d, ADR-0026): gradient-line absolute endpoints
+        /// (None for non-linear).
         linear: Option<LinearGeomDump>,
     },
-    /// Shadow。
+    /// Shadow.
     #[serde(rename = "shadow")]
     Shadow {
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
-        /// 圆角 [f32; 8]。
+        /// Corner radii [f32; 8].
         radius: [f32; 8],
-        /// 阴影色。
+        /// Shadow color.
         color: ColorDump,
-        /// 水平偏移。
+        /// Horizontal offset.
         offset_x: f32,
-        /// 垂直偏移。
+        /// Vertical offset.
         offset_y: f32,
-        /// 模糊。
+        /// Blur.
         blur: f32,
-        /// 外扩/内缩。
+        /// Spread (outset/inset).
         spread: f32,
-        /// 内阴影。
+        /// Inset shadow.
         inset: bool,
     },
-    /// Image（像素直序列 `Vec<u8>`）。
+    /// Image (pixels serialized directly as `Vec<u8>`).
     #[serde(rename = "image")]
     Image {
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
-        /// 圆角 [f32; 8]。
+        /// Corner radii [f32; 8].
         radius: [f32; 8],
-        /// 源宽。
+        /// Source width.
         source_w: u32,
-        /// 源高。
+        /// Source height.
         source_h: u32,
-        /// 源子域左缘 px（F3d 9-slice；全图 = 0）。
+        /// Source sub-region left edge px (F3d 9-slice; full image = 0).
         src_x: f32,
-        /// 源子域顶缘 px（全图 = 0）。
+        /// Source sub-region top edge px (full image = 0).
         src_y: f32,
-        /// 源子域宽 px（全图 = source_w）。
+        /// Source sub-region width px (full image = source_w).
         src_w: f32,
-        /// 源子域高 px（全图 = source_h）。
+        /// Source sub-region height px (full image = source_h).
         src_h: f32,
-        /// 预解码 RGBA 字节。
+        /// Pre-decoded RGBA bytes.
         pixels: Vec<u8>,
     },
-    /// Border。
+    /// Border.
     #[serde(rename = "border")]
     Border {
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
-        /// 圆角 [f32; 8]。
+        /// Corner radii [f32; 8].
         radius: [f32; 8],
-        /// 四边 [top, right, bottom, left]。
+        /// Four sides [top, right, bottom, left].
         sides: [BorderSideDump; 4],
     },
     /// Text。
     #[serde(rename = "text")]
     Text {
-        /// 起点 x。
+        /// Start x.
         x: f32,
-        /// 起点 y。
+        /// Start y.
         y: f32,
-        /// 全文。
+        /// Full text.
         text: String,
-        /// 基础色。
+        /// Base color.
         color: ColorDump,
-        /// span 覆盖。
+        /// Span overrides.
         spans: Vec<TextSpanDump>,
-        /// 字号。
+        /// Font size.
         font_size: f32,
-        /// 字体族列表。
+        /// Font family list.
         font_family: Vec<String>,
-        /// 字重。
+        /// Font weight.
         font_weight: f32,
-        /// 斜体。
+        /// Italic.
         italic: bool,
-        /// 折行约束。
+        /// Line-wrapping constraint.
         max_advance: Option<f32>,
-        /// 行高。
+        /// Line height.
         line_height: Option<f32>,
-        /// 字距。
+        /// Letter spacing.
         letter_spacing: f32,
-        /// 对齐名。
+        /// Align name.
         text_align: String,
-        /// word-break 名。
+        /// word-break name.
         word_break: String,
-        /// overflow-wrap 名。
+        /// overflow-wrap name.
         overflow_wrap: String,
-        /// 装饰。
+        /// Decorations.
         decorations: Vec<TextDecorationDump>,
-        /// 阴影。
+        /// Shadows.
         shadows: Vec<TextShadowDump>,
-        /// font-stretch 百分比（F3d；100 = normal）。
+        /// font-stretch percentage (F3d; 100 = normal).
         font_stretch: f32,
-        /// 词距 px（F3d；None = normal）。
+        /// Word spacing px (F3d; None = normal).
         word_spacing: Option<f32>,
-        /// OpenType 特性对（F3d；tag + value）。
+        /// OpenType feature pairs (F3d; tag + value).
         font_features: Vec<([u8; 4], u16)>,
-        /// 变体轴对（F3d；tag + value）。
+        /// Variation axis pairs (F3d; tag + value).
         font_variations: Vec<([u8; 4], f32)>,
     },
-    /// PushClip。
+    /// PushClip.
     #[serde(rename = "push_clip")]
     PushClip {
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
-        /// 圆角 [f32; 8]。
+        /// Corner radii [f32; 8].
         radius: [f32; 8],
     },
-    /// PushClipPath（F3c，ADR-0025）。
+    /// PushClipPath (F3c, ADR-0025).
     #[serde(rename = "push_clip_path")]
     PushClipPath {
-        /// 多边形顶点 [x, y]（视口坐标 px；圆/椭圆 64 段折线近似）。
+        /// Polygon vertices [x, y] (viewport px; circle/ellipse approximated by
+        /// a 64-segment polyline).
         points: Vec<[f32; 2]>,
-        /// 填充规则：true = nonzero，false = evenodd。
+        /// Fill rule: true = nonzero, false = evenodd.
         nonzero: bool,
     },
-    /// PopClip。
+    /// PopClip.
     #[serde(rename = "pop_clip")]
     PopClip,
-    /// PushOpacity。
+    /// PushOpacity.
     #[serde(rename = "push_opacity")]
     PushOpacity {
-        /// 透明度。
+        /// Opacity.
         alpha: f32,
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
     },
-    /// PopOpacity。
+    /// PopOpacity.
     #[serde(rename = "pop_opacity")]
     PopOpacity,
-    /// PushBlend。
+    /// PushBlend.
     #[serde(rename = "push_blend")]
     PushBlend {
-        /// 混合模式。
+        /// Blend mode.
         mode: BlendModeDump,
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
     },
-    /// PopBlend。
+    /// PopBlend.
     #[serde(rename = "pop_blend")]
     PopBlend,
-    /// PushFilter（P2）。
+    /// PushFilter (P2).
     #[serde(rename = "push_filter")]
     PushFilter {
-        /// 滤镜效果链。
+        /// Filter effect chain.
         filters: Vec<FilterEffectDump>,
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
     },
-    /// PopFilter（P2）。
+    /// PopFilter (P2).
     #[serde(rename = "pop_filter")]
     PopFilter,
-    /// BackdropFilter（P2）。
+    /// BackdropFilter (P2).
     #[serde(rename = "backdrop_filter")]
     BackdropFilter {
-        /// 滤镜效果链。
+        /// Filter effect chain.
         filters: Vec<FilterEffectDump>,
-        /// 盒 x。
+        /// Box x.
         x: f32,
-        /// 盒 y。
+        /// Box y.
         y: f32,
-        /// 盒宽。
+        /// Box width.
         width: f32,
-        /// 盒高。
+        /// Box height.
         height: f32,
     },
-    /// PushTransform。
+    /// PushTransform.
     #[serde(rename = "push_transform")]
     PushTransform {
-        /// [a, b, c, d, e, f]。
+        /// [a, b, c, d, e, f].
         affine: [f32; 6],
     },
-    /// PopTransform。
+    /// PopTransform.
     #[serde(rename = "pop_transform")]
     PopTransform,
-    /// PushScroll。
+    /// PushScroll.
     #[serde(rename = "push_scroll")]
     PushScroll {
-        /// 水平偏移。
+        /// Horizontal offset.
         dx: f32,
-        /// 垂直偏移。
+        /// Vertical offset.
         dy: f32,
     },
-    /// PopScroll。
+    /// PopScroll.
     #[serde(rename = "pop_scroll")]
     PopScroll,
-    /// 未来变体兜底（PaintOp non_exhaustive；重建跳过）。
+    /// Catch-all for future variants (PaintOp is non_exhaustive; skipped on
+    /// reconstruction).
     #[serde(rename = "unknown")]
     Unknown {
-        /// 变体提示名。
+        /// Variant hint name.
         name: String,
     },
 }
@@ -1614,18 +1634,19 @@ fn op_load(d: &OpDump) -> Option<PaintOp> {
     })
 }
 
-/// 一帧 DisplayList 的可序列化投影。
+/// Serializable projection of one frame's DisplayList.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DisplayListDump {
-    /// 帧生成号。
+    /// Frame generation number.
     pub generation: u64,
-    /// op 序列。
+    /// Op sequence.
     pub ops: Vec<OpDump>,
 }
 
 impl DisplayList {
-    /// F3a2（ADR-0023）：投影为可序列化转储（serde JSON/CBOR 等宿主自选
-    /// 格式；未来 PaintOp 变体降级 Unknown）。
+    /// F3a2 (ADR-0023): projects into a serializable dump (serde JSON/CBOR or
+    /// whatever wire format the host chooses; future PaintOp variants degrade to
+    /// Unknown).
     pub fn to_dump(&self) -> DisplayListDump {
         DisplayListDump {
             generation: self.generation,
@@ -1635,8 +1656,8 @@ impl DisplayList {
 }
 
 impl DisplayListDump {
-    /// 重建 DisplayList（未知 op 丢弃=诚实边界；对应 to_dump 已知变体
-    /// 无损往返）。
+    /// Rebuilds a DisplayList (unknown ops are dropped = the honest boundary;
+    /// known variants round-trip losslessly against to_dump).
     pub fn to_display_list(&self) -> DisplayList {
         DisplayList {
             ops: self.ops.iter().filter_map(op_load).collect(),

@@ -1,16 +1,21 @@
-//! 级联：规则匹配与胜出判定（css-cascade-5 序键）。
+//! The cascade: rule matching and winner determination (the css-cascade-5
+//! order keys).
 //!
-//! 来源阶梯（低→高，`rank(important)`）：normal
-//! `Default < UserAgent < User < Author(Stylesheet+Inline)`；
-//! important 反转 `Author < User < UserAgent < Default`（引擎默认
-//! !important 反转为最强，等价 UA !important 语义）。Inline 归入
-//! Author 档（element-attached 以 u32::MAX 特异性在同档内取胜——
-//! 与 B1 前独立 Inline 档逐位等价：胜者恒同）。层序（@layer，B1）
-//! 在 origin-importance 之后、specificity 之前：normal 轴未分层胜
-//! 一切分层（晚者胜同层内）；important 轴反转（未分层 important 输
-//! 给一切分层 important，早层胜晚层）。同键内 (specificity, order,
-//! decl_index) 升序、后者胜。每属性保留全部候选——revert/revert-layer
-//! 赛后回滚（resolve_revert）。custom properties 同阶梯参与。
+//! Origin ladder (low→high, `rank(important)`): normal
+//! `Default < UserAgent < User < Author(Stylesheet+Inline)`;
+//! important inverts to `Author < User < UserAgent < Default` (the engine
+//! defaults to !important inverted as the strongest, equivalent to UA
+//! !important semantics). Inline is folded into the Author band
+//! (element-attached wins within the band with u32::MAX specificity —
+//! bitwise-equivalent to the pre-B1 separate Inline band: the winner is
+//! always the same). Layer order (@layer, B1) sits after origin-importance
+//! and before specificity: on the normal axis, unlayered beats all layered
+//! (within a layer, the later one wins); the important axis inverts
+//! (unlayered important loses to all layered important, and earlier layers
+//! beat later ones). Within the same key, (specificity, order, decl_index)
+//! sort ascending and the later one wins. All candidates are kept per
+//! property — revert/revert-layer roll back after the contest
+//! (resolve_revert). Custom properties participate on the same ladder.
 
 use crate::css::decl::TokenBuf;
 use crate::css::property::ContainerType;
@@ -20,38 +25,44 @@ use crate::css::stylesheet::{MediaEnv, Rule, Stylesheet};
 use crate::selector::{PseudoElement, match_specificity};
 use crate::tree::{NodeId, StyleTree};
 
-/// 可查询容器的一帧快照（阶段2③）：restyle DFS 自祖先向内压栈，
-/// @container 求值自栈顶向外查找。
+/// A one-frame snapshot of queryable containers (phase 2 ③): the restyle DFS
+/// pushes containers from ancestors inward, and @container evaluation
+/// searches outward from the top of the stack.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerCtx {
-    /// container-name 名单（空 = 无名容器）。
+    /// container-name list (empty = unnamed container).
     pub names: Vec<String>,
-    /// container-type（normal 不入栈）。
+    /// container-type (normal is not pushed onto the stack).
     pub ctype: ContainerType,
-    /// 内容盒尺寸（布局上一 pass 记录；None = 尺寸未就绪 → 特性 unknown）。
+    /// Content box size (recorded by the previous layout pass; None = size
+    /// not ready → features unknown).
     pub size: Option<[f32; 2]>,
 }
 
-/// 级联来源层。
+/// Cascade origin layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Origin {
-    /// 引擎内置默认（在 ComputedStyle 初值层落地）。
+    /// Engine built-in defaults (materialized at the ComputedStyle
+    /// initial-value layer).
     Default,
-    /// UA 起源（B1：类型与阶梯就位；UA 声明的产生钩子留待宿主需求）。
+    /// UA origin (B1: the type and ladder are in place; the hook that
+    /// produces UA declarations awaits host demand).
     UserAgent,
-    /// 用户起源（B1：`set_user_stylesheet` 注入的第二样式表）。
+    /// User origin (B1: the second stylesheet injected via
+    /// `set_user_stylesheet`).
     User,
-    /// 样式表规则（author）。
+    /// Stylesheet rules (author).
     Stylesheet,
-    /// 节点内联声明。
+    /// The node's inline declarations.
     Inline,
 }
 
 impl Origin {
-    /// 级联优先级阶梯（css-cascade-5 §6.4：origin+importance 反转）。
-    /// Inline 归入 Author 档（element-attached 以 u32::MAX 特异性同档
-    /// 取胜；与旧独立档逐位等价）。
+    /// The cascade priority ladder (css-cascade-5 §6.4: origin+importance
+    /// inversion). Inline is folded into the Author band (element-attached
+    /// wins within the band with u32::MAX specificity; bitwise-equivalent
+    /// to the old separate band).
     pub fn rank(self, important: bool) -> u8 {
         match (self, important) {
             (Self::Default, false) => 0,
@@ -66,54 +77,61 @@ impl Origin {
     }
 }
 
-/// 一条候选声明（含级联键）。
+/// One candidate declaration (with its cascade keys).
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
-    /// 声明来源层（枚举序即优先级）。
+    /// Declaration origin layer (enum order is priority).
     pub origin: Origin,
-    /// 是否带 !important。
+    /// Whether it carries !important.
     pub important: bool,
-    /// 命中选择器特异性；内联取 u32::MAX。
+    /// Matched selector specificity; u32::MAX for inline.
     pub specificity: u32,
-    /// 规则源顺序；内联取 u32::MAX（同键后者胜）。
+    /// Rule source order; u32::MAX for inline (within the same key, the
+    /// later one wins).
     pub order: u32,
-    /// 规则内声明序（A8：同一规则块内逻辑/物理对按声明先后定夺）。
+    /// Declaration order within the rule (A8: logical/physical pairs within
+    /// one rule block are decided by declaration order).
     pub decl_index: usize,
-    /// B1 @layer：层序数（未分层 = u32::MAX）。
+    /// B1 @layer: layer rank (unlayered = u32::MAX).
     pub layer_rank: u32,
-    /// 胜出声明值（已解析或 var() 挂起 token）。
+    /// The winning declaration value (parsed, or suspended var() tokens).
     pub value: &'a crate::css::decl::DeclSource,
 }
 
-/// 候选 custom property（B1：携带层序数；important 标记仍 MVP 忽略）。
+/// A candidate custom property (B1: carries the layer rank; the important
+/// flag is still ignored, MVP).
 #[derive(Debug, Clone, Copy)]
 pub struct CustomCandidate<'a> {
-    /// 声明来源层（枚举序即优先级）。
+    /// Declaration origin layer (enum order is priority).
     pub origin: Origin,
-    /// 命中选择器特异性。
+    /// Matched selector specificity.
     pub specificity: u32,
-    /// 规则源顺序。
+    /// Rule source order.
     pub order: u32,
-    /// B1 @layer：层序数（未分层 = u32::MAX）。
+    /// B1 @layer: layer rank (unlayered = u32::MAX).
     pub layer_rank: u32,
-    /// 胜出的 custom property 原始 token（计算值期代换）。
+    /// The winning custom property's raw tokens (substituted during
+    /// computed-value time).
     pub tokens: &'a TokenBuf,
 }
 
-/// 级联输出：每属性/custom property 的全部候选（按 PropertyId/名升序；
-/// 列表序 = 压入序 = 源序，冠军取 beats 序最大、并列后者胜——B1 revert
-/// 族需要次名候选回滚）。
+/// Cascade output: all candidates per property/custom property (ascending by
+/// PropertyId/name; list order = push order = source order; the champion is
+/// the candidate with the largest beats order, ties broken by the later one
+/// — the B1 revert family needs the runner-up candidate to roll back).
 #[derive(Debug, Default)]
 pub struct CascadeOutput<'a> {
-    /// 每属性候选列表（末位不保证是冠军——冠军经 `cascade_winner`）。
+    /// Per-property candidate lists (the last item is not guaranteed to be
+    /// the champion — the champion goes through `cascade_winner`).
     pub winners: Vec<(PropertyId, Vec<Candidate<'a>>)>,
-    /// 胜出自定义属性候选列表（按名升序）。
+    /// Winning custom-property candidate lists (ascending by name).
     pub custom_winners: Vec<(String, Vec<CustomCandidate<'a>>)>,
 }
 
-/// 层比较键：normal = layer_rank（未分层 u32::MAX 最高 = 胜一切分层）；
-/// important 轴反转（u32::MAX - rank：未分层 important 最低 = 输给一切
-/// 分层 important，早层胜晚层）——css-cascade-5 层序反转。
+/// Layer comparison key: normal = layer_rank (unlayered u32::MAX is highest
+/// = beats all layered); the important axis inverts (u32::MAX - rank:
+/// unlayered important is lowest = loses to all layered important, earlier
+/// layers beat later ones) — the css-cascade-5 layer-order inversion.
 fn layer_key(c: &Candidate<'_>) -> u32 {
     if c.important {
         u32::MAX - c.layer_rank
@@ -122,8 +140,9 @@ fn layer_key(c: &Candidate<'_>) -> u32 {
     }
 }
 
-/// 级联键比较（css-cascade-5 序：origin-importance > 层 > specificity >
-/// order > decl_index）；`>=` 语义：同键后者（源序更晚）胜。
+/// Cascade-key comparison (css-cascade-5 order: origin-importance > layer >
+/// specificity > order > decl_index); `>=` semantics: with equal keys, the
+/// later one (later in source order) wins.
 fn beats(new: &Candidate<'_>, cur: &Candidate<'_>) -> bool {
     (
         new.origin.rank(new.important),
@@ -154,8 +173,9 @@ fn beats_custom(new: &CustomCandidate<'_>, cur: &CustomCandidate<'_>) -> bool {
     )
 }
 
-/// 候选列表的级联冠军（beats 序最大、并列后者胜——列表序 = 压入序 =
-/// 源序）。空列表返回 None。
+/// The cascade champion of a candidate list (largest beats order, ties
+/// broken by the later one — list order = push order = source order). An
+/// empty list returns None.
 pub(crate) fn cascade_winner<'c, 'a>(cands: &'c [Candidate<'a>]) -> Option<&'c Candidate<'a>> {
     let mut best = None;
     for (i, c) in cands.iter().enumerate() {
@@ -166,7 +186,7 @@ pub(crate) fn cascade_winner<'c, 'a>(cands: &'c [Candidate<'a>]) -> Option<&'c C
     best.map(|i| &cands[i])
 }
 
-/// custom property 候选列表的级联冠军。
+/// The cascade champion of a custom-property candidate list.
 pub(crate) fn cascade_winner_custom<'c, 'a>(
     cands: &'c [CustomCandidate<'a>],
 ) -> Option<&'c CustomCandidate<'a>> {
@@ -195,7 +215,8 @@ fn push_custom<'a>(out: &mut CascadeOutput<'a>, name: String, cand: CustomCandid
     }
 }
 
-/// 宽关键字冠军值识别（revert 族回滚判定用）。
+/// Wide-keyword champion value detection (used for revert-family rollback
+/// decisions).
 fn wide_keyword_of(c: &Candidate<'_>) -> Option<WideKeyword> {
     match c.value {
         crate::css::decl::DeclSource::Parsed(crate::css::property::DeclValue::WideKeyword(k)) => {
@@ -205,7 +226,8 @@ fn wide_keyword_of(c: &Candidate<'_>) -> Option<WideKeyword> {
     }
 }
 
-/// custom property 冠军 token 是否恰为宽关键字单 ident（revert 族）。
+/// Whether a custom-property champion's tokens are exactly a wide-keyword
+/// single ident (revert family).
 fn custom_wide_keyword_of(c: &CustomCandidate<'_>) -> Option<WideKeyword> {
     if c.tokens.len() != 1 {
         return None;
@@ -217,10 +239,13 @@ fn custom_wide_keyword_of(c: &CustomCandidate<'_>) -> Option<WideKeyword> {
     }
 }
 
-/// B1：revert / revert-layer 赛后回滚（css-cascade-5）。冠军为宽关键字
-/// 时取回滚目标：**revert** = 严格更低 origin-importance 档的冠军候选；
-/// **revert-layer** = 同档内层键严格更小的冠军候选（无 → 按 revert 继续
-/// 回滚）。无任何更低候选 → 剔除该属性（回落初值物化）。
+/// B1: revert / revert-layer post-contest rollback (css-cascade-5). When the
+/// champion is a wide keyword, the rollback target is picked: **revert** =
+/// the champion candidate from a strictly lower origin-importance band;
+/// **revert-layer** = the champion candidate with a strictly smaller layer
+/// key within the same band (none → continue rolling back per revert). With
+/// no lower candidate at all → the property is dropped (falling back to
+/// initial-value materialization).
 fn resolve_revert<'a>(mut out: CascadeOutput<'a>) -> CascadeOutput<'a> {
     for (_, cands) in out.winners.iter_mut() {
         let (kind, wrank, wlayer) = match cascade_winner(cands) {
@@ -299,10 +324,11 @@ fn resolve_revert<'a>(mut out: CascadeOutput<'a>) -> CascadeOutput<'a> {
     out
 }
 
-/// 逻辑长hand → 物理槽映射（A8，css-logical-1）。ltr：inline-start=left、
-/// inline-end=right、block-start=top、block-end=bottom；rtl：inline 轴
-/// 翻转（块轴与纵向书写不支持——在案 FEATURES.md）；radius 四角随行内
-/// 轴翻转（start-start↔start-end、end-start↔end-end）。
+/// Logical longhand → physical slot mapping (A8, css-logical-1). ltr:
+/// inline-start=left, inline-end=right, block-start=top, block-end=bottom;
+/// rtl: the inline axis flips (block axis and vertical writing are not
+/// supported — documented in FEATURES.md); the four radius corners flip
+/// along the inline axis (start-start↔start-end, end-start↔end-end).
 fn logical_map(p: PropertyId, rtl: bool) -> Option<PropertyId> {
     use PropertyId as P;
     Some(match (p, rtl) {
@@ -354,11 +380,14 @@ fn logical_map(p: PropertyId, rtl: bool) -> Option<PropertyId> {
     })
 }
 
-/// A8 逻辑属性解析（css-logical-1）：逻辑槽冠军与映射物理槽冠军按级联
-/// 全序键 (origin-importance, layer, specificity, order, decl_index) 定夺
-/// ——晚者填物理槽（规范正确：物理/逻辑同池比先后；同规则内按声明序），
-/// 逻辑槽自身从输出剔除（无读者；ComputedStyle 仅暴露物理槽 + direction）。
-/// 调用方（computed.rs）以节点 direction 传入 rtl。
+/// A8 logical property resolution (css-logical-1): the logical-slot champion
+/// and the mapped physical-slot champion are decided by the cascade total
+/// order key (origin-importance, layer, specificity, order, decl_index) —
+/// the later one fills the physical slot (spec-correct: physical/logical
+/// compete in one pool by recency; within one rule, by declaration order),
+/// and the logical slot itself is removed from the output (no readers;
+/// ComputedStyle exposes only physical slots + direction). The caller
+/// (computed.rs) passes rtl from the node's direction.
 pub fn resolve_logical<'a>(mut out: CascadeOutput<'a>, rtl: bool) -> CascadeOutput<'a> {
     let key = |c: &Candidate<'_>| {
         (
@@ -407,8 +436,9 @@ pub fn resolve_logical<'a>(mut out: CascadeOutput<'a>, rtl: bool) -> CascadeOutp
     out
 }
 
-/// C4（ADR-0018）：规则选择器表是否含通道伪元素分量。`want = None` 判
-/// 任意通道变体（::selection/::placeholder），`Some(w)` 精确比对。
+/// C4 (ADR-0018): whether a rule's selector list contains a channel
+/// pseudo-element component. `want = None` matches any channel variant
+/// (::selection/::placeholder); `Some(w)` compares exactly.
 fn rule_has_channel_pseudo(rule: &Rule, want: Option<PseudoElement>) -> bool {
     rule.selectors.slice().iter().any(|sel| {
         sel.iter_raw_match_order().any(|c| match c {
@@ -421,17 +451,18 @@ fn rule_has_channel_pseudo(rule: &Rule, want: Option<PseudoElement>) -> bool {
     })
 }
 
-/// 单条命中的规则。
+/// One matched rule.
 #[derive(Debug)]
 pub struct MatchedRule<'a> {
-    /// 命中的样式表规则。
+    /// The matched stylesheet rule.
     pub rule: &'a Rule,
-    /// 命中选择器的特异性。
+    /// Specificity of the matched selector.
     pub specificity: u32,
 }
 
-/// 收集单节点命中的规则（@media 先行求值过滤；@container 按祖先容器
-/// 快照求值过滤）。
+/// Collects the rules matching a single node (@media is evaluated and
+/// filtered first; @container is evaluated against the ancestor container
+/// snapshots).
 pub fn match_rules<'a>(
     tree: &StyleTree,
     id: NodeId,
@@ -459,10 +490,13 @@ pub fn match_rules<'a>(
         .collect()
 }
 
-/// 单表规则收集（B2：author 多表与 user 表共用；压入序 = 表序 × 源序）。
-/// C4（ADR-0018）：`channel = None` 为主级联——排除 ::selection/
-/// ::placeholder 规则（防样式泄漏，通道规则只经 cascade_channel 解析）；
-/// `Some(w)` 为通道级联——仅收含对应通道伪元素分量的规则。
+/// Single-sheet rule collection (B2: shared by the author multi-sheet group
+/// and the user sheet; push order = sheet order × source order).
+/// C4 (ADR-0018): `channel = None` is the main cascade — ::selection/
+/// ::placeholder rules are excluded (to prevent style leakage, channel rules
+/// resolve only through cascade_channel); `Some(w)` is the channel cascade —
+/// only rules containing the corresponding channel pseudo-element component
+/// are collected.
 #[allow(clippy::too_many_arguments)] // 单表收集直传（out/tree/sheet/origin/env/通道）
 fn collect_sheet<'a>(
     out: &mut CascadeOutput<'a>,
@@ -514,10 +548,12 @@ fn collect_sheet<'a>(
     }
 }
 
-/// 匹配并级联单节点声明（B1 管线：User 表 + Author 表组 + Inline 全候选
-/// 收集 → resolve_revert 回滚 → 排序；resolve_logical 由调用方在取得
-/// 节点 direction 后另行调用；Default 层在 computed 落地）。B2：author
-/// 改为表组按值（主表在前、附加表按登记序 = 文档序，后者胜平手）。
+/// Matches and cascades a single node's declarations (the B1 pipeline: User
+/// sheet + Author sheet group + Inline all-collect → resolve_revert rollback
+/// → sort; resolve_logical is called separately by the caller after it
+/// obtains the node's direction; the Default layer lands in computed).
+/// B2: author becomes a sheet group passed by value (main sheet first, extra
+/// sheets in registration order = document order, the later one wins ties).
 pub fn cascade_declarations<'a>(
     tree: &'a StyleTree,
     id: NodeId,
@@ -611,11 +647,12 @@ pub fn cascade_declarations<'a>(
     out
 }
 
-/// C4（ADR-0018）：通道级联（::selection/::placeholder）——UA → user →
-/// author 序逐表收集对应通道规则（origin 直配由 match_pseudo_element 承担：
-/// pseudo == None 即命中）；无内联段（style 属性无法指向伪元素，spec
-/// 一致）；尾部与 cascade_declarations 同形（resolve_revert → retain →
-/// 排序）。
+/// C4 (ADR-0018): the channel cascade (::selection/::placeholder) — collects
+/// the corresponding channel rules sheet by sheet in UA → user → author
+/// order (direct origin matching is handled by match_pseudo_element:
+/// pseudo == None matches); no inline segment (the style attribute cannot
+/// target pseudo-elements, spec-consistent); the tail is shaped like
+/// cascade_declarations (resolve_revert → retain → sort).
 #[allow(clippy::too_many_arguments)]
 pub fn cascade_channel<'a>(
     tree: &'a StyleTree,
@@ -1015,7 +1052,8 @@ mod tests {
     // 各自一条 WideKeyword(Revert) 声明（B1 逐长手物化语义）；resolve_revert
     // 赛后回滚 = 严格更低 origin 档冠军。以下三个场景固定该语义。
 
-    /// 读 margin 长手冠军的 px 值（None = 该长手无冠军 = 已回滚剔除或未写）。
+    /// Reads the px value of a margin longhand's champion (None = that
+    /// longhand has no champion = rolled back and dropped, or never written).
     fn margin_px(out: &CascadeOutput<'_>, pid: PropertyId) -> Option<f32> {
         let (_, cands) = out.winners.iter().find(|(p, _)| *p == pid)?;
         let cand = cascade_winner(cands)?;

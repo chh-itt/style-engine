@@ -1,30 +1,36 @@
-//! 最小字体度量探测（A9）：从 sfnt/ttf 字节提取 ch/ex/ic 基准（每 em 归一）。
+//! Minimal font metrics probe (A9): extracts the ch/ex/ic bases from
+//! sfnt/ttf bytes (normalized per em).
 //!
-//! 只读静态表：head（unitsPerEm/indexToLocFormat）、cmap（format 4）、
-//! hhea/hmtx（advance）、loca+glyf 头（bbox 前 10 字节，无需轮廓解析）。
-//! 探测失败一律 `None` → 引擎沿用近似缺省（ch/ex=0.5em、ic=1em，B 级在案）。
-//! 与 style-engine-soft 的 soft::ttf 光栅化互不影响（本 crate 不依赖 soft）。
+//! Reads static tables only: head (unitsPerEm/indexToLocFormat), cmap
+//! (format 4), hhea/hmtx (advances), and the loca+glyf header (first 10 bytes
+//! of the bbox; no outline parsing needed). A failed probe always returns
+//! `None` and the engine keeps the approximation defaults (ch/ex=0.5em,
+//! ic=1em; Tier B, documented in FEATURES.md/SINK-MATRIX.md). This is
+//! independent of style-engine-soft's soft::ttf rasterization (this crate
+//! does not depend on soft).
 
-/// 探测产物（每 em 归一度量 + 族名表）。
+/// Probe output (per-em normalized metrics plus the family name table).
 pub(crate) struct ProbedFont {
-    /// 族名（name 表 nameID 16/1，Windows UTF-16BE 优先）。
+    /// Family names (name table nameID 16/1; Windows UTF-16BE preferred).
     pub names: Vec<String>,
-    /// 度量。
+    /// Metrics.
     pub metrics: RawMetrics,
 }
 
-/// 探测产物（每 em 归一度量）。
+/// Probe output (per-em normalized metrics).
 pub(crate) struct RawMetrics {
-    /// 数字 0 字形 advance（ch 基准）。
+    /// Advance of the digit 0 glyph (ch basis).
     pub ch_per_em: f32,
-    /// x 字形 yMax（ex 基准）。
+    /// yMax of the x glyph (ex basis).
     pub ex_per_em: f32,
-    /// 表意字 U+6C34 advance（ic 基准；缺字=1.0）。
+    /// Advance of the ideograph U+6C34 (ic basis; 1.0 when the glyph is
+    /// missing).
     pub ic_per_em: f32,
-    /// hhea ascender（P3，ADR-0034 D3：text-top/text-bottom strut 度量；
-    /// 恒正，abs 防御异号字体）。
+    /// hhea ascender (P3, ADR-0034 D3: strut metric for
+    /// text-top/text-bottom; always positive — `abs` guards fonts whose
+    /// stored sign is inverted).
     pub ascent_per_em: f32,
-    /// hhea descender（恒正，abs 归一）。
+    /// hhea descender (always positive, normalized with `abs`).
     pub descent_per_em: f32,
 }
 
@@ -38,7 +44,8 @@ fn be32(d: &[u8], off: usize) -> Option<u32> {
     Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// 探测字体度量。`data` 为完整 sfnt/ttf 字节（ttc 集合不支持→None）。
+/// Probes font metrics. `data` is the complete sfnt/ttf byte stream (ttc
+/// collections are unsupported and yield `None`).
 pub(crate) fn probe_metrics(data: &[u8]) -> Option<ProbedFont> {
     // sfnt 偏移表：u32 sfntVersion、u16 numTables…；表记录 16 字节
     if data.len() < 12 || be32(data, 0)? != 0x0001_0000 {

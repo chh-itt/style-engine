@@ -1,52 +1,65 @@
-//! E 计数器样式格式化（css-counter-styles-3 §2 生成算法 + §3 描述符 +
-//! §6 内置样式子集）。
+//! E counter style formatting (css-counter-styles-3 §2 generation algorithm +
+//! §3 descriptors + §6 built-in style subset).
 //!
-//! 入口 `format_counter_with`：name + 计数值 + 文档级 @counter-style
-//! 登记表（ua → user → 主表 → 附加表合并序，同名后写胜）→ 表示串。
-//! 登记表可整体覆盖内置样式（css-counter-styles-3 §3：predefined 在
-//! UA 表中，任何 author 定义后写胜）。
+//! Entry point `format_counter_with`: name + counter value + document-level
+//! @counter-style registry (merge order ua → user → main table → extra table,
+//! last write wins on equal names) → representation string. The registry can
+//! wholly override built-in styles (css-counter-styles-3 §3: predefined styles
+//! live in the UA table; any author definition wins on last write).
 //!
-//! spec 对齐要点（2021-07-27 CR）：
-//! - §2 注：**prefix/suffix 不进入 counter()/counters() 输出**——它们仅由
-//!   ::marker 内容算法追加。本函数因此不拼接二者（decimal 缺省 suffix
-//!   ". " 不渲染，counter(x) = 纯数字）。
-//! - §2 生成算法次序：未知名 → decimal；范围外 → fallback；负值且使用
-//!   负号 → 按绝对值生成；pad 补齐（差值再减负号簇数）；负号包裹。
-//! - 负号使用条件（§3.2）：system ∈ {symbolic, alphabetic, numeric,
-//!   additive}（extends 继承基样式）；cyclic/fixed 不使用——负值按原值
-//!   进核心算法（cyclic 取模回绕；fixed 出窗 → fallback）。`negative`
-//!   未写时初始值 "-"。
-//! - auto range（§3.5）：cyclic/numeric/fixed 全域；alphabetic/symbolic
-//!   1..∞；additive 0..∞。
-//! - system 符号数不足（§3.1 前言）：规则不定义计数样式 → 视为未知名 →
-//!   decimal。最低要求 cyclic/fixed/symbolic ≥1、alphabetic/numeric ≥2、
-//!   additive ≥1 组。
-//! - fallback（§3.7）：未写/未知名 → decimal；成环 → decimal；`none`
-//!   宽容按空输出（解析层在案宽容的延续，【B】级）。
-//! - extends（§3.1.7）：未指定描述符继承基样式；环/未知基名 → decimal。
-//!   覆盖检测 = 字段 ≠ 缺省值（无法区分"恰好等于缺省的显式值"，【B】级
-//!   近似）；extends 规则带 symbols/additive-symbols 本应整规则无效，
-//!   此处宽容并入（【B】级）。
-//! - 表示长度护栏（§2 注：UA 必须支持 ≥60 码点、可以更长即回退）：表示
-//!   超过 60 码点 → fallback（防 symbolic/additive 线性膨胀 OOM，pad 差
-//!   值同步钳制）。
+//! Spec alignment notes (2021-07-27 CR):
+//! - §2 note: **prefix/suffix do not enter the counter()/counters() output** —
+//!   they are appended only by the ::marker content algorithm. This function
+//!   therefore does not concatenate them (decimal's default suffix ". " is not
+//!   rendered; counter(x) = bare digits).
+//! - §2 generation algorithm order: unknown name → decimal; out of range →
+//!   fallback; negative value with a negative sign in use → generated from the
+//!   absolute value; pad to minimum length (difference further reduced by the
+//!   negative-marker cluster count); negative-marker wrapping.
+//! - Negative-sign usage condition (§3.2): system ∈ {symbolic, alphabetic,
+//!   numeric, additive} (extends inherits the base style); cyclic/fixed do not
+//!   use it — negative values enter the core algorithm as-is (cyclic wraps by
+//!   modulo; fixed out of window → fallback). `negative` defaults to "-" when
+//!   not written.
+//! - auto range (§3.5): cyclic/numeric/fixed cover the full domain;
+//!   alphabetic/symbolic 1..∞; additive 0..∞.
+//! - Insufficient system symbols (§3.1 preamble): the rule does not define a
+//!   counter style → treated as an unknown name → decimal. Minimum
+//!   requirements: cyclic/fixed/symbolic ≥1, alphabetic/numeric ≥2, additive
+//!   ≥1 group.
+//! - fallback (§3.7): not written/unknown name → decimal; a cycle → decimal;
+//!   `none` is leniently rendered as empty output (an extension of the parse
+//!   layer's documented leniency, Tier B).
+//! - extends (§3.1.7): unspecified descriptors inherit the base style; a cycle
+//!   or unknown base name → decimal. Override detection = field ≠ default
+//!   (cannot distinguish an explicit value that happens to equal the default;
+//!   Tier B approximation); an extends rule carrying symbols/additive-symbols
+//!   should invalidate the whole rule, but here they are leniently merged in
+//!   (Tier B).
+//! - Representation length guard (§2 note: UAs must support ≥60 code points
+//!   and may fall back for longer): a representation over 60 code points →
+//!   fallback (guards against linear symbolic/additive blowup OOM; the pad
+//!   difference is clamped in step).
 //!
-//! 内置子集（§6）：decimal、decimal-leading-zero、lower/upper-roman、
-//! lower/upper-alpha、lower/upper-latin、lower-greek、disc、circle、
-//! square。其余预定义样式未收——未知名统一回退 decimal。
+//! Built-in subset (§6): decimal, decimal-leading-zero, lower/upper-roman,
+//! lower/upper-alpha, lower/upper-latin, lower-greek, disc, circle, square.
+//! Other predefined styles are not included — unknown names uniformly fall
+//! back to decimal.
 
 use crate::css::stylesheet::counter_style::{
     CounterStyleRange, CounterStyleRule, CounterStyleSystem,
 };
 
-/// 表示长度护栏（css-counter-styles-3 §2 注的 UA 允许项下限）。
+/// Representation length guard (the lower bound of what css-counter-styles-3
+/// §2 notes permit UAs).
 const MAX_REP_CODEPOINTS: usize = 60;
 
-/// P9-3（css-lists-3 §3.2 ③）：::marker 内容 = list-item 计数表示 +
-/// prefix + suffix（css-counter-styles-3 §2 注：affixes 仅由 ::marker
-/// 内容算法追加——counter()/counters() 不含，故 `format_counter_with`
-/// 不拼接）。`none` → 空串（调用方据以抑制成盒）；未知名按 decimal
-/// 生成（缺省 suffix ". "）。
+/// P9-3 (css-lists-3 §3.2 ③): ::marker content = the list-item counter
+/// representation + prefix + suffix (css-counter-styles-3 §2 note: affixes are
+/// appended only by the ::marker content algorithm — counter()/counters() do
+/// not include them, so `format_counter_with` does not concatenate them).
+/// `none` → empty string (the caller suppresses box generation based on this);
+/// an unknown name is generated as decimal (default suffix ". ").
 pub fn marker_text(name: &str, value: i64, registry: &[CounterStyleRule]) -> String {
     if name.eq_ignore_ascii_case("none") {
         return String::new();
@@ -63,11 +76,12 @@ pub fn marker_text(name: &str, value: i64, registry: &[CounterStyleRule]) -> Str
     }
 }
 
-/// 以指定计数样式格式化一个计数值。
+/// Formats one counter value with the given counter style.
 ///
-/// `registry` 为文档级 @counter-style 登记表（合并序，同名后写胜）；
-/// `name` 未在登记表命中时回退内置样式，再未命中 → decimal。
-/// `none` 样式名（list-style/counter() 的关键字）→ 空输出。
+/// `registry` is the document-level @counter-style registry (merge order,
+/// last write wins on equal names); when `name` misses the registry, built-in
+/// styles are tried next, then decimal. The `none` style name (the
+/// list-style/counter() keyword) → empty output.
 pub fn format_counter_with(name: &str, value: i64, registry: &[CounterStyleRule]) -> String {
     if name.eq_ignore_ascii_case("none") {
         return String::new();
@@ -76,7 +90,8 @@ pub fn format_counter_with(name: &str, value: i64, registry: &[CounterStyleRule]
     format_resolving(name, value, registry, &mut visited)
 }
 
-/// 按名解析（登记表后写胜 → 内置 → 未知名）并格式化。
+/// Resolves by name (registry last-write-wins → built-in → unknown name) and
+/// formats.
 fn format_resolving(
     name: &str,
     value: i64,
@@ -90,9 +105,10 @@ fn format_resolving(
     }
 }
 
-/// 名字 → 规则：登记表精确匹配（spec 计数样式名大小写敏感）优先，未
-/// 命中回退内置（内置按 spec「解析期一律小写」的语义做 ASCII 不敏感
-/// 匹配，容忍 UPPER-ROMAN 式写法）。
+/// Name → rule: exact registry match first (spec counter style names are
+/// case-sensitive); on miss, falls back to built-ins (matched
+/// ASCII-insensitively per the spec's "always lowercased at parse time"
+/// semantics, tolerating UPPER-ROMAN-style spellings).
 fn resolve_rule(name: &str, registry: &[CounterStyleRule]) -> Option<CounterStyleRule> {
     if let Some(r) = registry.iter().rev().find(|r| r.name == name) {
         return Some(r.clone());
@@ -100,7 +116,8 @@ fn resolve_rule(name: &str, registry: &[CounterStyleRule]) -> Option<CounterStyl
     builtin_rule(name)
 }
 
-/// css-counter-styles-3 §2 生成算法（extends 已在此前置展开）。
+/// The css-counter-styles-3 §2 generation algorithm (extends already expanded
+/// upfront here).
 fn format_rule(
     rule: &CounterStyleRule,
     value: i64,
@@ -203,7 +220,7 @@ fn format_rule(
     rep
 }
 
-/// system 最低符号数（css-counter-styles-3 §3.1 前言）。
+/// Minimum symbol counts per system (css-counter-styles-3 §3.1 preamble).
 fn system_requirements_met(system: &CounterStyleSystem, rule: &CounterStyleRule) -> bool {
     match system {
         CounterStyleSystem::Cyclic | CounterStyleSystem::Symbolic => !rule.symbols.is_empty(),
@@ -215,7 +232,7 @@ fn system_requirements_met(system: &CounterStyleSystem, rule: &CounterStyleRule)
     }
 }
 
-/// auto range 域（css-counter-styles-3 §3.5）。
+/// The auto range domain (css-counter-styles-3 §3.5).
 fn auto_range_allows(system: &CounterStyleSystem, value: i64) -> bool {
     match system {
         CounterStyleSystem::Cyclic | CounterStyleSystem::Numeric | CounterStyleSystem::Fixed(_) => {
@@ -228,8 +245,8 @@ fn auto_range_allows(system: &CounterStyleSystem, value: i64) -> bool {
     }
 }
 
-/// 负号使用条件（css-counter-styles-3 §3.2）：symbolic/alphabetic/
-/// numeric/additive 使用；cyclic/fixed 不使用。
+/// Negative-sign usage condition (css-counter-styles-3 §3.2):
+/// symbolic/alphabetic/numeric/additive use it; cyclic/fixed do not.
 fn uses_negative_sign(system: &CounterStyleSystem) -> bool {
     matches!(
         system,
@@ -240,7 +257,8 @@ fn uses_negative_sign(system: &CounterStyleSystem) -> bool {
     )
 }
 
-/// 有效负号标记：描述符未写时初始值 "-"（css-counter-styles-3 §3.2）。
+/// The effective negative marker: "-" when the descriptor is not written
+/// (css-counter-styles-3 §3.2).
 fn effective_negative(rule: &CounterStyleRule) -> (&str, &str) {
     match rule.negative.as_slice() {
         [] => ("-", ""),
@@ -249,7 +267,8 @@ fn effective_negative(rule: &CounterStyleRule) -> (&str, &str) {
     }
 }
 
-/// 有效负号标记的码点簇总数（pad 差值扣减用）。
+/// Total code point cluster count of the effective negative marker (used to
+/// reduce the pad difference).
 fn negative_marker_chars(rule: &CounterStyleRule) -> usize {
     match rule.negative.as_slice() {
         [] => 1,
@@ -258,11 +277,12 @@ fn negative_marker_chars(rule: &CounterStyleRule) -> usize {
     }
 }
 
-/// §3.1 各 system 的核心表示算法。
+/// Core representation algorithm for each system in §3.1.
 ///
-/// `value` = 原始有符号值（cyclic/fixed 不使用负号，负值原样进入）；
-/// `mag` = 绝对值（使用负号的系统在 §2 步骤 3 已换算）。返回 None =
-/// 该值不可表示 → fallback。
+/// `value` = the original signed value (cyclic/fixed do not use a negative
+/// sign; negatives enter as-is); `mag` = the absolute value (systems using a
+/// negative sign have already been converted in §2 step 3). Returns None =
+/// the value is not representable → fallback.
 fn format_core(
     system: &CounterStyleSystem,
     value: i64,
@@ -379,8 +399,9 @@ fn format_core(
     }
 }
 
-/// §3.7 fallback：未写/未知名 → decimal；`none` 宽容 → 空输出；成环 →
-/// decimal；否则以 fallback 样式重走完整生成算法。
+/// §3.7 fallback: not written/unknown name → decimal; `none` leniently →
+/// empty output; a cycle → decimal; otherwise reruns the full generation
+/// algorithm with the fallback style.
 fn fallback_of(
     rule: &CounterStyleRule,
     value: i64,
@@ -400,7 +421,8 @@ fn fallback_of(
     format_resolving(fb, value, registry, visited)
 }
 
-/// §6 内置样式子集。ASCII 不敏感匹配（spec：预定义名解析期一律小写）。
+/// §6 built-in style subset. ASCII-insensitive matching (spec: predefined
+/// names are always lowercased at parse time).
 fn builtin_rule(name: &str) -> Option<CounterStyleRule> {
     let lower = name.to_ascii_lowercase();
     let mut rule = CounterStyleRule {

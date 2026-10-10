@@ -1,9 +1,10 @@
-//! 绘制清单（L3）：布局 + 计算样式 → 绘制基元序列。
+//! Paint/display list (L3): layout + computed style → a sequence of paint primitives.
 //!
-//! 中立交换格式（ADR-0001/0003）：颜色为已解析的绝对 sRGBA
-//! （currentColor / light-dark 在此层终结；线性化与混合由 vello sink
-//! 承担，ADR-0002）。绘制顺序 = 树序（父先于子；z-index 排序属后续）。
-//! 单节点内：阴影 → 背景 → 边框 → 文本。
+//! Neutral interchange format (ADR-0001/0003): colors are resolved absolute sRGBA
+//! (currentColor / light-dark terminate at this layer; linearization and blending are
+//! handled by the vello sink, ADR-0002). Paint order = tree order (parent before
+//! child; z-index ordering comes later). Within a node: shadows → background →
+//! border → text.
 
 use crate::computed::ComputedStyle;
 use crate::css::property::{
@@ -19,90 +20,102 @@ use crate::tree::{NodeId, StyleTree};
 use peniko::color::{AlphaColor, Srgb};
 use std::collections::HashMap;
 
-/// F2（ADR-0022 D4）：文本装饰绘制单元（叶级；绘制期解析终结）。
+/// F2 (ADR-0022 D4): text decoration paint unit (leaf-level; resolved at paint time).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextDecorationPaint {
-    /// 行位集（1=underline 2=overline 4=line-through）。
+    /// Line bit set (1=underline 2=overline 4=line-through).
     pub line: u8,
-    /// 线型。
+    /// Line style.
     pub style: crate::css::property::TextDecoStyleKind,
-    /// 装饰色（绝对 sRGBA）。
+    /// Decoration color (absolute sRGBA).
     pub color: AlphaColor<Srgb>,
-    /// 厚度 px（声明 LP 解析；auto/from-font 退化 font_size/12）。
+    /// Thickness in px (resolved from the declared LP; auto/from-font degrade to
+    /// font_size/12).
     pub thickness_px: f32,
 }
 
-/// F2（ADR-0022 D5）：文本阴影绘制单元（列表序即绘制序，影先于字）。
+/// F2 (ADR-0022 D5): text shadow paint unit (list order = paint order, shadows
+/// before glyphs).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextShadowPaint {
-    /// 水平偏移 px（右为正）。
+    /// Horizontal offset in px (positive = right).
     pub dx: f32,
-    /// 垂直偏移 px（下为正）。
+    /// Vertical offset in px (positive = down).
     pub dy: f32,
-    /// 模糊半径 px（0=锐利；sink 多环近似——box-shadow 先例同源）。
+    /// Blur radius in px (0 = sharp; the sink approximates with multiple
+    /// concentric offset rings — same origin as the box-shadow precedent).
     pub blur: f32,
-    /// 阴影色（绝对 sRGBA）。
+    /// Shadow color (absolute sRGBA).
     pub color: AlphaColor<Srgb>,
 }
 
-/// 命中裁剪单元（P4 D4，ADR-0037）：矩形（含逐角圆角）或折线多边形；
-/// `inv` = 登记时活跃仿射的逆（sink 端 Clip.inv 同语义）——点先经 inv
-/// 逆映射再测局部形状，变换节点的裁剪精确到变换后几何。
+/// Hit-testing clip unit (P4 D4, ADR-0037): a rectangle (with per-corner radii) or a
+/// polyline polygon; `inv` = inverse of the active affine at registration time
+/// (same semantics as the sink-side Clip.inv) — a point is mapped back through
+/// `inv` before testing the local shape, so clipping of transformed nodes is exact
+/// in transformed geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HitClip {
-    /// 矩形裁剪（overflow PushClip / clip-path inset）：[x, y, w, h] +
-    /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius；全零 = 直角）。
+    /// Rectangular clip (overflow PushClip / clip-path inset): [x, y, w, h] plus
+    /// per-corner (horizontal, vertical) radii in px (order as in FillRect.radius;
+    /// all zeros = square corners).
     Rect {
-        /// 裁剪盒 [x, y, w, h]（视口坐标 px）。
+        /// Clip box [x, y, w, h] (viewport coordinates, px).
         rect: [f32; 4],
-        /// 每角 (横, 纵) 圆角 px（序 tl_h, tl_v, tr_h, tr_v, br_h, br_v,
-        /// bl_h, bl_v）。
+        /// Per-corner (horizontal, vertical) radii in px (order tl_h, tl_v, tr_h,
+        /// tr_v, br_h, br_v, bl_h, bl_v).
         radius: [f32; 8],
-        /// 登记时活跃仿射的逆（[a, b, c, d, e, f]）。
+        /// Inverse of the active affine at registration time ([a, b, c, d, e, f]).
         inv: [f32; 6],
     },
-    /// 折线多边形裁剪（clip-path circle/ellipse/polygon）。
+    /// Polyline polygon clip (clip-path circle/ellipse/polygon).
     Path {
-        /// 视口坐标顶点（周界序，隐式闭合）。
+        /// Vertices in viewport coordinates (boundary order, implicitly closed).
         points: Vec<[f32; 2]>,
-        /// 填充规则：true = nonzero，false = evenodd。
+        /// Fill rule: true = nonzero, false = evenodd.
         nonzero: bool,
-        /// 登记时活跃仿射的逆。
+        /// Inverse of the active affine at registration time.
         inv: [f32; 6],
     },
 }
 
-/// 命中几何单元（F3a，ADR-0023；P4 D4 精确化）：绘制序收集，后绘=更顶；
-/// border-box 视口坐标 + 收集时的活跃 clip 链快照（矩形/折线精确形状）。
-/// `mat` = 收集时活跃仿射（transform 节点=复合矩阵；命中点先逆变换到
-/// 节点局部系再测盒——未旋盒偏差收敛，ADR-0037 D4）。
+/// Hit geometry unit (F3a, ADR-0023; refined by P4 D4): collected in paint order,
+/// later = closer to the top; border-box viewport coordinates plus a snapshot of
+/// the active clip chain at collection time (exact rectangle/polyline shapes).
+/// `mat` = active affine at collection time (transform nodes = composite matrix;
+/// the hit point is mapped back into node-local space before testing the box —
+/// deviation for unrotated boxes converges, ADR-0037 D4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HitRect {
-    /// 所属节点。
+    /// Owning node.
     pub node_id: NodeId,
-    /// border-box x（视口）。
+    /// border-box x (viewport).
     pub x: f32,
-    /// border-box y（视口）。
+    /// border-box y (viewport).
     pub y: f32,
-    /// border-box 宽。
+    /// border-box width.
     pub w: f32,
-    /// border-box 高。
+    /// border-box height.
     pub h: f32,
-    /// 祖先 clip 链（外→内；矩形/折线精确形状+各自逆矩阵）。
+    /// Ancestor clip chain (outer→inner; exact rectangle/polyline shapes plus
+    /// their inverse matrices).
     pub clips: Vec<HitClip>,
-    /// 收集时活跃仿射（节点及祖先 transform 复合；恒等 = 无变换）。
+    /// Active affine at collection time (composite of the node's and ancestors'
+    /// transforms; identity = no transform).
     pub mat: [f32; 6],
 }
 
-/// 命中收集器（F3a，ADR-0023）：paint 期经 `PaintCtx.hit` 透传收集。
-/// `mat` = 遍历中的活跃仿射栈顶（paint_node transform 段更新/恢复）。
+/// Hit collector (F3a, ADR-0023): fed through `PaintCtx.hit` during painting.
+/// `mat` = top of the active affine stack while walking (updated/restored by the
+/// paint_node transform section).
 pub struct HitCollector {
-    /// 收集序=绘制序（后=顶）。
+    /// Collection order = paint order (later = on top).
     pub rects: Vec<HitRect>,
-    /// 活跃 clip 链（子树 PushClip/PushClipPath 登记 / PopClip 弹出）。
+    /// Active clip chain (subtree PushClip/PushClipPath pushes / PopClip pops).
     pub clips: Vec<HitClip>,
-    /// 活跃仿射（paint_node 遇 transform 节点复合，子树走查后恢复）。
-    /// 初始恒等（数组 derive Default 是全零——不可用）。
+    /// Active affine (paint_node composes on transform nodes, restored after the
+    /// subtree walk).
+    /// Starts as identity (derive Default on arrays is all zeros — unusable).
     pub mat: [f32; 6],
 }
 
@@ -116,15 +129,17 @@ impl Default for HitCollector {
     }
 }
 
-/// 命中结果（F3a，ADR-0023）。
+/// Hit result (F3a, ADR-0023).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HitTestHit {
-    /// 命中节点。
+    /// Hit node.
     pub node_id: NodeId,
 }
 
-/// F2（ADR-0022 D4）：叶级装饰解析——line 位集非零才产出；thickness=
-/// 声明 LP 经 px() 解析，auto/from-font 退化 font_size/12（近似在案）。
+/// F2 (ADR-0022 D4): leaf-level decoration resolution — emitted only when the
+/// `line` bit set is nonzero; thickness = declared LP resolved via px(),
+/// auto/from-font degrade to font_size/12 (approximation documented in
+/// FEATURES.md/SINK-MATRIX.md).
 fn text_decorations(style: &ComputedStyle, env: &MediaEnv) -> Vec<TextDecorationPaint> {
     let line = style.text_decoration_line();
     if line == 0 {
@@ -142,8 +157,8 @@ fn text_decorations(style: &ComputedStyle, env: &MediaEnv) -> Vec<TextDecoration
     }]
 }
 
-/// F2（ADR-0022 D5）：叶级阴影解析——声明列表 → 绘制单元（LP→px、
-/// color 解析、blur 缺省 0、color 缺省 currentColor）。
+/// F2 (ADR-0022 D5): leaf-level shadow resolution — declared list → paint units
+/// (LP→px, color resolution, blur defaults to 0, color defaults to currentColor).
 fn text_shadows(style: &ComputedStyle, env: &MediaEnv) -> Vec<TextShadowPaint> {
     style
         .text_shadows()
@@ -163,46 +178,48 @@ fn text_shadows(style: &ComputedStyle, env: &MediaEnv) -> Vec<TextShadowPaint> {
         .collect()
 }
 
-/// 绘制域滤镜效果（P2，ADR-0031 D3）：`FilterFn` 的 L3 终结形态——
-/// 长度分量（blur/drop-shadow 半径、偏移）已按节点样式换算 px，
-/// currentcolor 已终结具体色（同 Shadow/TextShadowPaint 惯例：DisplayList
-/// 自足、不含样式引用）。数值分量与声明期钳位一致。
+/// Paint-domain filter effect (P2, ADR-0031 D3): the L3-resolved form of `FilterFn` —
+/// length components (blur/drop-shadow radius, offsets) are converted to px against
+/// the node style, currentcolor is resolved to a concrete color (same convention as
+/// Shadow/TextShadowPaint: the DisplayList is self-contained and holds no style
+/// references). Numeric components match declaration-time clamping.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FilterEffect {
-    /// blur(`<length>`)：模糊半径 px（sink 换算 σ = 半径/2，css-filters-1 §3）。
+    /// blur(`<length>`): blur radius in px (the sink converts σ = radius/2,
+    /// css-filters-1 §3).
     Blur(f32),
-    /// brightness(`<number-percentage>`)：线性乘。
+    /// brightness(`<number-percentage>`): linear multiplier.
     Brightness(f32),
-    /// contrast(`<number-percentage>`)：仿射对比。
+    /// contrast(`<number-percentage>`): affine contrast.
     Contrast(f32),
-    /// grayscale(`<number-percentage>`)。
+    /// grayscale(`<number-percentage>`).
     Grayscale(f32),
-    /// sepia(`<number-percentage>`)。
+    /// sepia(`<number-percentage>`).
     Sepia(f32),
-    /// saturate(`<number-percentage>`)。
+    /// saturate(`<number-percentage>`).
     Saturate(f32),
-    /// invert(`<number-percentage>`)。
+    /// invert(`<number-percentage>`).
     Invert(f32),
-    /// opacity(`<number-percentage>`)：alpha 缩放。
+    /// opacity(`<number-percentage>`): alpha scaling.
     Opacity(f32),
-    /// hue-rotate(`<angle>`)：度。
+    /// hue-rotate(`<angle>`): degrees.
     HueRotate(f32),
-    /// drop-shadow：偏移/模糊半径 px + 终结色。
+    /// drop-shadow: offset/blur radius in px + resolved color.
     DropShadow {
-        /// x 偏移 px。
+        /// x offset in px.
         dx: f32,
-        /// y 偏移 px。
+        /// y offset in px.
         dy: f32,
-        /// 模糊半径 px（0 = 硬边）。
+        /// Blur radius in px (0 = hard edge).
         blur: f32,
-        /// 阴影色（currentcolor 已终结）。
+        /// Shadow color (currentcolor already resolved).
         color: AlphaColor<Srgb>,
     },
 }
 
-/// `FilterFn` 声明链 → 绘制域效果链（px/颜色终结；未知变体跳过——
-/// non_exhaustive 前向兼容）。
+/// `FilterFn` declaration chain → paint-domain effect chain (px/color resolution;
+/// unknown variants are skipped — non_exhaustive forward compatibility).
 fn resolve_filter_effects(
     fns: &[crate::css::property::FilterFn],
     style: &ComputedStyle,
@@ -237,367 +254,417 @@ fn resolve_filter_effects(
         .collect()
 }
 
-/// 单个绘制基元。坐标相对视口（滚动前）；尺寸为 border-box。
+/// A single paint primitive. Coordinates are relative to the viewport (pre-scroll);
+/// sizes are border-box.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum PaintOp {
-    /// 纯色矩形（背景）。
+    /// Solid-color rectangle (background).
     FillRect {
-        /// 盒左缘 x（视口坐标，px，border-box）。
+        /// Box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 盒顶缘 y（视口坐标，px，border-box）。
+        /// Box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 盒宽 px（border-box）。
+        /// Box width in px (border-box).
         width: f32,
-        /// 盒高 px（border-box）。
+        /// Box height in px (border-box).
         height: f32,
-        /// 每角 (横, 纵) 圆角 px（第五批⑪椭圆圆角；序 tl.x tl.y tr.x tr.y
-        /// br.x br.y bl.x bl.y）。
+        /// Per-corner (horizontal, vertical) radii in px (batch 5 ⑪ elliptical
+        /// corners; order tl.x tl.y tr.x tr.y br.x br.y bl.x bl.y).
         radius: [f32; 8],
-        /// 填充色（绝对 sRGBA）。
+        /// Fill color (absolute sRGBA).
         color: AlphaColor<Srgb>,
     },
-    /// 渐变背景（linear/radial，语义同 CSS）。
+    /// Gradient background (linear/radial; CSS semantics).
     Gradient {
-        /// 盒左缘 x（视口坐标，px，border-box）。
+        /// Box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 盒顶缘 y（视口坐标，px，border-box）。
+        /// Box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 盒宽 px（border-box）。
+        /// Box width in px (border-box).
         width: f32,
-        /// 盒高 px（border-box）。
+        /// Box height in px (border-box).
         height: f32,
-        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
+        /// Per-corner (horizontal, vertical) radii in px (order as in
+        /// FillRect.radius).
         radius: [f32; 8],
-        /// 渐变参数（CSS linear-gradient/radial-gradient；repeating 标记在
-        /// Gradient.repeating，P1-3 平铺语义由 sink 终结）。
+        /// Gradient parameters (CSS linear-gradient/radial-gradient; the repeating
+        /// flag lives in Gradient.repeating, P1-3 tiling semantics resolved by the
+        /// sink).
         gradient: Gradient,
-        /// 径向几何（T4c）：圆心与半径已按盒子解析为绝对 px（线性渐变为 None）。
+        /// Radial geometry (T4c): center and radii resolved to absolute px against
+        /// the box (None for linear gradients).
         radial: Option<RadialGeom>,
-        /// 锥形几何（C3）：圆心绝对 px + 起始角弧度（非锥形为 None）。
+        /// Conic geometry (C3): center in absolute px + start angle in radians
+        /// (None for non-conic).
         conic: Option<ConicGeom>,
-        /// 线性几何（F3d，ADR-0026）：渐变线绝对端点（非线性为 None）。
+        /// Linear geometry (F3d, ADR-0026): absolute gradient-line endpoints
+        /// (None for non-linear).
         linear: Option<LinearGeom>,
     },
-    /// 阴影（第五批⑩：模糊=sink 多环近似；inset=盒内反转填充）。
+    /// Shadow (batch 5 ⑩: blur = sink multi-ring approximation; inset = inverted
+    /// fill inside the box).
     Shadow {
-        /// 盒左缘 x（视口坐标，px，border-box）。
+        /// Box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 盒顶缘 y（视口坐标，px，border-box）。
+        /// Box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 盒宽 px（border-box）。
+        /// Box width in px (border-box).
         width: f32,
-        /// 盒高 px（border-box）。
+        /// Box height in px (border-box).
         height: f32,
-        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
+        /// Per-corner (horizontal, vertical) radii in px (order as in
+        /// FillRect.radius).
         radius: [f32; 8],
-        /// 阴影颜色（box-shadow `<color>`，绝对 sRGBA）。
+        /// Shadow color (box-shadow `<color>`, absolute sRGBA).
         color: AlphaColor<Srgb>,
-        /// 水平偏移 px（box-shadow `<offset-x>`，右为正）。
+        /// Horizontal offset in px (box-shadow `<offset-x>`, positive = right).
         offset_x: f32,
-        /// 垂直偏移 px（box-shadow `<offset-y>`，下为正）。
+        /// Vertical offset in px (box-shadow `<offset-y>`, positive = down).
         offset_y: f32,
-        /// 模糊半径 px（box-shadow `<blur-radius>`）。
+        /// Blur radius in px (box-shadow `<blur-radius>`).
         blur: f32,
-        /// 外扩/内缩（px）。
+        /// Spread in px (outward / inward).
         spread: f32,
-        /// 内阴影（盒内反转填充）。
+        /// Inset shadow (inverted fill inside the box).
         inset: bool,
     },
-    /// 背景图（第五批⑨）：宿主预解码 RGBA（零副作用——引擎不取 URL，
-    /// 引用经 add_image 注册）；源尺寸与像素自带（DisplayList 自足）。
+    /// Background image (batch 5 ⑨): host pre-decoded RGBA (zero side effects —
+    /// the engine never fetches URLs, references are registered via add_image);
+    /// source size and pixels travel with the op (the DisplayList is
+    /// self-contained).
     Image {
-        /// 绘制盒左缘 x（视口坐标，px，border-box）。
+        /// Draw box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 绘制盒顶缘 y（视口坐标，px，border-box）。
+        /// Draw box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 绘制盒宽 px（border-box）。
+        /// Draw box width in px (border-box).
         width: f32,
-        /// 绘制盒高 px（border-box）。
+        /// Draw box height in px (border-box).
         height: f32,
-        /// 每角 (横, 纵) 圆角（第五批⑪序）——sink 据此决定是否裁剪。
+        /// Per-corner (horizontal, vertical) radii (batch 5 ⑪ order) — the sink
+        /// uses this to decide whether to clip.
         radius: [f32; 8],
-        /// 源图像素宽（内在尺寸）。
+        /// Source image width in px (intrinsic sizing).
         source_w: u32,
-        /// 源图像素高（内在尺寸）。
+        /// Source image height in px (intrinsic sizing).
         source_h: u32,
-        /// 源子域左缘 px（F3d 9-slice；全图 = 0）。
+        /// Source sub-region left edge in px (F3d 9-slice; 0 = full image).
         src_x: f32,
-        /// 源子域顶缘 px（全图 = 0）。
+        /// Source sub-region top edge in px (0 = full image).
         src_y: f32,
-        /// 源子域宽 px（全图 = source_w）。
+        /// Source sub-region width in px (full image = source_w).
         src_w: f32,
-        /// 源子域高 px（全图 = source_h）。
+        /// Source sub-region height in px (full image = source_h).
         src_h: f32,
-        /// 预解码 RGBA 像素（宿主注册）。
+        /// Pre-decoded RGBA pixels (host-registered).
         pixels: ImageRes,
     },
-    /// 边框（四边独立：top/right/bottom/left；style none 或 width 0 的边由 sink 忽略）。
+    /// Border (four independent sides: top/right/bottom/left; sides with style
+    /// none or width 0 are skipped by the sink).
     Border {
-        /// 盒左缘 x（视口坐标，px，border-box）。
+        /// Box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 盒顶缘 y（视口坐标，px，border-box）。
+        /// Box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 盒宽 px（border-box）。
+        /// Box width in px (border-box).
         width: f32,
-        /// 盒高 px（border-box）。
+        /// Box height in px (border-box).
         height: f32,
-        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
+        /// Per-corner (horizontal, vertical) radii in px (order as in
+        /// FillRect.radius).
         radius: [f32; 8],
-        /// 四边边框，序 [top, right, bottom, left]。
+        /// Four border sides in [top, right, bottom, left] order.
         sides: [BorderSide; 4],
     },
-    /// 文本（T5 转换为字形 run；spans 为 T5c 富文本覆盖，可为空）。
+    /// Text (T5 converts to glyph runs; spans are T5c rich-text overrides, may be
+    /// empty).
     Text {
-        /// 文本起点 x（视口坐标，px，内容盒左上）。
+        /// Text origin x (viewport coordinates, px, top-left of the content box).
         x: f32,
-        /// 文本起点 y（视口坐标，px，内容盒左上）。
+        /// Text origin y (viewport coordinates, px, top-left of the content box).
         y: f32,
-        /// 待排版绘制的 UTF-8 文本（叶节点全文）。
+        /// UTF-8 text to typeset and draw (full text of the leaf node).
         text: String,
-        /// 基础文本色（color，绝对 sRGBA；span 可覆盖）。
+        /// Base text color (color, absolute sRGBA; spans may override).
         color: AlphaColor<Srgb>,
-        /// span 覆盖样式（T5c）：绘制期已终结；空 = 无富文本。
+        /// Span override styles (T5c): resolved at paint time; empty = no rich text.
         spans: Vec<TextSpanPaint>,
-        /// 字号 px（font-size）。
+        /// Font size in px (font-size).
         font_size: f32,
-        /// 字体族列表（font-family，按序回退）。
+        /// Font family list (font-family, in fallback order).
         font_family: FontFamilyList,
-        /// 字重（font-weight 数值，400 = normal）。
+        /// Font weight (numeric font-weight, 400 = normal).
         font_weight: f32,
-        /// 是否斜体（font-style: italic）。
+        /// Whether italic (font-style: italic).
         italic: bool,
-        /// 换行约束（T5c-2）：测量与绘制共用同一 max_advance 保证折行一致；None = 无界。
+        /// Line-wrapping constraint (T5c-2): measurement and painting share the
+        /// same max_advance so wrapping is consistent; None = unbounded.
         max_advance: Option<f32>,
-        /// 行高（盘点修复）：Some = 绝对 px；None = normal（排版器默认字体度量）。
+        /// Line height (inventory fix): Some = absolute px; None = normal
+        /// (typesetter default font metrics).
         line_height: Option<f32>,
-        /// 字距 px（0 = 默认）。span 级行高/字距为已知近似（仅基样式生效）。
+        /// Letter spacing in px (0 = default). Span-level line height/letter
+        /// spacing are known approximations (only the base style applies).
         letter_spacing: f32,
-        /// 行内对齐（第五批⑳）：测量不变宽（折行与盒宽与对齐无关），仅
-        /// sink 排版后 align 消费；Start = 排版器默认。
+        /// Inline alignment (batch 5 ⑳): does not change measurement (wrapping is
+        /// independent of both box width and alignment); consumed by the sink as
+        /// align after typesetting; Start = typesetter default.
         text_align: TextAlign,
-        /// C2（ADR-0016）：词内断行强度（sink 重建排版同参——测量与绘制
-        /// 断行一致性契约，同 max_advance 通道）。
+        /// C2 (ADR-0016): intra-word line-breaking strength (the sink re-typesets
+        /// with the same parameter — the measurement/painting line-breaking
+        /// consistency contract, same channel as max_advance).
         word_break: crate::css::property::WordBreakKind,
-        /// C2（ADR-0016）：长词溢出断行（sink 重建排版同参）。
+        /// C2 (ADR-0016): breaking of overflowing long words (the sink re-typesets
+        /// with the same parameter).
         overflow_wrap: crate::css::property::OverflowWrapKind,
-        /// F2（ADR-0022 D4）：叶级文本装饰（line 位集非零才非空；绘制期
-        /// 已解析颜色/厚度 px）。
+        /// F2 (ADR-0022 D4): leaf-level text decorations (nonempty only when the
+        /// line bit set is nonzero; color/thickness already resolved to px at
+        /// paint time).
         decorations: Vec<TextDecorationPaint>,
-        /// F2（ADR-0022 D5）：文本阴影（逗号列表序；sink 影字先绘）。
+        /// F2 (ADR-0022 D5): text shadows (comma-list order; the sink draws
+        /// shadows before glyphs).
         shadows: Vec<TextShadowPaint>,
-        /// F3d（ADR-0026 D5）：font-stretch 百分比（100 = normal；100 不推
-        /// = sink 默认）。基样式级，span 级为已知近似（行高/字距先例）。
+        /// F3d (ADR-0026 D5): font-stretch percentage (100 = normal; 100 is not
+        /// pushed = sink default). Base-style level; span level is a known
+        /// approximation (line height/letter spacing precedent).
         font_stretch: f32,
-        /// F3d（ADR-0026 D5）：词距 px（None = normal = sink 默认 0）。
+        /// F3d (ADR-0026 D5): word spacing in px (None = normal = sink default 0).
         word_spacing: Option<f32>,
-        /// F3d（ADR-0026 D5）：生效 OpenType 特性对（font-feature-settings
-        /// ∪ font-variant-caps 派生 titl/unic；空 = sink 默认）。
+        /// F3d (ADR-0026 D5): effective OpenType feature pairs
+        /// (font-feature-settings ∪ font-variant-caps-derived titl/unic; empty =
+        /// sink defaults).
         font_features: Vec<([u8; 4], u16)>,
-        /// F3d（ADR-0026 D5）：变体轴对（font-variation-settings；空 = sink 默认）。
+        /// F3d (ADR-0026 D5): variation axis pairs (font-variation-settings;
+        /// empty = sink defaults).
         font_variations: Vec<([u8; 4], f32)>,
     },
-    /// 裁剪层开始（overflow 非 visible）。
+    /// Begin clip layer (overflow other than visible).
     PushClip {
-        /// 裁剪盒左缘 x（视口坐标，px，border-box）。
+        /// Clip box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 裁剪盒顶缘 y（视口坐标，px，border-box）。
+        /// Clip box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 裁剪盒宽 px（border-box）。
+        /// Clip box width in px (border-box).
         width: f32,
-        /// 裁剪盒高 px（border-box）。
+        /// Clip box height in px (border-box).
         height: f32,
-        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius）。
+        /// Per-corner (horizontal, vertical) radii in px (order as in
+        /// FillRect.radius).
         radius: [f32; 8],
     },
-    /// 多边形裁剪层开始（F3c，ADR-0025：clip-path 非 inset 形状）。
-    /// 视口坐标顶点序列（≥3；圆/椭圆绘制期 64 段折线近似，B 级在案）。
+    /// Begin polygon clip layer (F3c, ADR-0025: non-inset clip-path shapes).
+    /// Vertex sequence in viewport coordinates (≥3; circles/ellipses are
+    /// approximated at paint time by a 64-segment polyline, Tier B, documented in
+    /// FEATURES.md/SINK-MATRIX.md).
     PushClipPath {
-        /// 视口坐标顶点 [x, y] px 序列（顺序即多边形周界序，隐式闭合）。
+        /// Vertex [x, y] px sequence in viewport coordinates (order = polygon
+        /// boundary order, implicitly closed).
         points: Vec<[f32; 2]>,
-        /// 填充规则：true = nonzero（圆/椭圆/polygon 缺省），false =
-        /// evenodd（polygon(evenodd, …)）。
+        /// Fill rule: true = nonzero (default for circle/ellipse/polygon),
+        /// false = evenodd (polygon(evenodd, …)).
         nonzero: bool,
     },
-    /// 裁剪层结束（对应最近的 PushClip）。
+    /// End clip layer (matches the nearest PushClip).
     PopClip,
-    /// 透明度层开始（opacity < 1，ADR-0008）：整节点子树以 alpha 合成。
+    /// Begin opacity layer (opacity < 1, ADR-0008): the whole node subtree is
+    /// composited with alpha.
     PushOpacity {
-        /// 整层不透明度（0.0–1.0，CSS opacity）。
+        /// Layer opacity (0.0–1.0, CSS opacity).
         alpha: f32,
-        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
+        /// Affected node box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
+        /// Affected node box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 受影响节点盒宽 px（border-box）。
+        /// Affected node box width in px (border-box).
         width: f32,
-        /// 受影响节点盒高 px（border-box）。
+        /// Affected node box height in px (border-box).
         height: f32,
     },
-    /// 透明度层结束（对应最近的 PushOpacity）。
+    /// End opacity layer (matches the nearest PushOpacity).
     PopOpacity,
-    /// 混合层开始（P1-2，css-compositing-1）：mix-blend-mode ≠ normal 或
-    /// isolation: isolate 时包住整节点子树——层内容以 `mode` 与背后画布
-    /// 合成（Normal = 纯隔离组边界）。混合层必须最外（opacity 层之内）：
-    /// 合成序 = blend(背后画布, opacity(子树))。
+    /// Begin blend layer (P1-2, css-compositing-1): wraps the whole node subtree
+    /// when mix-blend-mode ≠ normal or isolation: isolate — layer content is
+    /// composited with the backdrop using `mode` (Normal = a pure isolation-group
+    /// boundary). The blend layer must be outermost (inside the opacity layer):
+    /// compositing order = blend(backdrop, opacity(subtree)).
     PushBlend {
-        /// 混合模式（16 标准模式 + plus-lighter/darker）。
+        /// Blend mode (16 standard modes + plus-lighter/darker).
         mode: crate::css::property::BlendMode,
-        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
+        /// Affected node box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
+        /// Affected node box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 受影响节点盒宽 px（border-box）。
+        /// Affected node box width in px (border-box).
         width: f32,
-        /// 受影响节点盒高 px（border-box）。
+        /// Affected node box height in px (border-box).
         height: f32,
     },
-    /// 混合层结束（对应最近的 PushBlend）。
+    /// End blend layer (matches the nearest PushBlend).
     PopBlend,
-    /// 滤镜层开始（P2，ADR-0031 D3，css-filters-1）：filter ≠ none 时包住
-    /// 整节点子树——层内容离屏渲染后经 `filters` 函数链依序处理再合成
-    /// （链序 = 语义序）。栈位 opacity 之内（合成序 = opacity(filter(子树))，
-    /// css-filters-1 §3）、blend/clip/transform 之外（clip 裁 filter 输出）。
+    /// Begin filter layer (P2, ADR-0031 D3, css-filters-1): wraps the whole node
+    /// subtree when filter ≠ none — layer content is rendered offscreen, then
+    /// processed in order through the `filters` function chain and composited
+    /// (chain order = semantic order). Stacks inside opacity (compositing order =
+    /// opacity(filter(subtree)), css-filters-1 §3) and outside blend/clip/
+    /// transform (clip clips the filter output).
     PushFilter {
-        /// 滤镜效果链（绘制域终结值，声明序，空链不会发射）。
+        /// Filter effect chain (paint-domain resolved values, declaration order;
+        /// an empty chain is never emitted).
         filters: Vec<FilterEffect>,
-        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
+        /// Affected node box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
+        /// Affected node box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 受影响节点盒宽 px（border-box）。
+        /// Affected node box width in px (border-box).
         width: f32,
-        /// 受影响节点盒高 px（border-box）。
+        /// Affected node box height in px (border-box).
         height: f32,
     },
-    /// 滤镜层结束（对应最近的 PushFilter）。
+    /// End filter layer (matches the nearest PushFilter).
     PopFilter,
-    /// 背景滤镜（P2，ADR-0031 D3，css-filters-2）：即时 op（无层对）——
-    /// 对节点 border-box 区域背后已绘制的画布内容应用 `filters` 函数链
-    /// （采样面 v1 近似 = 当前画布区域，stacking context 边界细化 B 级在案）。
-    /// 发射于节点自身内容之前、效果层对之外（作用于主画布）。
+    /// Backdrop filter (P2, ADR-0031 D3, css-filters-2): an immediate op (no
+    /// layer pair) — applies the `filters` function chain to canvas content
+    /// already painted behind the node's border-box area (v1 approximation of the
+    /// sampled surface = current canvas region; stacking-context refinement is
+    /// Tier B, documented in FEATURES.md/SINK-MATRIX.md). Emitted before the
+    /// node's own content and outside effect layer pairs (operates on the main
+    /// canvas).
     BackdropFilter {
-        /// 滤镜效果链（绘制域终结值，声明序，空链不会发射）。
+        /// Filter effect chain (paint-domain resolved values, declaration order;
+        /// an empty chain is never emitted).
         filters: Vec<FilterEffect>,
-        /// 受影响节点盒左缘 x（视口坐标，px，border-box）。
+        /// Affected node box left edge x (viewport coordinates, px, border-box).
         x: f32,
-        /// 受影响节点盒顶缘 y（视口坐标，px，border-box）。
+        /// Affected node box top edge y (viewport coordinates, px, border-box).
         y: f32,
-        /// 受影响节点盒宽 px（border-box）。
+        /// Affected node box width in px (border-box).
         width: f32,
-        /// 受影响节点盒高 px（border-box）。
+        /// Affected node box height in px (border-box).
         height: f32,
     },
-    /// 2D 仿射变换层开始（ADR-0009）：本节点子树全部绘制经矩阵变换；
-    /// 布局盒保持未变换坐标（taffy 不可见 transform）。
+    /// Begin 2D affine transform layer (ADR-0009): all drawing of this node's
+    /// subtree goes through the matrix; layout boxes keep untransformed
+    /// coordinates (taffy cannot see transforms).
     PushTransform {
-        /// [a, b, c, d, e, f]：x' = a·x + c·y + e，y' = b·x + d·y + f。
+        /// [a, b, c, d, e, f]: x' = a·x + c·y + e, y' = b·x + d·y + f.
         affine: [f32; 6],
     },
-    /// 变换层结束（对应最近的 PushTransform）。
+    /// End transform layer (matches the nearest PushTransform).
     PopTransform,
-    /// 滚动偏移层开始。
+    /// Begin scroll-offset layer.
     PushScroll {
-        /// 水平滚动偏移 px（等价 scrollLeft，子树内容随之平移）。
+        /// Horizontal scroll offset in px (equivalent to scrollLeft; subtree
+        /// content translates with it).
         dx: f32,
-        /// 垂直滚动偏移 px（等价 scrollTop，子树内容随之平移）。
+        /// Vertical scroll offset in px (equivalent to scrollTop; subtree content
+        /// translates with it).
         dy: f32,
     },
-    /// 滚动偏移层结束（对应最近的 PushScroll）。
+    /// End scroll-offset layer (matches the nearest PushScroll).
     PopScroll,
 }
 
-/// 单边边框（T4b：宽度/样式/颜色已在 paint 层终结为绝对值）。
+/// Single border side (T4b: width/style/color already resolved to absolute values
+/// at the paint layer).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BorderSide {
-    /// 边宽 px（border-width，已终结为绝对值）。
+    /// Side width in px (border-width, already resolved to an absolute value).
     pub width: f32,
-    /// 边框样式（border-style；none 或宽 0 由 sink 忽略）。
+    /// Border style (border-style; none or width 0 is skipped by the sink).
     pub style: BorderStyle,
-    /// 边框色（border-color，绝对 sRGBA）。
+    /// Border color (border-color, absolute sRGBA).
     pub color: AlphaColor<Srgb>,
 }
 
-/// 已解析的径向几何（绝对 px；椭圆分别给 rx/ry，圆时相等）。
+/// Resolved radial geometry (absolute px; ellipses get rx/ry separately, equal for
+/// circles).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadialGeom {
-    /// 圆心 x（px，盒子坐标）。
+    /// Center x (px, box coordinates).
     pub cx: f32,
-    /// 圆心 y（px，盒子坐标）。
+    /// Center y (px, box coordinates).
     pub cy: f32,
-    /// 水平半径 px。
+    /// Horizontal radius in px.
     pub rx: f32,
-    /// 垂直半径 px。
+    /// Vertical radius in px.
     pub ry: f32,
 }
 
-/// 已解析的锥形几何（C3，css-images-3；ADR-0017）。绝对 px 圆心；起始角
-/// 弧度、自正 X 轴起、顺时针（peniko SweepGradientPosition 语义直接对齐——
-/// CSS 0deg=12 点方向经 (deg−90°)·π/180 平移）。
+/// Resolved conic geometry (C3, css-images-3; ADR-0017). Center in absolute px;
+/// start angle in radians, measured from the positive X axis, clockwise (direct
+/// alignment with peniko SweepGradientPosition semantics — CSS 0deg = 12 o'clock
+/// is shifted by (deg−90°)·π/180).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConicGeom {
-    /// 圆心 x（px，盒子坐标）。
+    /// Center x (px, box coordinates).
     pub cx: f32,
-    /// 圆心 y（px，盒子坐标）。
+    /// Center y (px, box coordinates).
     pub cy: f32,
-    /// 起始角（弧度，正 X 轴起，顺时针）。
+    /// Start angle (radians, measured from the positive X axis, clockwise).
     pub start: f32,
 }
 
-/// 已解析的线性渐变几何（F3d，ADR-0026）：CSS 渐变线两端点已按绘制盒
-/// 解析为绝对 px（css-images-3 §3.2；radial/conic 绝对几何先例的补齐——
-/// 9-slice 切片要求九区域共享同一绝对渐变）。paint 层终结；sink 优先
-/// 消费，缺省 None = 盒推导回退（既有语义不变）。
+/// Resolved linear gradient geometry (F3d, ADR-0026): both CSS gradient-line
+/// endpoints resolved to absolute px against the paint box (css-images-3 §3.2;
+/// completes the radial/conic absolute-geometry precedent — 9-slice regions must
+/// share one absolute gradient). Resolved at the paint layer; the sink consumes
+/// it preferentially, a default None = box-derived fallback (existing semantics
+/// unchanged).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearGeom {
-    /// 渐变线起点 (x, y)（px，盒子坐标；stop 0 端）。
+    /// Gradient-line start (x, y) (px, box coordinates; the stop-0 end).
     pub start: [f32; 2],
-    /// 渐变线终点 (x, y)（px，盒子坐标；末 stop 端）。
+    /// Gradient-line end (x, y) (px, box coordinates; the last-stop end).
     pub end: [f32; 2],
 }
 
-/// 富文本 span（T5c）：绘制期已终结的覆盖样式；区间 [start, end) 为文本字节偏移。
+/// Rich-text span (T5c): override styles resolved at paint time; [start, end) are
+/// text byte offsets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpanPaint {
-    /// span 起始字节偏移（含）。
+    /// Span start byte offset (inclusive).
     pub start: u32,
-    /// span 结束字节偏移（不含）。
+    /// Span end byte offset (exclusive).
     pub end: u32,
-    /// 文本色（color，绝对 sRGBA）。
+    /// Text color (color, absolute sRGBA).
     pub color: AlphaColor<Srgb>,
-    /// 字号 px（font-size）。
+    /// Font size in px (font-size).
     pub font_size: f32,
-    /// 字重（font-weight 数值，400 = normal）。
+    /// Font weight (numeric font-weight, 400 = normal).
     pub font_weight: f32,
-    /// 是否斜体（font-style: italic）。
+    /// Whether italic (font-style: italic).
     pub italic: bool,
-    /// 字体族列表（font-family，按序回退）。
+    /// Font family list (font-family, in fallback order).
     pub font_family: crate::css::property::FontFamilyList,
-    /// span 字距 px（letter-spacing 计算值；0 = 无字距）。
+    /// Span letter spacing in px (computed letter-spacing value; 0 = none).
     pub letter_spacing: f32,
-    /// span 行高 px（line-height 计算值；None = normal，回退 op 级行高）。
+    /// Span line height in px (computed line-height value; None = normal, falls
+    /// back to the op-level line height).
     pub line_height: Option<f32>,
 }
 
-/// 一帧的绘制清单。
+/// The paint list for one frame.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[must_use = "绘制清单被丢弃则该帧无法渲染"]
+#[must_use = "dropping the paint list leaves the frame unrendered"]
 pub struct DisplayList {
-    /// 树序基元序列。
+    /// Primitive sequence in tree order.
     pub ops: Vec<PaintOp>,
-    /// 对应帧的生成号。
+    /// Generation number of the corresponding frame.
     pub generation: u64,
 }
 
-/// 宿主注册的背景图（第五批⑨）：预解码 RGBA（引擎不取 URL、不解码位图
-/// 格式——零副作用）；DisplayList 自足携带像素。rgba 以
-/// `Arc<dyn AsRef<[u8]>>` 承载（peniko Blob 同型，免去去size化转换）。
+/// Host-registered background image (batch 5 ⑨): pre-decoded RGBA (the engine
+/// never fetches URLs or decodes bitmap formats — zero side effects); the
+/// DisplayList carries the pixels self-contained. `rgba` is held as
+/// `Arc<dyn AsRef<[u8]>>` (same shape as a peniko Blob, avoiding an unsize
+/// conversion).
 pub struct ImageRes {
-    /// 图像像素宽（内在尺寸）。
+    /// Image width in px (intrinsic sizing).
     pub width: u32,
-    /// 图像像素高（内在尺寸）。
+    /// Image height in px (intrinsic sizing).
     pub height: u32,
-    /// 预解码 RGBA 字节（每像素 4 字节，sRGB）。
+    /// Pre-decoded RGBA bytes (4 bytes per pixel, sRGB).
     pub rgba: std::sync::Arc<dyn std::convert::AsRef<[u8]> + Send + Sync>,
 }
 
@@ -631,56 +698,62 @@ impl PartialEq for ImageRes {
     }
 }
 
-/// 多列列规条带（三期⑤c）：settle_column_rules 结算的几何，坐标相对
-/// multicol 容器 border-box 原点（paint 层加容器原点）；引擎逐帧全量
-/// 重建（列平衡几何随内容漂移，无稳态缓存）。
+/// Multicol column rule band (phase 3 ⑤c): geometry settled by settle_column_rules,
+/// coordinates relative to the multicol container's border-box origin (the paint
+/// layer adds the container origin); the engine rebuilds it fully each frame
+/// (column balancing geometry drifts with content — no steady-state cache).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnRuleSeg {
-    /// 段左缘 x（px，multicol 容器 border-box 坐标）。
+    /// Segment left edge x (px, multicol container border-box coordinates).
     pub x: f32,
-    /// 段顶缘 y（px，multicol 容器 border-box 坐标）。
+    /// Segment top edge y (px, multicol container border-box coordinates).
     pub y: f32,
-    /// 段宽 px。
+    /// Segment width in px.
     pub width: f32,
-    /// 段高 px。
+    /// Segment height in px.
     pub height: f32,
-    /// 规条颜色（column-rule-color，绝对 sRGBA）。
+    /// Rule color (column-rule-color, absolute sRGBA).
     pub color: AlphaColor<Srgb>,
 }
 
-/// 绘制输入上下文（树镜像 + 布局 + 滚动 + 环境）。
+/// Paint input context (tree mirror + layout + scroll + environment).
 pub struct PaintCtx<'a> {
-    /// 样式树镜像（提供节点结构与叶文本）。
+    /// Style tree mirror (provides node structure and leaf text).
     pub tree: &'a StyleTree,
-    /// 节点 → 计算样式。
+    /// Node → computed style.
     pub styles: &'a HashMap<NodeId, ComputedStyle>,
-    /// 节点 → 布局盒 (x, y, w, h)（视口坐标，px，border-box）。
+    /// Node → layout box (x, y, w, h) (viewport coordinates, px, border-box).
     pub layout: &'a HashMap<NodeId, (f32, f32, f32, f32)>,
-    /// 节点 → 滚动偏移 (dx, dy)（px，等价 scrollLeft/scrollTop）。
+    /// Node → scroll offset (dx, dy) (px, equivalent to scrollLeft/scrollTop).
     pub scroll: &'a HashMap<NodeId, (f32, f32)>,
-    /// 媒体环境（媒体查询求值输入）。
+    /// Media environment (input for media query evaluation).
     pub env: &'a MediaEnv,
-    /// span 级样式（T5c）：已按节点基样式级联求解。
+    /// Span-level styles (T5c): already cascaded against the node's base style.
     pub spans: &'a HashMap<NodeId, Vec<(u32, u32, ComputedStyle)>>,
-    /// 文本叶测量所用换行约束（T5c-2）：缺席 = 无界 / 宿主测量。
+    /// Line-wrapping constraints used for text-leaf measurement (T5c-2): absent =
+    /// unbounded / host-measured.
     pub wrap_widths: &'a HashMap<NodeId, Option<f32>>,
-    /// F2（ADR-0022 D2）：文本截断 override（ellipsis/line-clamp）——
-    /// apply_text_truncation 生成；Text op 文本替换消费。
+    /// F2 (ADR-0022 D2): text truncation override (ellipsis/line-clamp) —
+    /// produced by apply_text_truncation; consumed as the Text op's text
+    /// replacement.
     pub text_overrides: &'a HashMap<NodeId, String>,
-    /// 命中收集通道（F3a，ADR-0023；None=不收集零成本）。
+    /// Hit collection channel (F3a, ADR-0023; None = no collection, zero cost).
     pub hit: Option<&'a std::cell::RefCell<HitCollector>>,
-    /// 背景图注册表（第五批⑨）：url() 引用 → 宿主预解码 RGBA。
+    /// Background image registry (batch 5 ⑨): url() reference → host pre-decoded
+    /// RGBA.
     pub images: &'a HashMap<String, ImageRes>,
-    /// 多列列规条带（三期⑤c）：NodeId → 段列表（引擎逐帧重建）。
+    /// Multicol column rule bands (phase 3 ⑤c): NodeId → segment list (rebuilt by
+    /// the engine each frame).
     pub column_rules: &'a HashMap<NodeId, Vec<ColumnRuleSeg>>,
-    /// P9-3（css-lists-3 §3.1，ADR-0041）：list-item 宿主 → 文本 marker
-    /// (marker 节点, 前进宽 px)。marker 伪节点 taffy 隐藏——paint 层在
-    /// 宿主首行内容左缘合成 marker 文本 op，宿主文本 op x 偏移前进宽
-    ///（inside 语义；outside≈inside B·豁免）。
+    /// P9-3 (css-lists-3 §3.1, ADR-0041): list-item host → text marker
+    /// (marker node, advance width in px). The marker pseudo-node is hidden from
+    /// taffy — the paint layer synthesizes the marker text op at the left edge of
+    /// the host's first line of content, and the host's text op is shifted by the
+    /// advance width (inside semantics; outside≈inside is a Tier B exemption).
     pub markers: &'a HashMap<NodeId, (NodeId, f32)>,
 }
 
-/// 构建绘制清单（树序遍历；布局按节点给出 border-box）。
+/// Builds the paint list (tree-order walk; layout supplies a border-box per node).
 pub fn build_display_list(
     ctx: &PaintCtx<'_>,
     root: NodeId,
@@ -692,17 +765,20 @@ pub fn build_display_list(
     paint_node(ctx, root, out);
 }
 
-/// ADR-0010：向既有 DisplayList 追加一棵子树的绘制基元（不清空、不改
-/// generation）——frame 按 root_order 逐根追加（超根无样式不可作为走查
-/// 起点；用户根各有样式/布局条目）。
+/// ADR-0010: appends one subtree's paint primitives to an existing DisplayList
+/// (does not clear or change generation) — the frame appends root by root along
+/// root_order (the super-root has no style and cannot be a walk start; user roots
+/// each have style/layout entries).
 pub(crate) fn append_display_list(ctx: &PaintCtx<'_>, root: NodeId, out: &mut DisplayList) {
     paint_node(ctx, root, out);
 }
 
-/// 线性渐变几何解析（F3d，ADR-0026）：CSS 角（0deg=12 点方向顺时针）→
-/// 渐变线端点（css-images-3 §3.2：方向 d=(sin θ, −cos θ)（屏幕 y 向下），
-/// 线长 L=|w·sin θ|+|h·cos θ|，端点=中心±(L/2)·d）。to-corner 形式解析期
-/// 容错拒绝（在案），此处仅需角度式。
+/// Linear gradient geometry resolution (F3d, ADR-0026): CSS angle (0deg = 12
+/// o'clock, clockwise) → gradient-line endpoints (css-images-3 §3.2: direction
+/// d=(sin θ, −cos θ) with screen y pointing down, line length L=|w·sin θ|+|h·cos θ|,
+/// endpoints = center±(L/2)·d). The to-corner form is gracefully rejected at parse
+/// time (documented in FEATURES.md/SINK-MATRIX.md); only the angle form is needed
+/// here.
 fn resolve_linear(angle_deg: f32, x: f32, y: f32, w: f32, h: f32) -> LinearGeom {
     let th = angle_deg.to_radians();
     let (sn, cs) = th.sin_cos();
@@ -714,17 +790,22 @@ fn resolve_linear(angle_deg: f32, x: f32, y: f32, w: f32, h: f32) -> LinearGeom 
     }
 }
 
-/// border-image 九片发射（F3d，ADR-0026；css-backgrounds-3 §6.3-6.6）：
-/// source ≠ none 时解析切片/带宽/外扩并发九区域基元（4 角拉伸 + 4 边
-/// stretch/repeat/round/space + fill 中心），每区域独立 op（ADR-0001
-/// 中立性，sink 零逻辑重复）。渐变源九区域共享全盒绝对几何
-///（linear/radial/conic）= 切片精确；位图源经 Image 源子域字段裁切
-///（vello=仿射子域+裁剪层、soft=采样偏移）。outset 仅位移绘制域
-///（ink overflow，不入 scrollable/hit）。返回 true = 已取代 Border op；
-/// false = 源缺席或 URL 未注册（调用方回退边框，零副作用契约）。
+/// border-image nine-slice emission (F3d, ADR-0026; css-backgrounds-3 §6.3-6.6):
+/// when source ≠ none, resolves slice/band widths/outset and emits nine-region
+/// primitives (4 stretched corners + 4 stretch/repeat/round/space edges + the
+/// fill center), one op per region (ADR-0001 neutrality, zero logic duplication
+/// in the sink). Gradient sources share one full-box absolute geometry across the
+/// nine regions (linear/radial/conic) = exact slicing; bitmap sources are cropped
+/// via the Image source sub-region fields (vello = affine sub-region + clip
+/// layer, soft = sampling offset). outset only shifts the paint domain (ink
+/// overflow, not part of scrollable/hit). Returns true = the Border op has been
+/// replaced; false = source missing or URL unregistered (the caller falls back
+/// to the border — the zero-side-effect contract).
 ///
-/// B 级在案：渐变源无内在片尺寸 → 全部平铺模式按 stretch；边框圆角不
-/// 裁切 9-slice（浏览器按圆角裁边框图，此处直角区域）。
+/// Tier B, documented in FEATURES.md/SINK-MATRIX.md: gradient sources have no
+/// intrinsic slice size → every tiling mode degrades to stretch; border radii do
+/// not clip the 9-slice (browsers clip the border image along the radii; regions
+/// here are square-cornered).
 #[allow(clippy::too_many_arguments)] // 九宫格几何直传（结构体化=调用噪声）
 fn paint_border_image(
     ctx: &PaintCtx<'_>,
@@ -739,9 +820,10 @@ fn paint_border_image(
 ) -> bool {
     // —— 源终结（一次；enum 局部项，区域发射函数引用）——
     enum BiPaint {
-        /// 位图源（宿主注册 RGBA）。
+        /// Bitmap source (host-registered RGBA).
         Image(ImageRes),
-        /// 渐变源：停止点已终结绝对色；几何按全盒解析（九区域共享）。
+        /// Gradient source: stops resolved to absolute colors; geometry resolved
+        /// against the full box (shared by the nine regions).
         Gradient {
             gradient: Gradient,
             linear: Option<LinearGeom>,
@@ -935,12 +1017,16 @@ fn paint_border_image(
         }
     }
 
-    /// 逐轴片位（css-backgrounds-3 §2.4/§5.5 逐轴规则）：返回 (轴上起点
-    /// 偏移, 片长) 序列（偏移相对区域起点）。stretch → 单片 [0, len]；
-    /// repeat → 原尺寸顺排、末片截断；round → n=max(1, round(len/tile))
-    /// 片均分（片长 len/n，整数片缩放）；space → n=floor(len/tile)：
-    /// n==0 不足一片 → 单片拉伸、n==1 → 单片原尺寸贴起点、否则首尾贴边、
-    /// 间隙均摊。tile ≤ 0（渐变源无内在片尺寸）→ 单片拉伸（B 级回退）。
+    /// Per-axis tile segments (css-backgrounds-3 §2.4/§5.5 per-axis rules):
+    /// returns a sequence of (offset along the axis, segment length), offsets
+    /// relative to the region origin. stretch → a single segment [0, len];
+    /// repeat → original-size tiles laid out in order, last tile truncated;
+    /// round → n = max(1, round(len/tile)) segments evenly spaced (segment length
+    /// len/n, whole tiles scaled); space → n = floor(len/tile): n == 0 (less than
+    /// one tile) → one stretched segment, n == 1 → one original-size segment at
+    /// the start, otherwise first/last tiles flush to the edges with the gaps
+    /// spread evenly. tile ≤ 0 (gradient source has no intrinsic slice size) → a
+    /// single stretched segment (Tier B fallback).
     fn bi_axis_segments(mode: BorderImageRepeatKind, len: f32, tile: f32) -> Vec<(f32, f32)> {
         if len <= 0.0 || tile <= 0.0 {
             return vec![(0.0, len.max(0.0))];
@@ -975,9 +1061,11 @@ fn paint_border_image(
         }
     }
 
-    /// 中心区（fill）平铺发射（css-backgrounds-3 §5.5：repeat 作用于
-    /// 「the sides and the middle part」）：x 轴按 mode_x、y 轴按 mode_y
-    /// 求片位取笛卡尔积；任一轴 repeat 时区域 PushClip 兜裁。
+    /// Center (fill) region tiling emission (css-backgrounds-3 §5.5: repeat
+    /// applies to "the sides and the middle part"): tile positions are computed
+    /// along x by mode_x and along y by mode_y and combined as a Cartesian
+    /// product; when either axis repeats, the region is clipped by PushClip as a
+    /// safety net.
     #[allow(clippy::too_many_arguments)] // 平铺几何+双轴模式直传
     fn emit_tiled_region(
         out: &mut DisplayList,
@@ -1021,9 +1109,10 @@ fn paint_border_image(
         }
     }
 
-    /// 边区平铺发射（css-backgrounds-3 §5.5 sides）：按 bi_axis_segments
-    /// 逐轴片位发射；repeat 时区域 PushClip 兜裁。`tile` = 源片沿轴尺寸
-    ///（0 = 渐变无内在片尺寸 → stretch，B 级）。
+    /// Edge region tiling emission (css-backgrounds-3 §5.5 sides): emits per-axis
+    /// tile positions from bi_axis_segments; with repeat, the region is clipped by
+    /// PushClip as a safety net. `tile` = source tile size along the axis (0 =
+    /// gradient has no intrinsic slice size → stretch, Tier B).
     #[allow(clippy::too_many_arguments)] // 平铺几何+模式直传
     fn emit_tiled_edge(
         out: &mut DisplayList,
@@ -1223,9 +1312,10 @@ fn paint_border_image(
     true
 }
 
-/// 径向几何解析（T4c）：语义值 → 绝对 center/半径（px）。
-/// 圆公式取 CSS spec：circle farthest-corner = 到最远角距离；
-/// ellipse farthest-corner = fx·√2, fy·√2（fx/fy 为圆心到最远边距离）。
+/// Radial geometry resolution (T4c): semantic values → absolute center/radii (px).
+/// Circle formula per the CSS spec: circle farthest-corner = distance to the
+/// farthest corner; ellipse farthest-corner = fx·√2, fy·√2 (fx/fy = distance from
+/// the center to the farthest edge).
 fn resolve_radial(
     spec: &crate::css::property::RadialSpec,
     x: f32,
@@ -1294,9 +1384,10 @@ fn resolve_radial(
     }
 }
 
-/// 锥形几何解析（C3，ADR-0017）：语义值 → 绝对圆心 + 起始角。
-/// 角度映射（D1）：CSS 0deg=12 点方向顺时针 → peniko/ConicGeom 0=正 X 轴
-/// 顺时针，故 start = (from_deg − 90°)·π/180。
+/// Conic geometry resolution (C3, ADR-0017): semantic values → absolute center +
+/// start angle. Angle mapping (D1): CSS 0deg = 12 o'clock clockwise →
+/// peniko/ConicGeom 0 = positive X axis clockwise, hence
+/// start = (from_deg − 90°)·π/180.
 fn resolve_conic(
     spec: &crate::css::property::ConicSpec,
     x: f32,
@@ -2343,8 +2434,9 @@ fn paint_node(ctx: &PaintCtx<'_>, id: NodeId, out: &mut DisplayList) {
     }
 }
 
-/// 2D 仿射复合 [a, b, c, d, e, f]（列向量约定：x' = a·x + c·y + e）。
-/// 返回 m∘n（先 n 后 m）：M = M·N 的块乘。三期⑥：滚动量程结算复用。
+/// 2D affine composition [a, b, c, d, e, f] (column-vector convention:
+/// x' = a·x + c·y + e). Returns m∘n (n applied first, then m): the block product
+/// M = M·N. Phase 3 ⑥: reused by scroll-range settling.
 pub(crate) fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
     [
         m[0] * n[0] + m[2] * n[1],
@@ -2356,8 +2448,9 @@ pub(crate) fn mul_affine(m: &[f32; 6], n: &[f32; 6]) -> [f32; 6] {
     ]
 }
 
-/// 仿射逆（P4 D4，ADR-0037）：det = a·d − b·c；奇异（不可逆）→ None。
-/// soft 端 `Mat::invert` 同语义（核心命中判定复刻）。
+/// Affine inverse (P4 D4, ADR-0037): det = a·d − b·c; singular (non-invertible)
+/// → None. Same semantics as `Mat::invert` on the soft side (core hit-test
+/// replication).
 pub(crate) fn invert_affine(m: &[f32; 6]) -> Option<[f32; 6]> {
     let det = m[0] * m[3] - m[1] * m[2];
     if det.abs() < 1e-12 {
@@ -2372,14 +2465,14 @@ pub(crate) fn invert_affine(m: &[f32; 6]) -> Option<[f32; 6]> {
     Some([ia, ib, ic, id, ie, if_])
 }
 
-/// 仿射应用（[a, b, c, d, e, f]，x' = a·x + c·y + e）。
+/// Affine application ([a, b, c, d, e, f], x' = a·x + c·y + e).
 pub(crate) fn apply_affine(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
     (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
 }
 
-/// 圆角矩形点包含（P4 D4；soft `src_inside` 同式）：半开边 +
-/// 椭圆角象限归一判定（radius 序 tl_h, tl_v, tr_h, tr_v, br_h, br_v,
-/// bl_h, bl_v）。
+/// Rounded-rect point containment (P4 D4; same formula as soft `src_inside`):
+/// half-open edges plus per-corner elliptical quadrant tests after normalization
+/// (radius order tl_h, tl_v, tr_h, tr_v, br_h, br_v, bl_h, bl_v).
 fn rounded_rect_contains(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[f32; 8]) -> bool {
     if !(px >= x && px < x + w && py >= y && py < y + h) {
         return false;
@@ -2424,8 +2517,9 @@ fn rounded_rect_contains(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: &[
     true
 }
 
-/// 折线多边形点包含（P4 D4；soft `poly_inside` 同式）：nonzero = 环数
-/// ≠ 0，evenodd = 射线穿越奇偶；半开边规则 yi ≤ py < yj 仅计上穿。
+/// Polyline polygon point containment (P4 D4; same formula as soft
+/// `poly_inside`): nonzero = winding number ≠ 0, evenodd = ray-crossing parity;
+/// half-open edge rule yi ≤ py < yj counts only upward crossings.
 fn poly_contains(px: f32, py: f32, pts: &[[f32; 2]], nonzero: bool) -> bool {
     let n = pts.len();
     if n < 3 {
@@ -2452,8 +2546,10 @@ fn poly_contains(px: f32, py: f32, pts: &[[f32; 2]], nonzero: bool) -> bool {
     if nonzero { winding != 0 } else { crossed }
 }
 
-/// 命中裁剪判定（P4 D4）：查询点（视口系）经裁剪登记时的活跃仿射逆
-/// 映射到局部系，再测矩形（含圆角）/折线（nonzero/evenodd）。
+/// Hit-clip containment test (P4 D4): the query point (viewport coordinates) is
+/// mapped to the local frame through the inverse of the affine active when the
+/// clip was registered, then tested against the rectangle (with rounded corners)
+/// or the polyline (nonzero/evenodd).
 pub(crate) fn hit_clip_contains(c: &HitClip, x: f32, y: f32) -> bool {
     let (lx, ly) = match c {
         HitClip::Rect { inv, .. } => apply_affine(inv, x, y),
@@ -2469,12 +2565,15 @@ pub(crate) fn hit_clip_contains(c: &HitClip, x: f32, y: f32) -> bool {
     }
 }
 
-/// 绘制期仿射终结（ADR-0009）：函数列表按书写顺序连乘（最右先应用），
-/// translate 百分比基 = 自身 border-box 宽/高，最后包 transform-origin
-/// 默认 50% 50%：A = T(o)·M·T(−o)。rotate 顺时针（y-down 屏幕坐标）。
-/// op 坐标为视口系（盒左上角在 (x,y)），origin = (x,y) + 盒内百分比基点
-/// ——二期⑦修复：旧实现漏加盒偏移，offset 盒绕错中心旋转/整体错位。
-/// 三期⑥：滚动量程结算复用同一终结（pub(crate)）。
+/// Paint-time affine resolution (ADR-0009): the function list is multiplied
+/// together in written order (rightmost applied first); translate percentages are
+/// based on the element's own border-box width/height; the result is finally
+/// wrapped in the transform-origin (default 50% 50%): A = T(o)·M·T(−o). rotate is
+/// clockwise (y-down screen coordinates). Op coordinates are viewport-based (box
+/// top-left at (x, y)), origin = (x, y) + the percentage-based point inside the
+/// box — phase 2 ⑦ fix: the old implementation omitted the box offset, so
+/// transformed boxes rotated around the wrong center / shifted wholesale.
+/// Phase 3 ⑥: scroll-range settling reuses the same resolution (pub(crate)).
 pub(crate) fn resolve_transform_affine(
     style: &ComputedStyle,
     x: f32,
@@ -2537,7 +2636,7 @@ pub(crate) fn resolve_transform_affine(
     mul_affine(&mul_affine(&pre, &m), &post)
 }
 
-/// currentColor / light-dark 终结为绝对 sRGBA。
+/// Resolves currentColor / light-dark to an absolute sRGBA.
 pub(crate) fn resolve_color(
     cv: &ColorValue,
     style: &ComputedStyle,
@@ -2553,19 +2652,20 @@ pub(crate) fn resolve_color(
     }
 }
 
-/// F3b（ADR-0024）：border/padding 四边 px 内嵌。
+/// F3b (ADR-0024): border/padding inset in px on all four sides.
 struct BoxInsets {
-    /// 左。
+    /// Left.
     l: f32,
-    /// 右。
+    /// Right.
     r: f32,
-    /// 上。
+    /// Top.
     t: f32,
-    /// 下。
+    /// Bottom.
     b: f32,
 }
 
-/// 解析 border 与 padding 四边 px（缺失声明 = 0）。
+/// Resolves border and padding widths in px on all four sides (missing
+/// declaration = 0).
 fn resolve_insets(style: &ComputedStyle, env: &MediaEnv) -> (BoxInsets, BoxInsets) {
     let side =
         |id: PropertyId| -> f32 { style.len(id).map(|lp| px(lp, style, env)).unwrap_or(0.0) };
@@ -2585,7 +2685,8 @@ fn resolve_insets(style: &ComputedStyle, env: &MediaEnv) -> (BoxInsets, BoxInset
     )
 }
 
-/// 背景盒关键字 → 视口矩形（F3b ADR-0024：origin 定位区 / clip 绘制区）。
+/// Background box keyword → viewport rectangle (F3b ADR-0024: origin = positioning
+/// area / clip = painting area).
 fn background_box_rect(
     kind: BackgroundBox,
     x: f32,
@@ -2612,8 +2713,8 @@ fn background_box_rect(
     }
 }
 
-/// LP 语义分量：Percent → 占比×语义基准（定位 = area−img；尺寸 = area），
-/// 其余单位 → px()（em/rem/vw 绝对解析）。
+/// LP semantic component: Percent → fraction × semantic basis (positioning =
+/// area−img; sizing = area); other units → px() (em/rem/vw resolved absolutely).
 fn lp_semantic(lp: &LengthPercentage, basis: f32, style: &ComputedStyle, env: &MediaEnv) -> f32 {
     match lp {
         LengthPercentage::Percent(v) => v * basis,
@@ -2621,37 +2722,41 @@ fn lp_semantic(lp: &LengthPercentage, basis: f32, style: &ComputedStyle, env: &M
     }
 }
 
-/// 背景平铺轴语义（P4 D2，ADR-0037：round/space 精确化，退役 repeat 近似）。
+/// Background tiling axis semantics (P4 D2, ADR-0037: exact round/space,
+/// replacing the retired repeat approximation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TileAxis {
-    /// 不平铺（单 tile）。
+    /// No tiling (single tile).
     None,
-    /// 平铺（窗口对齐步进，尺寸原样）。
+    /// Tile (window-aligned stepping, size unchanged).
     Repeat,
-    /// 均分空隙（定位区整数片 + 均匀 gap；片数 0/1 → 定位区单片）。
+    /// Evenly spaced gaps (whole tiles in the positioning area + uniform gap;
+    /// 0/1 tiles → single tile in the positioning area).
     Space,
-    /// 整数片拉伸（定位区 n=round(len/size).max(1) 片均分；定位失效）。
+    /// Whole-tile stretching (positioning area divided into n =
+    /// round(len/size).max(1) segments; position is inoperative).
     Round,
 }
 
-/// 单层绘制几何（F3b ADR-0024；P4 D2 轴语义化）。
+/// Paint geometry for one background layer (F3b ADR-0024; P4 D2 axis semantics).
 struct LayerGeom {
-    /// 首 tile 原点 x。
+    /// First tile origin x.
     dx: f32,
-    /// 首 tile 原点 y。
+    /// First tile origin y.
     dy: f32,
-    /// 绘制宽。
+    /// Paint width.
     dw: f32,
-    /// 绘制高。
+    /// Paint height.
     dh: f32,
-    /// 水平轴平铺语义。
+    /// Horizontal axis tiling semantics.
     axis_x: TileAxis,
-    /// 垂直轴平铺语义。
+    /// Vertical axis tiling semantics.
     axis_y: TileAxis,
 }
 
-/// 单层几何解析（css-backgrounds-3 §3.9 尺寸 / §3.10 定位 / §3.4 平铺；
-/// P4 D2：round/space 轴语义直传，tile 位置由 tile_axis_positions 终结）。
+/// Per-layer geometry resolution (css-backgrounds-3 §3.9 sizing / §3.10
+/// positioning / §3.4 tiling; P4 D2: round/space axis semantics pass through
+/// directly, tile positions are settled by tile_axis_positions).
 #[allow(clippy::too_many_arguments)]
 fn resolve_layer_geom(
     pos: &Position2D,
@@ -2727,7 +2832,7 @@ fn resolve_layer_geom(
     })
 }
 
-/// RepeatAxis → TileAxis 映射（P4 D2）。
+/// RepeatAxis → TileAxis mapping (P4 D2).
 fn tile_axis(r: RepeatAxis) -> TileAxis {
     match r {
         RepeatAxis::NoRepeat => TileAxis::None,
@@ -2737,15 +2842,18 @@ fn tile_axis(r: RepeatAxis) -> TileAxis {
     }
 }
 
-/// 平铺位置枚举（P4 D2，ADR-0037）：返回 (tile 原点, tile 尺寸) 序列。
-/// - None：单 tile（定位生效，origin/size 原样）；
-/// - Repeat：窗口 [win, win+len) 对齐步进（尺寸原样）；
-/// - Space：定位区 [area, area+area_len) 容纳 n=(area_len/size) 下取整
-///   片正空隙均分；n≤1（容不下两片）→ 单片按 position（origin 生效
-///   ——css-backgrounds-3 §2.4）；否则首片锚定定位区起点、步长 =
-///   size+gap（position 失效——css-backgrounds-3 §2.4）；
-/// - Round：n=round(area_len/size).max(1) 片均分定位区（ts=area_len/n），
-///   窗口对齐步进铺满（定位失效）；size≤0/area≤0 退单 tile 防御。
+/// Tile position enumeration (P4 D2, ADR-0037): returns a sequence of (tile
+/// origin, tile size).
+/// - None: single tile (position applies; origin/size passed through);
+/// - Repeat: window-aligned stepping over [win, win+len) (size unchanged);
+/// - Space: the positioning area [area, area+area_len) fits n = floor(area_len/
+///   size) tiles with positive gaps spread evenly; n ≤ 1 (cannot fit two tiles)
+///   → single tile placed by position (origin applies — css-backgrounds-3 §2.4);
+///   otherwise the first tile anchors at the positioning-area start and the step
+///   = size + gap (position is inoperative — css-backgrounds-3 §2.4);
+/// - Round: the positioning area is divided into n = round(area_len/size).max(1)
+///   tiles (ts = area_len/n), window-aligned stepping fills it (position is
+///   inoperative); size ≤ 0 / area ≤ 0 defensively degrades to a single tile.
 fn tile_axis_positions(
     axis: TileAxis,
     origin: f32,
@@ -2808,12 +2916,16 @@ fn tile_axis_positions(
     out
 }
 
-/// 边框发射（P4 D1，ADR-0037）：dashed/dotted 且无圆角 → DisplayList
-/// 级拆段（css-backgrounds-3 §7.1：dash 段长 2×边宽、间隔 1×边宽、首段
-/// 对齐线起点、末段不足不画；dotted 圆点直径 = 边宽、中心间距 2×边宽、
-/// 首点圆覆盖线起点）；dashed/dotted 含圆角 → 整框退 Solid 单 op（弧形
-/// 虚线 B 级在案）；纯 Solid/None/Hidden → 原 Border op 路径。outline
-/// 通道共用（外扩矩形 + Dashed/Dotted 映射自动受益）。
+/// Border emission (P4 D1, ADR-0037): dashed/dotted without rounded corners →
+/// DisplayList-level segmentation (css-backgrounds-3 §7.1: dash segments are 2×
+/// border-width long with 1× border-width gaps, the first segment aligns with
+/// the line start, a final partial segment is not drawn; dotted circles have
+/// diameter = border-width, center spacing 2× border-width, the first dot's
+/// circle covers the line start); dashed/dotted with rounded corners → the whole
+/// frame degrades to a single Solid op (arc dashed/dotted strokes are Tier B,
+/// documented in FEATURES.md/SINK-MATRIX.md); pure Solid/None/Hidden → the
+/// original Border op path. The outline channel shares this (the outset
+/// rectangle plus Dashed/Dotted mapping benefit automatically).
 pub(crate) fn emit_borders(
     x: f32,
     y: f32,
@@ -2871,8 +2983,9 @@ pub(crate) fn emit_borders(
     emit_side_band(x, y, h, &sides[3], false, out);
 }
 
-/// 单边带绘制（P4 D1）：`horizontal` = 沿 x 轴长 `len`、厚 = 边宽；
-/// Solid 整带 / Dashed 2t-t 段 / Dotted t 直径 2t 中心距圆点。
+/// Single side-band painting (P4 D1): `horizontal` = length `len` along the x
+/// axis, thickness = border width; Solid = whole band / Dashed = 2t-t segments /
+/// Dotted = dots of diameter t with 2t center spacing.
 fn emit_side_band(
     x0: f32,
     y0: f32,
@@ -2924,34 +3037,40 @@ fn emit_side_band(
     }
 }
 
-/// clip-path 发射形（F3c，ADR-0025）。
+/// clip-path emission shape (F3c, ADR-0025).
 enum ClipEmit {
-    /// 不裁剪（none / 宽容收容 Other）。
+    /// No clipping (none / tolerant acceptance of Other).
     None,
-    /// 矩形裁剪（inset：复用 PushClip 逐角圆角精确能力）。
+    /// Rectangle clip (inset: reuses PushClip's exact per-corner radius
+    /// capability).
     Rect {
-        /// (x, y, w, h) px（参考盒内缩后；宽高收 0）。
+        /// (x, y, w, h) px (after reference-box insetting; width/height clamped
+        /// to 0).
         rect: (f32, f32, f32, f32),
-        /// 每角 (横, 纵) 圆角 px（序同 FillRect.radius；§5.5 收束后）。
+        /// Per-corner (horizontal, vertical) radius px (same order as
+        /// FillRect.radius; after the §5.5 reduction).
         radius: [f32; 8],
     },
-    /// 多边形裁剪（circle/ellipse 64 段折线 / polygon 顶点直传）。
+    /// Polygon clip (circle/ellipse 64-segment polyline / polygon vertices
+    /// passed through).
     Path {
-        /// 视口坐标顶点。
+        /// Vertices in viewport coordinates.
         points: Vec<[f32; 2]>,
-        /// 填充规则（true = nonzero）。
+        /// Fill rule (true = nonzero).
         nonzero: bool,
     },
 }
 
-/// 圆/椭圆折线段数下限/上限与目标弦距（P4 D6，ADR-0037：半径自适应
-/// seg = clamp(ceil(2π·r/3), 16, 256)——弦距 ≤3px 视觉平滑，小圆免过密）。
+/// Circle/ellipse polyline segment lower/upper bounds and target chord length
+/// (P4 D6, ADR-0037: radius-adaptive seg = clamp(ceil(2π·r/3), 16, 256) — chord
+/// ≤3px is visually smooth while keeping small circles from being over-tessellated).
 const CLIP_POLY_SEGMENTS_MIN: usize = 16;
 const CLIP_POLY_SEGMENTS_MAX: usize = 256;
 const CLIP_POLY_CHORD_TARGET: f32 = 3.0;
 
-/// 圆/椭圆内接折线顶点（起始角 0 逆时针；css-shapes-1 §3）。段数随
-/// 长半轴自适应（D6）；r→0 退化小段数防御。
+/// Inscribed polyline vertices of a circle/ellipse (starting angle 0,
+/// counterclockwise; css-shapes-1 §3). Segment count adapts to the semi-major
+/// axis (D6); r→0 defensively degrades to a small segment count.
 fn ellipse_points(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<[f32; 2]> {
     let r = rx.max(ry).max(0.5);
     let seg = ((std::f32::consts::TAU * r / CLIP_POLY_CHORD_TARGET).ceil() as usize)
@@ -2964,12 +3083,15 @@ fn ellipse_points(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<[f32; 2]> {
         .collect()
 }
 
-/// clip-path 形状 → 视口坐标发射形（css-shapes-1 §3 + css-masking-1 §5，
-/// F3c，ADR-0025）。百分比语义：inset 边距左右基准参考盒宽、上下基准高；
-/// 圆角水平集基准宽、垂直集基准高（css-backgrounds-3 §5.5 收束同构）；
-/// position 同 background-position 点位语义（right/bottom 解析期负偏移
-/// 归一）；circle/ellipse 角关键字 = 圆心到角欧氏距离（圆）/逐轴距离
-/// （椭圆）；polygon 顶点 x 基准宽 y 基准高。
+/// clip-path shape → viewport-coordinate emission shape (css-shapes-1 §3 +
+/// css-masking-1 §5, F3c, ADR-0025). Percentage semantics: inset margins are
+/// based on reference-box width on the left/right and height on the top/bottom;
+/// radius horizontal components use width, vertical components use height
+/// (isomorphic to the css-backgrounds-3 §5.5 reduction); position follows
+/// background-position point semantics (right/bottom normalized to negative
+/// offsets at parse time); circle/ellipse corner keywords = Euclidean distance
+/// from center to corner (circle) / per-axis distance (ellipse); polygon
+/// vertices are x-based on width, y-based on height.
 #[allow(clippy::too_many_arguments)]
 fn clip_path_emit(
     shape: &ClipShape,
@@ -4221,7 +4343,7 @@ mod tests {
 
     // ===== P4（ADR-0037）：D1 拆段 / D2 round/space / D6 自适应段数 =====
 
-    /// 收集 DisplayList 中的 FillRect 序列。
+    /// Collects the FillRect sequence from a DisplayList.
     fn fill_rects(out: &DisplayList) -> Vec<(f32, f32, f32, f32)> {
         out.ops
             .iter()
@@ -4409,7 +4531,8 @@ mod tests {
 
     // ===== F3d（ADR-0026）：border-image 九片 + 渐变绝对几何 =====
 
-    /// run 变体：注入宿主已注册位图（border-image 源解析用）。
+    /// `run` variant: injects a host-registered bitmap (used to exercise
+    /// border-image source resolution).
     fn run_with_images(
         tree: &StyleTree,
         id: NodeId,

@@ -1,35 +1,45 @@
-//! 错误双轨：CSS 容错 vs 契约错误。
+//! Dual error tracks: CSS fault tolerance vs contract errors.
 //!
-//! 见 CONTEXT.md 与 ADR-0004：CSS 内容层面的错误（未知声明、无效值、
-//! 未知 at-rule）按 CSS 规范的容错语义处理——跳过并记录，绝不 panic、
-//! 绝不用 `Result` 污染宿主；只有宿主违反 API 契约（树不一致、未知
-//! key 等）才走 [`ContractError`]。
+//! See CONTEXT.md and ADR-0004: CSS content-level errors (unknown
+//! declarations, invalid values, unknown at-rules) are handled with the CSS
+//! spec's fault-tolerant semantics — skipped and recorded, never panicking
+//! and never polluting the host with `Result`s; only host violations of the
+//! API contract (inconsistent trees, unknown keys, and so on) go through
+//! [`ContractError`].
 
 use core::fmt;
 
-/// 宿主违反 API 契约。这是"不可能发生"的编程错误：debug 构建下引擎以
-/// `debug_assert` 拦截，release 下以 `Result` 上浮。
+/// The host violated the API contract. These are "cannot happen" programming
+/// errors: the engine intercepts them with `debug_assert` in debug builds and
+/// surfaces them via `Result` in release builds.
 ///
-/// CSS 内容错误不属于此类——那些走 [`ParseReport`] 容错。
+/// CSS content errors are not in this category — those go through
+/// [`ParseReport`] fault tolerance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContractError {
-    /// 同步协议引用了树中不存在的节点 key（宿主树与镜像漂移）。
+    /// The sync protocol referenced a node key that does not exist in the
+    /// tree (host tree drifted from the mirror).
     UnknownNode,
-    /// `insert` 了已存在的 key。
+    /// `insert` was called with an already-existing key.
     DuplicateNode,
-    /// 父子操作会构成环（节点成为自己的后代）。
+    /// A parent/child operation would create a cycle (a node becoming its own
+    /// descendant).
     Cycle,
-    /// 引擎已有根节点，再次 `insert(None, ..)` 冲突。
+    /// The engine already had a root node, and another `insert(None, ..)`
+    /// conflicted.
     ///
-    /// ADR-0010 起不再返回：多根受支持，后续 `insert(None, ..)` 成为
-    /// overlay 根。变体保留以维持公共 API 稳定。
+    /// No longer returned as of ADR-0010: multiple roots are supported and a
+    /// later `insert(None, ..)` becomes an overlay root. The variant is kept
+    /// to preserve public API stability.
     RootExists,
-    /// ADR-0010：对文档根调用 `set_top_layer(key, true)`——文档根本身是
-    /// 页面，不属于弹窗层。
+    /// ADR-0010: `set_top_layer(key, true)` was called on the document root —
+    /// the document root is the page itself and does not belong to the popup
+    /// layer.
     NotOverlayRoot,
-    /// `insert` 携带的 span 字节区间非法（越界、倒置或落在 UTF-8 字符内部；
-    /// 无文本节点的 span 一律非法）。
+    /// The span byte range carried by `insert` is invalid (out of bounds,
+    /// inverted, or inside a UTF-8 character; a span on a node without text
+    /// is always invalid).
     InvalidSpan,
 }
 
@@ -54,44 +64,47 @@ impl std::error::Error for ContractError {}
 // `Error::source()` 恒为 None——宿主无需（也无法）沿 source 链下钻；
 // 后续如引入包装型变体，按 `Error::source` 语义实现链条。
 
-/// 警告严重级（CSS 容错语义分类）。
+/// Warning severity (the CSS fault-tolerance classification).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParseSeverity {
-    /// 无效内容已按 CSS 规范丢弃（声明/选择器/prelude 不生效）。
+    /// Invalid content was dropped per the CSS spec (declaration/selector/
+    /// prelude has no effect).
     Dropped,
-    /// 语法认识但按规范或能力边界整条跳过（如未支持的 at-rule）。
+    /// Syntactically recognized but skipped whole per spec or capability
+    /// limits (e.g. an unsupported at-rule).
     Skipped,
 }
 
-/// 单条 CSS 容错记录（未知声明、无效值等）。
+/// A single CSS fault-tolerance record (unknown declaration, invalid value,
+/// etc.).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ParseWarning {
-    /// 1-based 行号。
+    /// 1-based line number.
     pub line: u32,
-    /// 1-based 列号。
+    /// 1-based column number.
     pub column: u32,
-    /// 人读信息，例如 `unknown declaration 'colour'`。
+    /// Human-readable message, e.g. `unknown declaration 'colour'`.
     pub message: String,
-    /// 严重级（容错语义分类，见 [`ParseSeverity`]）。
+    /// Severity (fault-tolerance classification; see [`ParseSeverity`]).
     pub severity: ParseSeverity,
 }
 
-/// 一次 Stylesheet 解析的容错报告。
+/// The fault-tolerance report of one stylesheet parse.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParseReport {
-    /// 按出现顺序收集的警告。
+    /// Warnings collected in order of occurrence.
     pub warnings: Vec<ParseWarning>,
 }
 
 impl ParseReport {
-    /// 空报告。
+    /// An empty report.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 是否完全干净（无任何警告）。
+    /// Whether the parse was fully clean (no warnings at all).
     pub fn is_clean(&self) -> bool {
         self.warnings.is_empty()
     }
@@ -113,7 +126,8 @@ impl ParseReport {
         });
     }
 
-    /// 合并另一份报告（顺序保留），常用于子解析器上报。
+    /// Merges another report (order preserved); typically used by
+    /// sub-parsers to report.
     pub(crate) fn extend(&mut self, other: ParseReport) {
         self.warnings.extend(other.warnings);
     }
@@ -123,7 +137,8 @@ impl ParseReport {
 mod tests {
     use super::*;
 
-    /// 阶段3 API 冻结：ContractError 全变体为根因，source() 恒 None。
+    /// Phase-3 API freeze: every ContractError variant is a root cause;
+    /// source() is always None.
     #[test]
     fn contract_error_is_always_root_cause() {
         use std::error::Error;

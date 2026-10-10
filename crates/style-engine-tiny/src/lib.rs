@@ -1,30 +1,41 @@
-//! `style-engine-tiny` — style-engine DisplayList 的 tiny-skia 纯 CPU 绘制后端。
+//! `style-engine-tiny` — a pure-CPU tiny-skia drawing backend for the
+//! style-engine DisplayList.
 //!
-//! 定位（ADR-0043）：第三绘制 sink，tiny-skia 0.12 光栅器（resvg 同款）+
-//! skrifa 0.44 字形轮廓。与 [`style-engine-soft`](style_engine_soft) 共享
-//! 滤镜/模糊/合成基建（单一事实源：`filter::apply_effects`、
-//! `blur_alpha_u8`、`blend_pixel`），与 vello sink 共享 parley 排版驱动与
-//! 边框/装饰几何蓝本（端口来源逐处标注）。
+//! Positioning (ADR-0043): the third drawing sink — the tiny-skia 0.12
+//! rasterizer (the one resvg uses) + skrifa 0.44 glyph outlines. It shares
+//! the filter/blur/compositing infrastructure with
+//! [`style-engine-soft`](style_engine_soft) (single source of truth:
+//! `filter::apply_effects`, `blur_alpha_u8`, `blend_pixel`), and shares the
+//! parley typesetting driver plus the border/decoration geometry blueprints
+//! with the vello sink (port sources annotated at each site).
 //!
-//! 相对另两个 sink 的能力差异（SINK-MATRIX 同步）：
-//! - Shadow/Filter/BackdropFilter/Text 影均为**真形状遮罩 + 三遍盒模糊**
-//!   （soft 同源 `blur_alpha_u8`）——vello 的同心环近似在 tiny 全部升级；
-//! - 混合模式：16 标准模式走 tiny-skia 原生管线，`PlusLighter` 映射
-//!   tiny `BlendMode::Plus`，`PlusDarker`（tiny-skia 缺）经 soft
-//!   `blend_pixel` 逐像素手写——18/18 全覆盖；
-//! - conic 渐变起点线归一（`rem_euclid` + `Extend::Repeat` 采样
-//!   fract）——Chrome/soft 同款 mod 语义（vello 的 Pad 直通在
-//!   from≠90° 时顶右象限渲染错，本 sink 修复并回 port vello）；
-//! - 径向渐变椭圆修正：placement = 平移(c)∘缩放(rx,ry)∘平移(−c)、单位
-//!   半径画刷，采样取逆——数学方向与 vello 的 brush 缩放相反
-//!   （vello rx/ry 疑似反向，无 golden 覆盖，SINK-MATRIX 待议）。
+//! Capability differences relative to the other two sinks (kept in sync with
+//! SINK-MATRIX):
+//! - Shadow/Filter/BackdropFilter/Text shadows all use a **true shape mask +
+//!   three-pass box blur** (same-source `blur_alpha_u8` as soft) — vello's
+//!   concentric-ring approximation is upgraded everywhere in tiny;
+//! - Blend modes: the 16 standard modes go through tiny-skia's native
+//!   pipeline, `PlusLighter` maps to tiny `BlendMode::Plus`, and `PlusDarker`
+//!   (missing from tiny-skia) is hand-written per pixel via soft's
+//!   `blend_pixel` — 18/18 full coverage;
+//! - Conic gradient start-angle normalization (`rem_euclid` + `Extend::Repeat`
+//!   sampling of the fract) — the same mod semantics as Chrome/soft (vello's
+//!   Pad passthrough renders the top-right quadrant wrong when from≠90°;
+//!   this sink fixes that and ports the fix back to vello);
+//! - Radial gradient ellipse correction: placement =
+//!   translate(c)∘scale(rx,ry)∘translate(−c) with a unit-radius brush and
+//!   sampling through the inverse — the math direction is opposite to
+//!   vello's brush scaling (vello's rx/ry appear reversed; no golden
+//!   coverage; open question in SINK-MATRIX).
 //!
-//! 模型：Push\* 开**组缓冲**（设备像素 AABB 子画布 + 可选遮罩），
-//! Pop\* 组合回父目标（`fill_rect` + Pattern 或 PlusDarker 逐像素）；
-//! PushScroll/PushTransform 为数值栈（与 vello 同构，含变换×滚动共轭
-//! `effective()` 的 C 级近似契约）；DisplayList 坐标为逻辑 px，`scale`
-//! 折入全部绘制变换（`world`）——与 vello `render_offscreen` 的场景级
-//! 缩放同语义。
+//! Model: Push\* opens a **group buffer** (a device-pixel AABB sub-canvas +
+//! optional mask), Pop\* composites back onto the parent target
+//! (`fill_rect` + Pattern, or per-pixel for PlusDarker);
+//! PushScroll/PushTransform are numeric stacks (isomorphic to vello,
+//! including the transform×scroll conjugate `effective()` with its Tier C
+//! approximation contract); DisplayList coordinates are logical px and
+//! `scale` is folded into every drawing transform (`world`) — the same
+//! semantics as the scene-level scaling in vello `render_offscreen`.
 
 use std::mem;
 use std::sync::Arc;
@@ -44,48 +55,58 @@ use tiny_skia::{
     Transform,
 };
 
-/// 逻辑 px → 设备 px 的整层缩放（`render*` 的 `scale` 参数）。
+/// Logical px → device px whole-level scale (the `scale` parameter of
+/// `render*`).
 ///
-/// DisplayList 坐标为逻辑 px（engine 不烘焙 scale）；tiny 无场景级变换
-/// 层，`world` 折入每一条绘制变换（形状填充/组遮罩/字形 run），模糊 σ、
-/// 滤镜 pad 等长度量在进入设备像素域前乘 `scale`。
+/// DisplayList coordinates are logical px (the engine does not bake in
+/// scale); tiny has no scene-level transform layer, so `world` is folded
+/// into every drawing transform (shape fills / group masks / glyph runs),
+/// and length quantities such as blur σ and filter pads are multiplied by
+/// `scale` before entering the device-pixel domain.
 #[derive(Clone, Copy)]
 struct Vec2 {
     x: f32,
     y: f32,
 }
 
-/// 绘制目标：一张设备像素画布 + 其内容原点（组缓冲左上角的设备坐标）。
-/// 根目标 `ox = oy = 0`；组缓冲原点恒整数值（`floor(min) − 1`），保证组
-/// 合成与 PlusDarker 逐像素回写均为整数像素对齐。
+/// Draw target: one device-pixel canvas plus its content origin (the device
+/// coordinates of the group buffer's top-left corner). The root target has
+/// `ox = oy = 0`; a group buffer's origin is always an integer value
+/// (`floor(min) − 1`), so group compositing and PlusDarker per-pixel
+/// write-back are both integer-pixel aligned.
 struct Target {
     pix: Pixmap,
     ox: f32,
     oy: f32,
 }
 
-/// Push\* 开出的组帧：混合/透明度/遮罩 + 父目标所有权（Pop 时恢复）。
+/// Group frame opened by Push\*: blend/opacity/mask + ownership of the
+/// parent target (restored on Pop).
 struct GroupFrame {
     blend: BlendMode,
     opacity: f32,
     mask: Option<tiny_skia::Mask>,
     parent: Target,
-    /// 栈平衡防御组（空形状占位）：Pop 时直接丢弃不合成。
+    /// Stack-balance defensive group (placeholder for empty shapes): dropped
+    /// directly on Pop without compositing.
     degenerate: bool,
-    /// PopFilter 应用链（PushFilter 记忆；其余组恒空）。
+    /// Effect chain applied by PopFilter (remembered by PushFilter; empty
+    /// for all other groups).
     filters: Vec<FilterEffect>,
 }
 
-/// 渲染器状态机（vello RenderState + soft 状态机的 tiny 合体）。
+/// Renderer state machine (tiny merger of vello's RenderState and the soft
+/// state machine).
 struct Renderer {
     world: Transform,
-    /// 逻辑→设备缩放系数（模糊 σ / 滤镜 pad 换算设备像素用）。
+    /// Logical→device scale factor (converts blur σ / filter pads to device
+    /// pixels).
     scale: f32,
-    /// 累计滚动平移（PushScroll/PopScroll 栈）。
+    /// Accumulated scroll translation (PushScroll/PopScroll stack).
     offset: Vec2,
     offset_stack: Vec<Vec2>,
-    /// 2D 仿射栈（PushTransform/PopTransform）：屏幕空间合成（外层在外，
-    /// 与 vello `xforms.push(top ∘ css)` 同序）。
+    /// 2D affine stack (PushTransform/PopTransform): composed in screen space
+    /// (outermost outside, same order as vello `xforms.push(top ∘ css)`).
     xforms: Vec<Transform>,
     target: Target,
     groups: Vec<GroupFrame>,
@@ -114,10 +135,13 @@ impl Renderer {
         *self.xforms.last().unwrap_or(&Transform::identity())
     }
 
-    /// 变换×滚动共轭（vello `effective()` 同式）：形状坐标已手动加滚动
-    /// 偏移，变换栈必须共轭补偿——`T(+off) ∘ top ∘ T(−off)`；top 恒等时
-    /// 恒等（滚动退化为纯平移）。transform×自身滚动次序为 C 级近似契约
-    /// （FEATURES/SINK-MATRIX 在案）。
+    /// Transform×scroll conjugate (same formula as vello `effective()`):
+    /// shape coordinates already have the scroll offset added manually, so
+    /// the transform stack must compensate conjugately —
+    /// `T(+off) ∘ top ∘ T(−off)`; identity when top is identity (scroll
+    /// degenerates to pure translation). The transform×own-scroll ordering
+    /// is a Tier C approximation contract (documented in
+    /// FEATURES/SINK-MATRIX).
     fn effective(&self) -> Transform {
         let top = self.xform();
         if top.is_identity() {
@@ -128,21 +152,23 @@ impl Renderer {
             .post_concat(Transform::from_translate(self.offset.x, self.offset.y))
     }
 
-    /// op 空间点（逻辑 px）→ 加滚动偏移。
+    /// Op-space point (logical px) → with the scroll offset added.
     fn pt(&self, x: f32, y: f32) -> (f32, f32) {
         (x + self.offset.x, y + self.offset.y)
     }
 
-    /// 形状填充变换：op+offset 逻辑坐标 → 目标缓冲像素。
-    /// `T(−origin) ∘ world ∘ effective`（effective 最先作用于 op 坐标）。
+    /// Shape fill transform: op+offset logical coordinates → target buffer
+    /// pixels. `T(−origin) ∘ world ∘ effective` (effective acts on op
+    /// coordinates first).
     fn draw_tr(&self) -> Transform {
         self.effective()
             .post_concat(self.world)
             .post_concat(Transform::from_translate(-self.target.ox, -self.target.oy))
     }
 
-    /// 组遮罩/缓冲锚定的设备 AABB：矩形四角经 `world ∘ effective` 后取
-    /// 包围盒（旋转/缩放矩形的 AABB 覆盖）。
+    /// Device AABB anchoring the group mask/buffer: the bounding box of the
+    /// rect's four corners after `world ∘ effective` (AABB coverage of a
+    /// rotated/scaled rect).
     fn device_aabb(&self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
         let (px, py) = self.pt(x, y);
         let m = self.effective().post_concat(self.world);
@@ -222,7 +248,7 @@ impl Renderer {
         });
     }
 
-    /// PushClipPath 组：多边形遮罩（nonzero/evenodd 规则）。
+    /// PushClipPath group: polygon mask (nonzero/evenodd rule).
     fn push_group_polygon(&mut self, points: &[[f32; 2]], nonzero: bool) {
         if points.is_empty() {
             // 空多边形=全裁剪：推 1×1 空组保持栈平衡。
@@ -291,7 +317,8 @@ impl Renderer {
         });
     }
 
-    /// 栈平衡防御组（1×1 空缓冲）：空形状/病态尺寸时保持 Push/Pop 配对。
+    /// Stack-balance defensive group (1×1 empty buffer): keeps Push/Pop
+    /// paired for empty shapes / pathological sizes.
     fn push_degenerate_group(&mut self, blend: BlendMode, opacity: f32) {
         let pix = Pixmap::new(1, 1).expect("1×1 画布恒可分配");
         let parent = mem::replace(
@@ -312,16 +339,18 @@ impl Renderer {
         });
     }
 
-    /// 以指定缓冲原点构造绘制变换（组遮罩填充用）。
+    /// Builds the drawing transform with an explicit buffer origin (used for
+    /// group mask fills).
     fn draw_tr_with_origin(&self, ox: f32, oy: f32) -> Transform {
         self.effective()
             .post_concat(self.world)
             .post_concat(Transform::from_translate(-ox, -oy))
     }
 
-    /// 组弹出与合成（Pop*）。帧携带的滤镜链非空时先对组缓冲应用
-    /// （PopFilter：demul → soft `apply_effects` → premul，css-filters
-    /// 滤镜域语义，与 soft 单源）。
+    /// Group pop and compositing (Pop*). When the frame carries a non-empty
+    /// effect chain, it is applied to the group buffer first (PopFilter:
+    /// demul → soft `apply_effects` → premul, css-filters filter-domain
+    /// semantics, single-sourced with soft).
     fn pop_group(&mut self) {
         let Some(g) = self.groups.pop() else {
             return; // 栈失衡防御：无匹配 push 的 pop 直接忽略
@@ -380,9 +409,11 @@ impl Renderer {
         }
     }
 
-    /// PlusDarker 组合成（tiny-skia 无该模式）：与父目标区域逐像素经 soft
-    /// `blend_pixel`（公式单源，soft/lib.rs blend_pixel——预乘加法 −1
-    /// clamp）。组/父像素 1:1 对齐（整数原点）。
+    /// PlusDarker group compositing (tiny-skia has no such mode): the parent
+    /// target region is composited per pixel through soft `blend_pixel`
+    /// (single source of truth for the formula — soft/lib.rs blend_pixel,
+    /// premultiplied addition with a −1 clamp). Group/parent pixels align
+    /// 1:1 (integer origin).
     fn composite_plus_darker(
         &mut self,
         group: &Pixmap,
@@ -605,8 +636,8 @@ impl Renderer {
 
 // ===== 公共 API =====
 
-/// 渲染 DisplayList 到离屏画布（无文本系统；Text 基元 no-op，与 vello
-/// `render_ops` 同契约）。
+/// Renders a DisplayList onto an offscreen canvas (no text system; the Text
+/// primitive is a no-op, same contract as vello `render_ops`).
 pub fn render(list: &DisplayList, width: u32, height: u32, base: [f32; 4], scale: f32) -> Pixmap {
     let mut r = Renderer::new(width, height, base, scale);
     for op in &list.ops {
@@ -615,8 +646,9 @@ pub fn render(list: &DisplayList, width: u32, height: u32, base: [f32; 4], scale
     r.target.pix
 }
 
-/// 渲染 DisplayList 到离屏画布（带文本系统：Text 基元经 parley 排版 +
-/// skrifa 轮廓逐字形填充）。
+/// Renders a DisplayList onto an offscreen canvas (with a text system: Text
+/// primitives go through parley typesetting + per-glyph skrifa outline
+/// fills).
 pub fn render_with_text(
     list: &DisplayList,
     width: u32,
@@ -682,8 +714,10 @@ pub fn render_with_text(
 
 // ===== 共享助手 =====
 
-/// 直排 [f32;4] → tiny Color（sRGB 编码值直传 = CSS/soft/vello 语义）。
-/// 分量钳制 [0,1]（tiny `from_rgba` 对越界/NaN 返回 None，防御性钳制）。
+/// Straight [f32;4] → tiny Color (sRGB encoded values passed through
+/// directly = CSS/soft/vello semantics). Components are clamped to [0,1]
+/// (tiny `from_rgba` returns None for out-of-range/NaN, hence the defensive
+/// clamp).
 fn color_of(c: [f32; 4]) -> Color {
     let v = |x: f32| {
         if x.is_finite() {
@@ -695,7 +729,8 @@ fn color_of(c: [f32; 4]) -> Color {
     Color::from_rgba(v(c[0]), v(c[1]), v(c[2]), v(c[3])).unwrap_or(Color::BLACK)
 }
 
-/// Transform 作用单点（tiny map_point 为就地 &mut 签名，包装出函数式）。
+/// Applies a Transform to a single point (tiny map_point has an in-place
+/// &mut signature; wrapped here as a functional form).
 fn map_pt(m: Transform, x: f32, y: f32) -> Point {
     let mut p = Point::from_xy(x, y);
     m.map_point(&mut p);
@@ -711,7 +746,7 @@ fn solid_paint(color: AlphaColor<Srgb>) -> Paint<'static> {
     }
 }
 
-/// 预乘 RGBA8 → 直排 [f32;4]（0..1）。
+/// Premultiplied RGBA8 → straight [f32;4] (0..1).
 fn demul_px(p: [f32; 4]) -> [f32; 4] {
     let a = p[3];
     if a <= 0.0 {
@@ -720,7 +755,8 @@ fn demul_px(p: [f32; 4]) -> [f32; 4] {
     [p[0] / a, p[1] / a, p[2] / a, a]
 }
 
-/// 直排 [f32;4] → 预乘 RGBA8 写回（四舍五入，与 tiny-skia 预乘语义一致）。
+/// Straight [f32;4] → premultiplied RGBA8 written back (rounded, matching
+/// tiny-skia premultiply semantics).
 fn write_premul_px(dst: &mut [u8], s: [f32; 4]) {
     let a = (s[3] * 255.0).round().clamp(0.0, 255.0) as u16;
     for (c, v) in dst.iter_mut().enumerate().take(3) {
@@ -731,8 +767,9 @@ fn write_premul_px(dst: &mut [u8], s: [f32; 4]) {
     dst[3] = a as u8;
 }
 
-/// 核心 BlendMode → tiny-skia BlendMode（16 标准模式 1:1；PlusLighter →
-/// tiny `Plus`；PlusDarker 缺 → 调用方逐像素手写）。
+/// Core BlendMode → tiny-skia BlendMode (the 16 standard modes 1:1;
+/// PlusLighter → tiny `Plus`; PlusDarker is missing → the caller composites
+/// per pixel).
 fn to_tiny_blend(mode: BlendMode) -> tiny_skia::BlendMode {
     use tiny_skia::BlendMode as T;
     match mode {
@@ -759,9 +796,10 @@ fn to_tiny_blend(mode: BlendMode) -> tiny_skia::BlendMode {
     }
 }
 
-/// 圆角矩形路径（vello rounded_rect :1185 端口，f64→f32）：CSS 重叠收缩
-/// f=min(边长/相邻角半径和) → kappa 三次贝塞尔角弧。w/h ≤ 0 或全零半径时
-/// 返回 None（空路径跳过填充）。
+/// Rounded rect path (ported from vello rounded_rect :1185, f64→f32): CSS
+/// overlap shrink factor f=min(side/adjacent-radius-sum) → kappa cubic
+/// Bézier corner arcs. Returns None when w/h ≤ 0 or all radii are zero
+/// (empty path skips the fill).
 fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: [f32; 8]) -> Option<Path> {
     if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
         return None;
@@ -832,12 +870,15 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: [f32; 8]) -> Option
 // ===== 阴影（真形状遮罩 + soft 盒模糊） =====
 
 impl Renderer {
-    /// box-shadow（vello 同心环近似在 tiny 升级为真模糊）：
-    /// - 外影：形状 = 盒 offset(dx,dy) 外扩 spread（角半径 +spread），经
-    ///   变换栈后取设备 AABB 遮罩 → `blur_alpha_u8`（σ=blur·scale/2，soft
-    ///   单源语义）→ 着色合成；
-    /// - 内影：可见域 = 盒覆盖 ∧ invert(blur(孔))，孔 = 盒 offset 后内缩
-    ///   spread（角半径 −spread）——逐像素 min 组合。
+    /// box-shadow (vello's concentric-ring approximation is upgraded to a
+    /// true blur in tiny):
+    /// - Outer shadow: shape = the box offset by (dx,dy) and outset by spread
+    ///   (corner radii +spread); after the transform stack, take the device
+    ///   AABB mask → `blur_alpha_u8` (σ=blur·scale/2, soft single-source
+    ///   semantics) → tint and composite;
+    /// - Inset shadow: visible region = box coverage ∧ invert(blur(hole)),
+    ///   hole = the offset box inset by spread (corner radii −spread) —
+    ///   combined per pixel with min.
     fn shadow_op(&mut self, op: &PaintOp) {
         let PaintOp::Shadow {
             x,
@@ -943,9 +984,10 @@ impl Renderer {
         }
     }
 
-    /// 遮罩 → 阴影色预乘画布 → 目标合成（source-over；box-shadow 无混合语义）。
-    /// 颜色 α 与遮罩覆盖在单遍内折乘：a_out = a_mask·c_α，
-    /// pm = round(straight·255)·a_out/255。
+    /// Mask → premultiplied shadow-color canvas → composite onto the target
+    /// (source-over; box-shadow has no blend semantics). The color α and the
+    /// mask coverage fold into a single pass: a_out = a_mask·c_α,
+    /// pm = round(straight·255)·a_out/255.
     fn composite_shadow_mask(
         &mut self,
         mask: &tiny_skia::Mask,
@@ -1006,7 +1048,8 @@ impl Renderer {
     }
 }
 
-/// 滤镜链长度量换算设备像素（Blur/DropShadow 的 px 字段；其余无量纲）。
+/// Converts filter-chain length quantities to device pixels (the px fields
+/// of Blur/DropShadow; everything else is dimensionless).
 fn scale_effects(effects: &[FilterEffect], scale: f32) -> Vec<FilterEffect> {
     effects
         .iter()
@@ -1031,8 +1074,9 @@ fn scale_effects(effects: &[FilterEffect], scale: f32) -> Vec<FilterEffect> {
 // ===== 背景滤镜 / 图像 =====
 
 impl Renderer {
-    /// backdrop-filter（即时 op，soft 同语义）：当前目标区域快照 →
-    /// demul → soft `apply_effects` → premul → 回写（替换）。
+    /// backdrop-filter (immediate op, same semantics as soft): snapshot the
+    /// current target region → demul → soft `apply_effects` → premul →
+    /// write back (replace).
     fn backdrop_op(&mut self, op: &PaintOp) {
         let PaintOp::BackdropFilter {
             filters,
@@ -1091,10 +1135,12 @@ impl Renderer {
         }
     }
 
-    /// 背景图（9-slice 仿射 + Pattern placement）：源直排 → 预乘 Pixmap；
-    /// placement = 图像像素 → 用户空间（vello brush 同向：img_px →
-    /// scale(sx,sy) → translate(px − src_x·sx, py − src_y·sy)），采样由
-    /// tiny-skia 取逆。圆角经路径形状直接限定（无需裁剪层）。
+    /// Background image (9-slice affine + Pattern placement): source straight
+    /// alpha → premultiplied Pixmap; placement = image pixels → user space
+    /// (same direction as the vello brush: img_px → scale(sx,sy) →
+    /// translate(px − src_x·sx, py − src_y·sy)); tiny-skia samples through
+    /// the inverse. Rounded corners are constrained directly by the path
+    /// shape (no clip layer needed).
     fn image_op(&mut self, op: &PaintOp) {
         let PaintOp::Image {
             x,
@@ -1157,7 +1203,8 @@ impl Renderer {
 // ===== 渐变（vello peniko_gradient/repeating_peniko/distribute_stops 端口
 // + conic mod 修复 + 径向椭圆 placement） =====
 
-/// 停点表（位置归一 + 颜色 + 提示展开；核心算法单源 P9-1a）。
+/// Stop table (position normalization + colors + hint expansion; core
+/// algorithm single-sourced from P9-1a).
 fn gradient_stops(g: &Gradient, line_len: f32) -> Vec<(f32, AlphaColor<Srgb>)> {
     use style_engine::css::property::{apply_gradient_hints, distribute_stop_positions};
     use style_engine::css::value::ColorValue;
@@ -1212,7 +1259,8 @@ fn gradient_stops(g: &Gradient, line_len: f32) -> Vec<(f32, AlphaColor<Srgb>)> {
     stops
 }
 
-/// 渐变 shader 构建（op 盒 x/y/w/h 逻辑系；renderer 供滚动偏移）。
+/// Gradient shader construction (op box x/y/w/h in logical coordinates; the
+/// renderer supplies the scroll offset).
 #[allow(clippy::too_many_arguments)]
 fn gradient_shader(
     g: &Gradient,
@@ -1392,8 +1440,10 @@ fn gradient_shader(
 
 // ===== 边框（vello draw_border 几何 f64→f32 端口） =====
 
-/// 角弧分界角计算的共享参数：角半径/中心线弧半径/两邻边有效宽。
-/// 见 vello sink 同名函数（公式与语义注释逐条对迁）。
+/// Shared parameters for corner-arc boundary-angle computation: corner
+/// radius / centerline arc radius / effective widths of the two adjacent
+/// sides. See the identically named function in the vello sink (formulas and
+/// semantic notes migrated one by one).
 fn corner_diagonal_deg(w_u: f32, w_v: f32) -> f32 {
     w_v.atan2(w_u).to_degrees()
 }
@@ -1419,8 +1469,9 @@ fn centerline_radius(r: f32, w: f32) -> f32 {
     (r - w / 2.0).max(0.5)
 }
 
-/// 角部两条弧段的分界角（屏幕系，shift = TL 0°/TR 90°/BR 180°/BL 270°）：
-/// 返回 (邻接段终点角, 拥有段起点角)。
+/// Boundary angle between the two arc segments at a corner (screen
+/// coordinates, shift = TL 0°/TR 90°/BR 180°/BL 270°): returns (neighbor
+/// segment end angle, owner segment start angle).
 fn corner_arc_bounds(r: f32, w_owner: f32, w_neighbor: f32, shift_deg: f32) -> (f32, f32) {
     let th_n = diagonal_arc_crossing_deg(r, centerline_radius(r, w_neighbor), w_neighbor, w_owner);
     let th_o = diagonal_arc_crossing_deg(r, centerline_radius(r, w_owner), w_neighbor, w_owner);
@@ -1430,7 +1481,7 @@ fn corner_arc_bounds(r: f32, w_owner: f32, w_neighbor: f32, shift_deg: f32) -> (
     )
 }
 
-/// css-backgrounds-3 §4.5 角弧重叠收缩。
+/// css-backgrounds-3 §4.5 corner-arc overlap shrinking.
 fn shrink_corner_radii(w: f32, h: f32, radius: [f32; 4]) -> [f32; 4] {
     let [tl, tr, br, bl] = radius;
     let mut f = 1.0f32;
@@ -1446,13 +1497,14 @@ fn shrink_corner_radii(w: f32, h: f32, radius: [f32; 4]) -> [f32; 4] {
     }
 }
 
-/// 圆弧上另起一段（move_to；y-down，θ 递增 = 屏幕顺时针）。
+/// Starts a new segment on the arc (move_to; y-down, so increasing θ = clockwise on screen).
 fn arc_move_to(pb: &mut PathBuilder, cx: f32, cy: f32, r: f32, deg: f32) {
     let a = deg.to_radians();
     pb.move_to(cx + a.cos() * r, cy + a.sin() * r);
 }
 
-/// 任意跨度圆弧的三次贝塞尔近似（跨角 >90° 按 ≤90° 分段，k=4/3·tan(Δθ/4)）。
+/// Cubic Bézier approximation of an arc over an arbitrary span (spans >90°
+/// are split into ≤90° pieces, k=4/3·tan(Δθ/4)).
 fn arc_segment(pb: &mut PathBuilder, cx: f32, cy: f32, r: f32, start_deg: f32, end_deg: f32) {
     let span = (end_deg - start_deg).to_radians();
     if span.abs() < 1e-9 {
@@ -1525,8 +1577,9 @@ impl Renderer {
         self.target.pix.stroke_path(path, &paint, &stroke, tr, None);
     }
 
-    /// 四边分画（vello draw_border 逐行 port）：方角对角线二分方块 +
-    /// 圆角「角弧段 + 直线」中心线描边。
+    /// Per-side drawing (line-by-line port of vello draw_border): square
+    /// corners split the square along the diagonal, rounded corners stroke
+    /// the centerline of "arc segment + straight line" per corner.
     fn border_op(&mut self, op: &PaintOp) {
         use style_engine::css::property::BorderStyle;
         let PaintOp::Border {
@@ -1704,8 +1757,9 @@ impl Renderer {
 
 // ===== 文本（vello draw_text parley 排版 port + skrifa 逐字形轮廓填充） =====
 
-/// sink 侧文本系统（零副作用：系统字体禁用，字体由宿主推入——与 vello
-/// `VelloTextSystem` 同契约，conformance 双端同源字节）。
+/// Sink-side text system (zero side effects: system fonts disabled, fonts are
+/// pushed in by the host — same contract as vello `VelloTextSystem`, with
+/// identical source bytes on both conformance sides).
 pub struct TinyTextSystem {
     font_cx: parley::FontContext,
     layout_cx: parley::LayoutContext<()>,
@@ -1740,7 +1794,8 @@ impl TinyTextSystem {
     }
 }
 
-/// 对齐映射（vello map_align 同式；non_exhaustive 兜底 Start）。
+/// Alignment mapping (same form as vello map_align; non_exhaustive falls back
+/// to Start).
 fn map_align(a: TextAlign) -> parley::layout::Alignment {
     match a {
         TextAlign::Start => parley::layout::Alignment::Start,
@@ -1753,7 +1808,7 @@ fn map_align(a: TextAlign) -> parley::layout::Alignment {
     }
 }
 
-/// 家族名归一（与 core text.rs / vello family_of 同一映射）。
+/// Family-name normalization (same mapping as core text.rs / vello family_of).
 fn family_of(list: &FontFamilyList) -> std::borrow::Cow<'static, str> {
     match list.0.iter().next() {
         Some(FamilyName::Named(s)) => s.clone().into(),
@@ -1768,8 +1823,9 @@ fn family_of(list: &FontFamilyList) -> std::borrow::Cow<'static, str> {
     }
 }
 
-/// skrifa 轮廓 → tiny 路径的 y 翻转 pen（skrifa 轮廓 y-up、屏幕 y-down；
-/// 轮廓坐标已按 ppem 缩放）。
+/// Y-flipping pen from skrifa outlines to tiny paths (skrifa outlines are
+/// y-up, the screen is y-down; outline coordinates are already scaled by
+/// ppem).
 struct YFlipPen<'a> {
     pb: &'a mut PathBuilder,
 }
@@ -1792,7 +1848,8 @@ impl skrifa::outline::OutlinePen for YFlipPen<'_> {
     }
 }
 
-/// 单字形轮廓路径（skrifa unhinted draw；变体轴经 `location` 实例化）。
+/// Single-glyph outline path (skrifa unhinted draw; variation axes are
+/// instantiated via `location`).
 fn glyph_outline(
     font: &skrifa::FontRef,
     gid: u32,
@@ -1809,8 +1866,9 @@ fn glyph_outline(
     pb.finish()
 }
 
-/// 装饰线矩形带（vello fill_deco_rect 端口）：[x0,x1]×[y−half,y+half]
-/// 于 `tr`（= run 变换到目标缓冲）下。
+/// Text-decoration rectangular band (port of vello fill_deco_rect):
+/// [x0,x1]×[y−half,y+half] under `tr` (the run transform into the target
+/// buffer).
 fn fill_deco_rect(
     r: &mut Renderer,
     color: AlphaColor<Srgb>,
@@ -1832,8 +1890,9 @@ fn fill_deco_rect(
         .fill_path(&path, &paint, FillRule::Winding, full, None);
 }
 
-/// 装饰线波带（vello fill_deco_wavy 端口）：周期 6t、振幅 2t、每周期
-/// 8 段、带厚沿波平移；上缘去程 + 下缘平移 t 回程闭环。
+/// Text-decoration wavy band (port of vello fill_deco_wavy): period 6t,
+/// amplitude 2t, 8 segments per period, band thickness translated along the
+/// wave; top edge out, bottom edge translated by t and closed back.
 fn fill_deco_wavy(
     r: &mut Renderer,
     color: AlphaColor<Srgb>,
@@ -1877,9 +1936,10 @@ fn fill_deco_wavy(
 }
 
 impl Renderer {
-    /// Text 基元（vello draw_text 21 参 port）。字形 = skrifa 轮廓逐字形
-    /// fill（避免 run 内 winding 相互作用，soft 同型）；文本影 = 字形覆盖
-    /// 遮罩 + 真模糊（vello 同心环近似在此升级）。
+    /// Text primitive (port of vello draw_text with its 21 parameters).
+    /// Glyphs = per-glyph skrifa outline fills (avoiding winding interaction
+    /// within a run, same shape as soft); text shadow = glyph coverage mask +
+    /// true blur (vello's concentric-ring approximation is upgraded here).
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::type_complexity)]
     fn text_op(
@@ -2124,9 +2184,11 @@ impl Renderer {
         }
     }
 
-    /// 布局字形遍历与填充：`mask` 为 Some 时只画覆盖（文本影通道，无着
-    /// 色）；None 时逐 run 解析字体并按 span 颜色填充（主通道）。变体轴
-    /// 以 op 级 `font_variations` 为准（Text 契约：基样式级）。
+    /// Layout glyph traversal and filling: when `mask` is Some, only the
+    /// coverage is drawn (text-shadow channel, untinted); when None, the
+    /// font is resolved per run and filled with span colors (main channel).
+    /// Variation axes follow the op-level `font_variations` (Text contract:
+    /// base style level).
     fn fill_glyph_coverages(
         &mut self,
         layout: &parley::Layout<()>,

@@ -1,27 +1,19 @@
 # style-engine-soft
 
-[`style-engine`](https://crates.io/crates/style-engine) DisplayList 的
-纯软件绘制 Sink（第二 Sink）——**零 GPU、零第三方依赖**（纯 Rust 标准库
-光栅化）。
+A pure-software paint sink (the second sink) for the [`style-engine`](https://crates.io/crates/style-engine) DisplayList — **zero GPU, zero third-party dependencies** (pure Rust standard-library rasterization).
 
-## 何时选用
+## When to choose it
 
-- CI 级像素断言的**真值参照**：无 GPU、无浮点噪声、逐字节确定可复现；
-- 验证 sink 无关性契约：同一 `DisplayList` 在不同后端渲染语义一致；
-- 无法引入 GPU 栈的环境。
+- **Ground-truth reference** for CI-grade pixel assertions: no GPU, no floating-point noise, byte-for-byte deterministic and reproducible;
+- Verifying the sink-independence contract: the same `DisplayList` renders with consistent semantics across backends;
+- Environments where a GPU stack cannot be introduced.
 
-## 特性
+## Features
 
-- 全 20 `PaintOp` 逐像素直绘：blend 18/18、filter 全函数管线、逐像素边框；
-- 合成语义：sRGB 编码值直接 src-over（与 vello/Chromium 默认一致）、
-  渐变停点 sRGB 插值（CSS 默认插值空间）；
-- 滤镜/模糊/混合基建（`filter.rs` / `blur_alpha_u8` / `blend_pixel`）
-  同时是 [`style-engine-tiny`](https://crates.io/crates/style-engine-tiny)
-  的单一事实源（ADR-0043 D2），防止双实现漂移。
+- All 20 `PaintOp` variants painted pixel-by-pixel: blend 18/18, full filter-function pipeline, per-pixel borders;
+- Compositing semantics: sRGB-encoded values composited directly src-over (consistent with vello/Chromium defaults), gradient stops interpolated in sRGB (the CSS default interpolation space);
+- The filter/blur/blend infrastructure (`filter.rs` / `blur_alpha_u8` / `blend_pixel`) is also the single source of truth for [`style-engine-tiny`](https://crates.io/crates/style-engine-tiny) (ADR-0043 D2), preventing two-implementation drift.
 
-## 定位说明
+## Positioning
 
-本 crate 是契约验证与真值参照实现，非面向终端用户的绘制库；发布定位见
-[`docs/BREAKING-POLICY.md`](../../docs/BREAKING-POLICY.md)，能力矩阵见
-[`docs/SINK-MATRIX.md`](../../docs/SINK-MATRIX.md)。API 细节以 crate
-文档（`cargo doc`）为准。
+This crate is a contract-validation and ground-truth reference implementation, not an end-user-facing paint library. Publication positioning: [`docs/BREAKING-POLICY.md`](../../docs/BREAKING-POLICY.md); capability matrix: [`docs/SINK-MATRIX.md`](../../docs/SINK-MATRIX.md). For API details, rely on the crate documentation (`cargo doc`).

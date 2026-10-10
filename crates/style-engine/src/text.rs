@@ -1,10 +1,13 @@
-//! 内置文本栈（L2，feature = "text"）：宿主推送字体 + parley 测量。
+//! Built-in text stack (L2, feature = "text"): host-pushed fonts + parley
+//! measurement.
 //!
-//! 零副作用（ADR-0001/0006）：`TextSystem` 构造时**不枚举系统字体**
-//! （fontique `CollectionOptions::system_fonts = false`），字体数据只能
-//! 由宿主经 [`TextSystem::add_font`] 推入。测量带可选有界宽度
-//! （`measure_rich`/`measure_with_baseline`/`measure_min_content` 均接受
-//! `max_advance: Option<f32>`；white-space 折行在 L2，本模块单行测量）。
+//! Zero side effects (ADR-0001/0006): constructing `TextSystem` **does not
+//! enumerate system fonts** (fontique `CollectionOptions::system_fonts = false`);
+//! font data can only enter via [`TextSystem::add_font`], pushed by the host.
+//! Measurement accepts an optional bounded width (`measure_rich`/
+//! `measure_with_baseline`/`measure_min_content` all take
+//! `max_advance: Option<f32>`; white-space line wrapping lives in L2 — this
+//! module measures a single line).
 
 use crate::computed::ComputedStyle;
 use crate::css::property::LineHeight;
@@ -18,37 +21,42 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// 文本 span 样式项：(start_byte, end_byte, span 计算样式)。
+/// Text span style entry: (start_byte, end_byte, span computed style).
 type SpanStyle<'a> = (u32, u32, &'a ComputedStyle);
 
-/// 大写合成缩放项：(start_byte, end_byte, 缩放字号 px)。
+/// Uppercase synthetic-scaling entry: (start_byte, end_byte, scaled font size px).
 type ScaledSpan = (u32, u32, usize);
 
-/// 测量用画笔类型（不需要画笔语义；parley 0.11 对满足 Clone+PartialEq+Debug+Default
-/// 的类型有 blanket 实现，无需手动 impl）。
+/// Brush type for measurement (no brush semantics needed; parley 0.11 has a
+/// blanket impl for types satisfying Clone+PartialEq+Debug+Default, so no manual
+/// impl is required).
 #[derive(Clone, Debug, Default, PartialEq)]
 struct MeasureBrush;
 
-/// 宿主字体仓 + parley 排版上下文（用 [`TextSystem::new`]，不走系统字体）。
+/// Host font repository + parley layout context (use [`TextSystem::new`]; system
+/// fonts are never consulted).
 pub struct TextSystem {
     font_cx: FontContext,
     layout_cx: LayoutContext<MeasureBrush>,
-    /// ㉚ normal 行高探针缓存：(主族名, 字号 bits, 字重 bits, italic,
-    /// caps 判别) → Chromium 对齐值。命中即免探针遍（两遍法退单遍）；
-    /// add_font 时清空（字体集变更可能改变选择结果）。值来自探针首 run
-    /// 的 RunMetrics，与 ㉔ 公式逐位一致。
+    /// ㉚ normal line-height probe cache: (primary family name, font size bits,
+    /// weight bits, italic, caps discriminator) → Chromium-aligned value. A hit
+    /// skips the probe pass (two-pass method collapses to one pass); cleared on
+    /// add_font (a font-set change may alter selection results). Values come from
+    /// the probe's first-run RunMetrics, bit-identical to the ㉔ formula.
     normal_lh_cache: HashMap<(String, u32, u32, bool, u8), f32>,
 }
 
 impl Default for TextSystem {
-    /// 与 [`TextSystem::new`] 一致：零副作用（不枚举系统字体）。
+    /// Same as [`TextSystem::new`]: zero side effects (no system font
+    /// enumeration).
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl TextSystem {
-    /// 零副作用构造：空字体集合，不访问系统字体。
+    /// Zero-side-effect constructor: empty font collection, no access to system
+    /// fonts.
     pub fn new() -> Self {
         Self {
             font_cx: FontContext {
@@ -63,7 +71,8 @@ impl TextSystem {
         }
     }
 
-    /// 宿主推入字体数据（可多次调用；后续触发的重排由引擎失效机制承担）。
+    /// Host pushes font data (callable multiple times; reflow triggered
+    /// afterwards is handled by the engine's invalidation mechanism).
     pub fn add_font(&mut self, data: Vec<u8>) {
         self.font_cx
             .collection
@@ -72,14 +81,16 @@ impl TextSystem {
         self.normal_lh_cache.clear();
     }
 
-    /// 无界宽度测量（单行）。无可用字体时宽高趋 0。
+    /// Unbounded-width measurement (single line). Without any usable font,
+    /// width and height approach 0.
     pub fn measure(&mut self, text: &str, style: &ComputedStyle, env: &MediaEnv) -> (f32, f32) {
         self.measure_rich(text, style, &[], None, env)
     }
 
-    /// 富文本测量（T5c）：spans 为 (字节起点, 字节终点, 覆盖样式)；
-    /// max_advance 为 Some 时按包含块宽换行（white-space: normal 由 parley 吸收）。
-    /// 区间按 UTF-8 字节偏移解释。无界调用（None）即 max-content。
+    /// Rich-text measurement (T5c): spans are (byte start, byte end, override
+    /// style); when max_advance is Some, lines wrap at the containing-block width
+    /// (white-space: normal is absorbed by parley). Ranges are interpreted as
+    /// UTF-8 byte offsets. An unbounded call (None) equals max-content.
     pub fn measure_rich(
         &mut self,
         text: &str,
@@ -95,9 +106,11 @@ impl TextSystem {
         (w, h)
     }
 
-    /// 富文本测量 + 首行基线（P3，ADR-0034 D1）：返回 (宽, 高, 基线距)。
-    /// 基线 = 首行首 run ascent（px，整数化，同㉔ Chromium 对齐惯例）；
-    /// settle_lines 行内基线对齐（vertical-align）消费。无 run = 0。
+    /// Rich-text measurement + first-line baseline (P3, ADR-0034 D1): returns
+    /// (width, height, baseline distance). Baseline = ascent of the first run on
+    /// the first line (px, integerized per the ㉔ Chromium alignment convention);
+    /// consumed by settle_lines for inline baseline alignment (vertical-align).
+    /// No runs = 0.
     pub fn measure_with_baseline(
         &mut self,
         text: &str,
@@ -112,9 +125,10 @@ impl TextSystem {
         self.measure_two_pass(text, style, spans, max_advance, env)
     }
 
-    /// 最小内容宽（shrink-to-fit 下限，T5d）：max_advance = 0 强制在一切
-    /// 可断点断行，最宽行 = 最宽不可断原子。parley 0.11 无 min-content
-    /// API，此为既定候选设计的实现（见 FEATURES 布局映射注记）。
+    /// Min-content width (shrink-to-fit floor, T5d): max_advance = 0 forces line
+    /// breaking at every break opportunity, so the widest line = the widest
+    /// unbreakable atom. parley 0.11 has no min-content API; this implements the
+    /// agreed candidate design (see the FEATURES layout-mapping note).
     pub fn measure_min_content(
         &mut self,
         text: &str,
@@ -129,11 +143,12 @@ impl TextSystem {
         (w, h)
     }
 
-    /// 公共测量路径（第五批㉔）：normal 行高度量 Chromium 对齐。
-    /// parley normal = asc+desc+leading（float，含 typo lineGap）；Chromium
-    /// normal = round(asc)+round(desc)（逐字体整数化、不含 lineGap）。
-    /// 两遍构建：首遍探针取主字体 RunMetrics（fontique typo 值，px），
-    /// 第二遍以 LineHeight::Absolute 注入。显式行高（number/length）单遍。
+    /// Common measurement path (batch 5 ㉔): Chromium-aligned normal line-height
+    /// metrics. parley normal = asc+desc+leading (float, including typo lineGap);
+    /// Chromium normal = round(asc)+round(desc) (per-font integerization, no
+    /// lineGap). Two-pass build: the first pass probes the primary font's
+    /// RunMetrics (fontique typo values, px); the second pass injects them via
+    /// LineHeight::Absolute. Explicit line heights (number/length) are single-pass.
     fn measure_two_pass(
         &mut self,
         text: &str,
@@ -237,9 +252,11 @@ impl TextSystem {
         (layout.width(), layout.height(), baseline)
     }
 
-    /// 公共排版构造：按基样式 + span 覆盖样式建立 ranged layout（不断行）。
-    /// forced_lh 覆盖 normal 行高（㉔ 两遍法第二遍注入 Chromium 对齐值）；
-    /// caps_scaled 为小型大写合成缩放区间（新文本坐标，F3d）。
+    /// Common layout construction: builds a ranged layout from the base style
+    /// plus span override styles (no line breaking). forced_lh overrides the
+    /// normal line height (the ㉔ two-pass method's second pass injects the
+    /// Chromium-aligned value); caps_scaled carries small-caps synthetic-scaling
+    /// ranges (new text coordinates, F3d).
     fn build_layout(
         &mut self,
         text: &str,
@@ -395,10 +412,11 @@ impl TextSystem {
     }
 }
 
-/// Chromium 对齐 normal 行高（第五批㉔）：取首行首个 run 的排版度量，
-/// normal = round(ascent) + round(descent)（逐字体整数化、不含 leading/
-/// lineGap——DejaVu 16px 得 12+4=16，parley 浮点 normal 为 16.25）。
-/// 无 run（空白布局）返回 None 退回 parley 默认。
+/// Chromium-aligned normal line height (batch 5 ㉔): takes the layout metrics of
+/// the first run on the first line; normal = round(ascent) + round(descent)
+/// (per-font integerization, no leading/lineGap — DejaVu at 16px yields 12+4=16,
+/// while parley's float normal is 16.25). With no runs (blank layout), returns
+/// None to fall back to parley's default.
 fn chromium_normal_lh(layout: &parley::Layout<MeasureBrush>) -> Option<f32> {
     let line = layout.lines().next()?;
     let run = line.runs().next()?;
@@ -406,9 +424,9 @@ fn chromium_normal_lh(layout: &parley::Layout<MeasureBrush>) -> Option<f32> {
     Some((m.ascent.round() + m.descent.round()).max(1.0))
 }
 
-/// 首行首 run 基线（P3，ADR-0034 D1）：ascent 整数化（同㉔ Chromium 对齐
-/// 惯例，px）。无行/无 run（空白布局）= 0。vertical-align 基线对齐的
-/// 测量层承载数据。
+/// First-line first-run baseline (P3, ADR-0034 D1): integerized ascent (same ㉔
+/// Chromium alignment convention, px). No lines/no runs (blank layout) = 0.
+/// Carries the measurement-layer data for vertical-align baseline alignment.
 fn first_run_baseline(layout: &parley::Layout<MeasureBrush>) -> f32 {
     layout
         .lines()
@@ -418,7 +436,8 @@ fn first_run_baseline(layout: &parley::Layout<MeasureBrush>) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// 家族名归一：Named 原样、泛族名映射到 CSS 通用族关键字。
+/// Family-name normalization: Named passes through; generic family names map to
+/// the CSS generic-family keywords.
 fn family_cow(style: &ComputedStyle) -> Cow<'static, str> {
     match style.font_family().0.iter().next() {
         Some(crate::css::property::FamilyName::Named(s)) => Cow::Owned(s.clone()),
