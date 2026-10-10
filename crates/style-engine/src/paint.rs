@@ -3582,7 +3582,7 @@ mod tests {
     #[test]
     fn repeating_gradient_flag_flows_to_display_list() {
         // P1-3：repeating-* 前缀标记（css::Gradient.repeating）经背景 tile
-        // resolved 副本流入 DisplayList——双 sink 据此取模平铺。
+        // resolved 副本流入 DisplayList——各 sink 据此取模平铺。
         let (tree, id, style) = setup(
             "background-image: repeating-linear-gradient(90deg, red 0px, blue 20px)",
             None,

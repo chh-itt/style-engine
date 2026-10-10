@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq)]
 #[must_use = "计算样式被丢弃则该次级联求解无意义"]
 pub struct ComputedStyle {
-    /// 全集槽位存储：下标 = [`PropertyId::slot()`]（0..94），None = 未物化。
+    /// 全集槽位存储：下标 = [`PropertyId::slot()`]（0..183），None = 未物化。
     /// 槽位 O(1) 下标写替代 BTreeMap 的 log n 走查 + 节点分配——全集物化
     /// 每节点 ~94 次插入曾是 restyle 成本主体（阶段5 归因，PERFORMANCE.md）。
     values: Vec<Option<DeclValue>>,

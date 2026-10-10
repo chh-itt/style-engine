@@ -22,7 +22,7 @@
 - absolute 包含块跳走（三期②）：taffy 直父锚定的结构性修正——absolute 子件的包含块按 CSS 2.1 §10.1 取最近 positioned（relative/absolute）或 transformed（has_transform；动画可翻转 has_transform，故结算挂点在 apply_animations 之后、compute #1 之前）祖先，无则初始包含块。engine.rs settle_absolute_anchors 帧内结构修正 pass：DFS 求 abs_cb（记录用严格祖先候选——节点自身 positioned 不得自选为 cb，首版自指缺陷）+abs_in 按 cb 分桶，逐节点 diff 期望子表后 taffy set_children 跨父重挂（move 语义顺带归位上帧残留；快速路径=无 absolute 且上帧未重挂则零成本跳过）；taffy_parent 同步维护；collect 对 abs_cb 命中节点改取 cb 视口坐标+l.location（ICB 哨兵→视口原点；style DFS 先序保证 cb 布局先就绪），并在幻影 effp 补偿前短路防双重偏移；v1 契约豁免 table/multicol 子树（absolute 子件包含块仍为容器，见多列条）；auto inset 静态位置=cb 流内近似（显式 inset 全正确，B 级）；fixed 不处理（T2）。Chromium 153 对齐：conformance 新增 absolute-anchor-jump（transformed mid 与叶间夹 static wrap，叶落 (60,20) 而非直父锚定的 (85,20)——x 差 25px 属 Class 3/4 零容忍拦截域），Numeric 合计 19 用例、Pixel 7 用例（该用例整数盒纯色 diff 0），零 xfail【**最后记录点**：此后批次（三期③④⑤）新增用例未再更新通道合计，现值以 CI 为准——全文点名清单见下条补遗】；引擎锁定测试×4（跨 static 包装跳走 / ICB 跳全 static 祖先 / 嵌套 absolute 自为后代 cb / 样式表替换后重挂归位）。随用例记录 taffy 0.14 塌陷偏差：末子 margin-bottom 与父 margin-bottom 塌陷时父盒被下移（塌陷量落在父上方而非父底缘之外，违 CSS 2.1 §8.3.1）——用例规避、偏差在案（B 级，见布局映射条）。
 - conformance 通道合计补遗（「最后记录点」= 上条 absolute-anchor-jump 时的 Numeric 19 + Pixel 7；其后三期③④⑤新增用例未更新合计，现值以 CI 为准）——全文点名用例：**最后记录点时点** Numeric 19 = block-flow-basic / box-model / box-model-borderbox / absolute-offset / cjk-kinsoku / flex-row-gap / grid-columns / relative-offset / sizing-constraints / text-wrap-latin / transform-cb / selector-structural / calc-width（原 xfail，二期①转正）/ container-query / grid-autofill / multicol-basic / keyframes-layout / bidi-mixed / absolute-anchor-jump；Pixel 7 = calc-width / multicol-basic / table-pixel / transform-pixel / text-pixel / table-basic / absolute-anchor-jump。**其后新增（各条目自述，合计未随之更新）**：calc-slots（三期③）、table-span / table-rowspan（三期④）、multicol-balance（三期⑤a）、multicol-span（三期⑤b）、multicol-rule（三期⑤c）——其中 table-span / multicol-span / multicol-rule 自述 Numeric+Pixel 双通道，其余未自述通道归属（以 conformance manifest 为准）。
 - 绘制：背景全集（F3b：多层列表 cycling、repeat 平铺、position/size/origin/clip、attachment、background 简写）、clip-path 裁剪形状（F3c：inset/circle/ellipse/polygon + geometry-box 参考盒，PushClipPath 多边形裁剪）、border-image 九宫格（F3d：slice/width/outset/repeat，图片与渐变源，替代 Border op）、背景色、线性/径向渐变（sink 内 stop 加密对齐 sRGB 插值；F3d 起携带绝对几何 LinearGeom）、圆角、边框、阴影、opacity、图片（F3d 起携带采样窗口）、圆角矩形 clip
-- 文本：单 style run、断行、字体注册与基础 fallback（测量内置，见 ADR-0006）；字体深化（F3d：font-stretch/word-spacing/font-feature-settings/font-variation-settings/font-variant-caps 全通道——测量与双 sink 绘制同源；small-caps 合成）
+- 文本：单 style run、断行、字体注册与基础 fallback（测量内置，见 ADR-0006）；字体深化（F3d：font-stretch/word-spacing/font-feature-settings/font-variation-settings/font-variant-caps 全通道——测量与三 sink 绘制同源；small-caps 合成）
 - 状态与动画：StateFlags、transition-* 全量（P1-5 批，ADR-0032——四长手+简写+reconciliation+采样挂点，可插值属性经 lerp_decl 全子集）
 - 行为提示属性（A1，docs/BEHAVIOR-HINT-PROPS.md）：cursor（CSS UI 4 关键字子集 15 值：auto/none/default/pointer/text/wait/progress/help/not-allowed/move/grab/grabbing/crosshair/zoom-in/zoom-out；url() 自定义=T2 解析期拒绝）/ user-select（auto|none|text|all|contain；**不继承**——spec 明确，宿主实现选择时自行取值）/ pointer-events（auto|none）/ caret-color / accent-color（auto|color → Option<ColorValue>，None=auto）——宿主可读零绘制通道：解析入库+级联+继承全语义，不产生任何 PaintOp、不参与布局（锁定测试 behavior_hint_no_paint_ops 断言 ops/几何零变化）；消费端=宿主经 `ComputedStyle::value(PropertyId)`（全集物化含初始值——非继承属性在子级物化为初始 auto；slot 87-91，SLOT_COUNT 94→99，slot_alignment 自动覆盖）；锁定测试 crates/style-engine/tests/behavior_hints.rs 六件
 - outline / outline-offset（A2，css-ui-4）：outline-width（<line-width> 复用 BorderWidth 值族）/ outline-style（none|auto|solid|dashed|dotted|double|groove|ridge|inset|outset；**auto=宿主 focus ring 语义位，绘制按 Solid 近似=B 级**；double/groove/ridge/inset/outset 亦按 Solid 近似——BorderStyle 仅 None/Hidden/Solid/Dashed/Dotted 变体）/ outline-color（<color>，初始 currentcolor）/ outline-offset（<length> 可负）；**outline 简写** = <'outline-width'> || <'outline-style'> || <'outline-color'>（任意序、未指定重置初始、**不重置 outline-offset**）；不继承、不占布局（零 taffy 映射）、**ink overflow 不入滚动量程**；绘制=复用 PaintOp::Border 外扩矩形承载（描边带=[border-box+offset, +offset+width]，radius 各分量 +d 圆心不变近似 v1 锁定），绘制序=边框后、列规/内容前；零 sink 改动（soft/vello 自动获得）；锁测试 crates/style-engine/tests/outline.rs 六件（几何锁 (-6,-6,112,112)@d=6）
@@ -234,7 +234,7 @@
 - repeating-*-gradient（P1-3，css-images-3）：`repeating-linear/radial/conic-gradient()`
   三族全收——分派器按函数名 strip `repeating-` 前缀后复用三解析器
   （内层文法逐一相同），`css::Gradient.repeating: bool` 标记随
-  BackgroundImage→PaintOp::Gradient（内嵌 gradient 副本）流入双 sink。
+  BackgroundImage→PaintOp::Gradient（内嵌 gradient 副本）流入三 sink。
   语义=停点模式沿渐变轴无限平铺（周期=首末停点跨距；显式 Px 停点经
   线长归一、逆序按 §4.5.2 抬升后首末重合 → 周期 0 → 透明黑=source-over
   无操作；全缺省停点周期=全长退化为非 repeating）。sink 终结：vello
@@ -243,7 +243,7 @@
   起终角弧段）+ stops 平移归一 [0,1] + Extend::Repeat（r0=0 平移 stops
   会丢相位 first——径向必须 new_two_point）；soft 采样 t 不夹取改
   u=first+(t−first).rem_euclid(period) 回停点序列插值（垂直条带方向
-  不重复，与 CSS 一致）。em/rem/cq 相对停点双 sink 同约定均布（既有
+  不重复，与 CSS 一致）。em/rem/cq 相对停点三 sink 同约定均布（既有
   偏差延续）。0.x 破坏性：css::Gradient +repeating、GradientDump
   +repeating（#[serde(default)] 旧 dump 兼容）。锁定：css_images.rs
   repeating 三族 flag+kind 一件；paint.rs repeating 标记流入
@@ -406,9 +406,11 @@
   缺省 currentColor/blur 0）；绘制=Text.shadows 影字先绘——soft sink
   （P1-4 批）：blur>0=字形折线遮罩+3×盒模糊真模糊（装饰线不投影，
   Chromium 同语义）、blur=0=transform 平移重发（spans 置空=全字影
-  色）；vello 仍=平移重发锐利影（B 级在案）。诚实边界
+  色）；tiny（P10）同 soft 真盒模糊（复用 `blur_alpha_u8`）；vello=
+   平移重发 + 多重同心偏移环近似模糊（环数随 blur 自适应、环
+   α=1−(1−a)^(1/N) 复合守恒；B 级在案）。诚实边界
   （0.x）：装饰厚度 auto/from-font≈font_size/12、字体优先装饰位未接
-  （线位=B 级近似）、vello 侧 text-shadow 模糊未启。锁定：tests/css_text_overflow.rs 六件（ellipsis 截断/放得下
+  （线位=B 级近似）、vello 侧 text-shadow=环近似模糊（非真盒模糊）。锁定：tests/css_text_overflow.rs 六件（ellipsis 截断/放得下
   不截/visible 不截/clamp 两行/clamp none 全文/clamp 放得下不截）+
   tests/css_text_decoration.rs 六件（简写解析携带/缺省空装饰/line
   位集/影单+色/影多+blur/none 空）。
@@ -602,6 +604,13 @@
   对拍已完成（var-wide-keywords 用例对 Chromium 153 golden 逐盒 0.5px
   一致后转正，当前 35 用例零 xfail）。
 - 多列 fragmentation 深化：break-inside:auto 内容跨列分裂、column-span 整数列跨。当前 avoid/整列装箱语义（B 级在案）。重估条件：fragmentainer 模型（内容分裂是通用断行工程，table/多列共享）。
+- 书写模式 fragmentation（writing-mode / vertical-rl 等，css-writing-modes-4）：
+  未支持——`writing-mode` 属性未入文法（无槽位，声明按未知名拒绝+告警）；
+  方向语义仅 `direction`/`unicode-bidi`（T0 A8）与逻辑→物理映射
+  （css-writing-modes-4 映射表为逻辑属性基准），横排 IFC 单书写模式。
+  重估条件：宿主需要纵向排版——writing-mode 槽位+正交流（正交轴 IFC）
+  是独立工程量级，牵动 taffy 主轴映射、文本栈与 fragmentation 模型
+  （与多列 fragmentation 深化共享 fragmentainer 前提）。
 - 多动画组：**已落地（P7 批，见 T1 段 @keyframes 条）**——animation 简写
   `<single-animation>#` 多组、七描述符列表化（T-扩展）、组数=name 列表长
   描述符按 i%len 循环补齐、逐组采样后组胜同槽覆写、结束组逐槽恢复底层。
@@ -638,7 +647,7 @@
 - 阴影【已落地（第五批⑩；模糊/内阴影=sink 近似，像素校准归 ㉔ 批）】：inset 关键字支持（前置/尾随两形，重复 inset 整条容错丢弃）；spread（第四长度）入 op；绘制序=外阴影先于背景、内阴影于背景之上边框之下（CSS 序）；`PaintOp::Shadow` 携带 blur/spread/inset。渲染（vello 0.11 同 0.10 无内置高斯模糊）：模糊=多重同心圆环近似（N=6，单环 alpha=1−(1−a)^(1/N) 使 N 层复合恰为 a——同心叠涂复合公式精确、边缘自然衰减）；内阴影=盒裁剪层内反转填充（EvenOdd：盒路径−影框路径）+ 影框逐环外扩近似模糊；spread 外扩/内缩影框，圆角随扩张同步增长。锁定测试 box_shadow_inset_and_spread（解析）+ shadow_inset_and_spread_op（op 载荷）。soft sink 真 blur（P1-4 批）：Shadow op 纯平移矩阵下走形状 alpha 遮罩（outset=外扩 spread 圆角矩形、圆角随 spread 增缩钳半宽；inset=盒内减平移扩展矩形、合成期钳回盒内）+3×可分离盒模糊（σ=blur/2、盒宽 ⌊√(4σ²+1)⌉ 奇数、u32 窗口取整逐位确定）+pad=⌈3σ⌉∩画布+着色 src-over 合成；旋转/缩放矩阵回退平移矩形近似（B 级在案）；vello 侧维持多重圆环近似（上文的 sink 近似边界仅对 vello 成立）。
 - 椭圆圆角【已落地（第五批⑪）】：border-radius 斜杠文法 `<lp>{1,4} [ '/' <lp>{1,4} ]?`（横/纵分组各按 1-4 展开 tl tr br bl）与长手 `<lp>{1,2}`（第二值=纵向半径，缺省=横向=圆形角）；数据链=DeclValue::Radius(横, 纵) → resolve_radius [f32; 8]（序 tl.x tl.y tr.x tr.y br.x br.y bl.x bl.y）→ FillRect/Gradient/Shadow/Border/PushClip 五类 op 全部携带；sink 以 kappa（4/3·tan(π/8)）cubic 逼近四分之一椭圆构建 BezPath（kurbo RoundedRect 退役），并按 CSS 重叠规则等比缩放（任一边上相邻两角半径和超过边长时全组乘 f）与负半径截断；边框条角部暂以横向半径作圆形角近似（完整椭圆边框条后置）；锁定测试 border_radius_slash_elliptical（解析）+ elliptical_radius_pairs_resolved（op 载荷），像素目验并入 ㉔ Pixel 批
 - 边框【方角对角线二分=已修复（第四批⑤）；不等宽圆角弧起点=B·豁免｜Pixel 用例验收（㉔ 批）】：四边独立（`PaintOp::Border` 携带每边 `BorderSide{width,style,color}`，none/0 宽边由 sink 忽略）；solid 与 dashed/dotted 同走「角弧+直线」中心线描边（圆角弧三次贝塞尔近似），角弧按顺时针归属（TL→top、TR→right、BR→bottom、BL→left）；方角（radius≈0）角部 = 对角线二分（第四批⑤：外角→内角对角线把角部方块分给相邻两边、单边存在整块归该边、同色一次填充——消除旧「全边长直线交叉」的半透明双重着色与「后画方」角色偏差，四色快照目验通过）；**P4 D1（ADR-0037）：直角框 dashed/dotted 按边拆 FillRect 序列**（Dashed 段 2t 步进 3t 首对齐末段不足不画、Dotted 圆点直径 t 中心距 2t 方形近似 B 级；圆角框含花式线型整框退 Solid——弧上虚线 B 级；outline 通道复用自动受益）；残余偏差：不等宽圆角的弧起点不随邻边带宽调整（角部可能有细缝/重叠）。
-- 渐变【rx≠ry 画刷缩放=B·豁免｜几何已校准（第五批⑫：radial_ellipse_geometry_calibrated 全组公式锁定，像素校验归 ㉔ 批）；线性画刷原点=已修复（第四批⑤）】：radial 语义完整（T4c：`circle|ellipse` + `closest/farthest-side|corner` / 显式半径 + `at <position>`，paint 层按盒子解析为绝对 center/r；ellipse rx≠ry 由 sink 画刷 x 向缩放近似；farthest-corner 公式第四批⑤复核=css-images-3 一致——circle=最远角距离、ellipse=fx·√2/fy·√2（fx/fy=圆心到最远边距离），偏心 circle farthest-corner 用例锁公式；第五批⑫新增全组校准测试——两形状×四关键字在居中/偏心两中心下的 rx/ry 与绝对锚点全数断言=spec 一致）；stop 位置=解析不夹取、用值期归 sink 归一（P1-0 修：显式 px/% 停点按渐变线长折算 vello 0..1 offset——px/线长、%夹取 [0,1]；css-images-3 §4.5.2 逆序停点单调夹取双 sink 同款；其余单位 em/rem/cq 退化为自动均布=B·豁免）；**P9-1a 停点文法补齐（ADR-0038）**：色彩提示 `red, 50%, blue`（任意序位置 `25% red`；css-images-3）与 css-images-4 双位置 `red 10% 90%`（=同色两停点 desugar）入文法，`Gradient.hints`（`GradientHint{after_stop, position}`）全链透传（ComputedStyle→PaintOp→serde dump/load 双向），sink 侧经核心共享 `apply_gradient_hints` 展开为「位置=提示点、色=前后停点中点」的合成停点（=css-images-3 提示语义的精确等价形）；无上下文单位提示（em/rem/cq）sink 侧整体丢弃=线性回退（B·豁免，与 em 停点同约定）；提示位置经 §4.5.2 邻域 clamp 保证单调；解析拒绝=首停点前提示/尾随提示/双位置缺色/单停点；停点缺省均布上移核心单源 `distribute_stop_positions`（首 0 末 1、缺位段邻点间均布、逆序抬升）——修复 soft 旧前向填充把中段无位停点塌缩到前一停位的偏差（red,yellow,blue 曾渲染为黄→蓝，红带消失），vello 同步删本地重复实现；停点非 Absolute 色防御分支两 sink 统一为不透明黑（旧 soft=透明黑、vello=不透明黑相反；引擎契约=发射前 `resolve_color` 已终结全部停点色，该分支为防御路径）；锁定测试 css_images.rs 十件（hint 解析/任意序/双位置/四拒绝/DisplayList 透传/核心均布语义/提示中点色）+ soft 均布修复像素锁 + soft 提示弯曲插值像素锁 + soft 非 Absolute 防御锁 + vello 提示展开表测试；插值色空间 sRGB；线性渐变画刷中心第四批⑤修复补入盒原点（此前漏加 (x,y)，非原点盒采样区错位——与 radial 含原点不对称暴露）。
+- 渐变【rx≠ry 画刷缩放=B·豁免｜几何已校准（第五批⑫：radial_ellipse_geometry_calibrated 全组公式锁定，像素校验归 ㉔ 批）；线性画刷原点=已修复（第四批⑤）】：radial 语义完整（T4c：`circle|ellipse` + `closest/farthest-side|corner` / 显式半径 + `at <position>`，paint 层按盒子解析为绝对 center/r；ellipse rx≠ry 由 sink 画刷 x 向缩放近似；farthest-corner 公式第四批⑤复核=css-images-3 一致——circle=最远角距离、ellipse=fx·√2/fy·√2（fx/fy=圆心到最远边距离），偏心 circle farthest-corner 用例锁公式；第五批⑫新增全组校准测试——两形状×四关键字在居中/偏心两中心下的 rx/ry 与绝对锚点全数断言=spec 一致）；stop 位置=解析不夹取、用值期归 sink 归一（P1-0 修：显式 px/% 停点按渐变线长折算 vello 0..1 offset——px/线长、%夹取 [0,1]；css-images-3 §4.5.2 逆序停点单调夹取三 sink 同款；其余单位 em/rem/cq 退化为自动均布=B·豁免）；**P9-1a 停点文法补齐（ADR-0038）**：色彩提示 `red, 50%, blue`（任意序位置 `25% red`；css-images-3）与 css-images-4 双位置 `red 10% 90%`（=同色两停点 desugar）入文法，`Gradient.hints`（`GradientHint{after_stop, position}`）全链透传（ComputedStyle→PaintOp→serde dump/load 双向），sink 侧经核心共享 `apply_gradient_hints` 展开为「位置=提示点、色=前后停点中点」的合成停点（=css-images-3 提示语义的精确等价形）；无上下文单位提示（em/rem/cq）sink 侧整体丢弃=线性回退（B·豁免，与 em 停点同约定）；提示位置经 §4.5.2 邻域 clamp 保证单调；解析拒绝=首停点前提示/尾随提示/双位置缺色/单停点；停点缺省均布上移核心单源 `distribute_stop_positions`（首 0 末 1、缺位段邻点间均布、逆序抬升）——修复 soft 旧前向填充把中段无位停点塌缩到前一停位的偏差（red,yellow,blue 曾渲染为黄→蓝，红带消失），vello 同步删本地重复实现；停点非 Absolute 色防御分支两 sink 统一为不透明黑（旧 soft=透明黑、vello=不透明黑相反；引擎契约=发射前 `resolve_color` 已终结全部停点色，该分支为防御路径）；锁定测试 css_images.rs 十件（hint 解析/任意序/双位置/四拒绝/DisplayList 透传/核心均布语义/提示中点色）+ soft 均布修复像素锁 + soft 提示弯曲插值像素锁 + soft 非 Absolute 防御锁 + vello 提示展开表测试；插值色空间 sRGB；线性渐变画刷中心第四批⑤修复补入盒原点（此前漏加 (x,y)，非原点盒采样区错位——与 radial 含原点不对称暴露）。
 - 相对字重【P9-1b（ADR-0039）已落地】：`font-weight: bolder|lighter`
   入文法（`DeclValue::RelativeFontWeight(bool)`），级联物化期（compute_node_from_cascade
   步骤 5）按父计算权重经核心单源 `relative_font_weight`（css-fonts-4
@@ -732,7 +741,7 @@
   tests/css_container_invalidation.rs 4 件（无容器增量路径/容器后出现收敛/
   容器移除失配/容器尺寸变化同帧重匹配）+ differential 两表随机覆盖。
 - span 级行高/字距【P9-5（ADR-0042）已落地】：span 覆盖样式经 parley
-  ranged push 进测量与双 sink——行高仅 span 计算值 ≠ normal 时推 ranged
+  ranged push 进测量与三 sink——行高仅 span 计算值 ≠ normal 时推 ranged
   Absolute（parley 0.11 LineHeight 无 Normal 变体；显式 normal 回退基默认
   =B·豁免，重估条件=parley 提供 normal 语义）；字距恒推 ranged（显式 0
   覆盖继承非零基值=精确语义）。PaintOp::Text 的 TextSpanPaint 增加

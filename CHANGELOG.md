@@ -8,6 +8,18 @@
 
 ## [Unreleased]
 
+### 1.0 发布评审 — 文档收口批（P10 后置批）
+
+- **ADR-0043 补记**：新建 `docs/adr/0043-style-engine-tiny-third-sink.md`（tiny 第三 sink 的背景/五项决策/影响），收口 SINK-MATRIX.md、CHANGELOG.md、tiny lib.rs/Cargo.toml、pixel_tiny.rs 五处既有引用（追溯补记先例：ADR-0029/0030）。
+- **BREAKING-POLICY.md 修正**：五处 T-契约预告的 ADR 编号错位（IFC 0011→0021、结算 DAG 0012→0022、多重背景 0013→0024、多样式表 Epoch 0010→0012）；动画描述符槽「176..182」→176..183；「本 crate 发布」→四发布 crate 口径。
+- **三 sink 口径回写**：FEATURES.md「双 sink」×5 → 三 sink（含 tiny）；V1-SCOPE L3 标题与 sink 清单、CONTEXT.md Sink 词条、FEATURE-GATES.md 补 `serde` feature（三 feature 现状）；ci.yml 两处注释补 tiny/serde；paint.rs 测试注释活口径修正。
+- **FEATURES.md T2 补行项**：书写模式 fragmentation（writing-mode 未入文法）显式登记 + 重估条件（此前 V1-SCOPE §4 排除项无 FEATURES 对应行）。
+- **SINK-MATRIX 偏差矩阵补 4 行**：组滤镜链（vello 恒等层降级）、BackdropFilter（vello 整条忽略）、PlusLighter/PlusDarker（vello 退 Normal）、text-shadow（vello 环近似）——均为既有 FEATURES B 级在案的 vello 端降级；阴影行改名「box-shadow blur」；Text 行修正 vello font_features/variations 支持漂移。
+- **代码文档注释刷新**：core lib.rs serde 决策两条（serde feature 已落地态）、computed.rs 槽位 0..183、paint_dump.rs 20 变体、text.rs 测量 API（max_advance 有界宽度）、vello lib.rs 模块头（Text 全量接入/0.11 版本解绑/探针时值标注）、soft lib.rs 探针时值标注、conformance lib.rs 三 sink 腿。
+- **发布元数据**：style-engine/vello/soft/tiny 四 crate 补 `keywords`/`categories`；新增 vello/soft/tiny 三份轻量 crate README（GPU/CPU 依赖差异首屏讲清，core 沿用根 README）。
+- **文档勘误**：PERFORMANCE.md 槽位化行 `SLOT_COUNT=94` 标注时值；DEPENDENCIES.md「前 12 行」→全部直接依赖行；adr/0029+0030 补记注记 CHANGELOG 路径笔误（docs/CHANGELOG.md→CHANGELOG.md）。
+- **IMPLEMENTATION-LOG.md**：新增「日志边界」节——P9/P10 由 CHANGELOG 承接，本日志止于 P8、此后以 CHANGELOG 为权威。
+
 ### 轻量 CPU Sink style-engine-tiny 与三 sink 质检同级（P10）
 
 - **新 crate（feat）**：`style-engine-tiny`——tiny-skia 0.12 CPU 光栅 sink（嵌入式/无 GPU 目标），全 PaintOp 覆盖（FillRect/Gradient/Shadow/Image/Border/Clip/Opacity/Blend/Filter/Backdrop/Scroll/Transform/Text）；文本走 parley 排版 + skrifa 轮廓填充（YFlipPen 逐字形），font_features/font_variations/span 行高字距/装饰线（含 wavy）/文本影全支持。模糊复用 soft 的 `blur_alpha_u8`、PlusDarker 逐像素复用 `soft::blend_pixel`（ADR-0043 D2 单源，tiny-skia 缺该混合模式）。

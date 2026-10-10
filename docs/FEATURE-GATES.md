@@ -4,9 +4,11 @@
 
 ## 现状
 
-核心 crate 仅两个 feature：`layout`（默认开）、`text`（默认开）；
-`--no-default-features` 下仅 CSS 解析/级联/绘制编译。CI 矩阵 =
-no-default / layout / text / all-features + `cargo hack --feature-powerset`。
+核心 crate 三个 feature：`layout`（默认开）、`text`（默认开）、`serde`
+（默认关，DisplayList/PaintOp 类型化投影）；`--no-default-features` 下仅
+CSS 解析/级联/绘制编译。CI 矩阵 = no-default / layout / text /
+all-features + `cargo hack --feature-powerset`（serde 落地后幂集含 serde
+组合）。
 
 ## 原则
 
@@ -15,7 +17,7 @@ no-default / layout / text / all-features + `cargo hack --feature-powerset`。
    ellipsis 一律进核心（开了 gate 的语义等于把碎片化从渲染层搬回样式层，与
    ADR-0006 内置文本测量的同一逻辑）。
 2. **gate 只为依赖与编译成本而设**：新第三方依赖、大体积数据、平台绑定才允许。
-3. **gate 成对审计**：新增 gate 同批更新 hack 幂集与四组合零警告检查。
+3. **gate 成对审计**：新增 gate 同批更新 hack 幂集与全组合（2^n）零警告检查。
 4. **sink 实现的能力不进核心 gate**：filter/blend/backdrop 管线在
    style-engine-vello / style-engine-soft；核心只承载解析与 PaintOp 词汇。
 

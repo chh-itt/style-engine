@@ -7,6 +7,8 @@
 //! - Pixel Channel（pixel.rs）：参考 PNG vs 实测 PNG 的连通域差异分析 +
 //!   Error Class 分类（0 精确 / 1 AA 边缘 / 2 文本栅格化 / 3 几何 / 4 颜色
 //!   混合 / 5 基元缺失）+ per-case manifest 预算；Class 3–5 零容忍。
+//!   三 sink 腿：pixel.rs（soft 参照）/ pixel_vello.rs（GPU，无适配器
+//!   跳过）/ pixel_tiny.rs（tiny-skia CPU，全平台必跑）。
 //!
 //! 本 crate 只用 style-engine 公共 API（敌意消费者标准，ADR-0003）。
 

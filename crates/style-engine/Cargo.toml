@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
+keywords = ["css", "layout", "gui", "rendering", "typography"]
+categories = ["gui", "rendering", "text-processing"]
 
 [dependencies]
 cssparser = { workspace = true }

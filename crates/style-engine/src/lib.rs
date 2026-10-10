@@ -51,9 +51,9 @@
 //! - `#![deny(missing_docs)]`：公共项无文档即编译失败。
 //! - 线程承诺：`StyleEngine`/`Frame`/`ComputedStyle`/`DisplayList` 均
 //!   `Send + Sync`（静态断言锁定）。
-//! - `DisplayList` 序列化：v1 **不提供** serde 实现（不引入 serde 依赖；
-//!   `PaintOp` 为中立公共枚举，宿主可自行编写转换）。重估条件=出现跨进程
-//!   合成或录制回放需求。
+//! - `DisplayList` 序列化：经 `serde` feature（默认关）提供 `to_dump()`/
+//!   `to_display_list()` 类型化投影（`paint_dump` 模块）；serde 仅可选
+//!   依赖，默认构建零依赖面。
 //!
 //! 设计文档见仓库根目录 `CONTEXT.md` 与 `docs/adr/`。
 //!
@@ -66,8 +66,8 @@
 //! - **重依赖隔离**：GPU/wgpu/winit 只存在于 sink crate（`style-engine-vello`）
 //!   与 demo；核心 crate 的 taffy/parley 经 `layout`/`text` feature 可选，
 //!   `--no-default-features` 下核心仅剩 CSS 解析/级联/绘制编译。
-//! - **基础设施不进核心**：serde 等宿主侧设施不引入（见 API 冻结策略的
-//!   serde 决策）；诊断统一走 `tracing`（唯一观测依赖）。
+//! - **基础设施不进核心**：serde 仅以可选 feature 存在（见 API 冻结策略
+//!   的 serde 决策）；诊断统一走 `tracing`（唯一观测依赖）。
 
 // unsafe 策略：全 crate 禁止（deny），唯一豁免点 = engine.rs 的
 // SendSyncTaffy（taffy 0.14 CompactLength nan-boxing 非 Send/Sync 的

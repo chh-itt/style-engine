@@ -1,6 +1,6 @@
 //! F3a2（ADR-0023）：DisplayList 可序列化投影（feature = "serde" 门控）。
 //!
-//! PaintOp 全 16 变体的 typed tagged-enum 镜像（serde derive；色=\[f32;4\]
+//! PaintOp 全 20 变体的 typed tagged-enum 镜像（serde derive；色=\[f32;4\]
 //! sRGBA 分量、ImageRes 像素=`Vec<u8>` 直序列）；枚举值以 canonical 名字符
 //! 串承载（重建=名匹配+缺省回退——non_exhaustive 值族演进的诚实边界：
 //! 未知 op/单位/枚举名降级或跳过，不 panic）。

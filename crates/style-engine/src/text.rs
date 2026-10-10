@@ -2,8 +2,9 @@
 //!
 //! 零副作用（ADR-0001/0006）：`TextSystem` 构造时**不枚举系统字体**
 //! （fontique `CollectionOptions::system_fonts = false`），字体数据只能
-//! 由宿主经 [`TextSystem::add_font`] 推入。测量为无界宽度单行
-//! （white-space 换行语义属后续票据）。
+//! 由宿主经 [`TextSystem::add_font`] 推入。测量带可选有界宽度
+//! （`measure_rich`/`measure_with_baseline`/`measure_min_content` 均接受
+//! `max_advance: Option<f32>`；white-space 折行在 L2，本模块单行测量）。
 
 use crate::computed::ComputedStyle;
 use crate::css::property::LineHeight;

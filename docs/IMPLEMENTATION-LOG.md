@@ -6,6 +6,16 @@
 - **定位裁决：A 体 B 度**；**subgrid 明确不做**；@import=宿主 loader。
 - Goal `goal-dc428d02-85c9-4021-8088-c26fa5afbccb`；todo 32 项（P0×6 完成 / A1-A9 / B1-B4 / C1-C4 / D1-D4 / E1-E5 / F1-F3 / 持续×2）。
 
+## 日志边界（P10 后补记）
+
+本日志详尽记录至 P8 收口为止。P9（1.0 对齐：vello 0.11 / wgpu 30 升级、
+V1-SCOPE v1.0 验收基准、span 行高/字距 ADR-0042、裸声明容错扩展、容器
+失效收窄、列表闭环 ADR-0041、渐变停点文法 ADR-0038 等批次）与 P10
+（style-engine-tiny 第三 sink、ADR-0043）两阶段由 `CHANGELOG.md`
+[Unreleased] 各条与 `docs/FEATURES.md` 承接（CHANGELOG 为权威）。此后
+增量事实以 CHANGELOG 记录，本日志不再逐批追加；重开逐批日志的触发
+条件 = 1.0 后首个特性批次。
+
 ## 进度总览
 ### 已完成
 - **A8 逻辑属性 + direction/unicode-bidi（完成，253 测试绿）**：property.rs+30 变体/ALL 126 位/SLOT_COUNT 133/**槽位重排 物理0-95/逻辑96-125/动画126-132**（slot_alignment 锁定 ALL[i].slot()==i 契约恢复）；值族复用（LenAuto/Len/BorderWidth/BorderStyle/Color/Radius）+DirectionKind{Ltr,Rtl}/UnicodeBidiKind 六值；parse_declaration 新臂（margin/inset 逻辑→parse_len_auto、padding/radius→parse_corner_radius、border 逻辑 width/style/color 三族、direction/unicode-bidi keyword）。cascade.rs：**Candidate+decl_index**（同规则声明序级联键）、beats 四元组 (rank,spec,order,decl_index)、logical_map(p,rtl) 30 映射、resolve_logical（剥逻辑槽→序键定夺晚者填物理槽→直填无声明物理槽→重排序）；computed.rs：compute_node_in wire（direction=自身 winner→parent.direction()→Ltr）、inherits+Direction|UnicodeBidi、initial 30 臂、direction()/unicode_bidi() 读值器；decl.rs：shorthand_exists/longhands/expand 8 简写（二值形 is_exhausted 自检——调用方不查残留）。**教训**：①插入新枚举勿落在既有 #[derive] 与其目标之间（以 pub enum DeclValue { 为锚插入把原 derive 挤给新枚举→E0119+E0277 级联假象，修=derive 归位）；②全集物化曾用 enumerate 下标当槽位（旧 ALL 序==槽位序时侥幸成立）→ 改 pid.slot()（computed.rs 全集物化循环）；③engine.insert(Some(parent), key, node) 返回 ()（key 调用方定）；computed_style→Option<&ComputedStyle> 需 unwrap；④二值简写需自检 is_exhausted（三值残留静默接受）；⑤测试断言勿与自身样式表冲突（root 显式 rtl 时勿期待缺省 ltr）。锁测试 tests/logical_props.rs 十件。FEATURES（T0 A8 条+T2 direction 条更新）/CHANGELOG（阶段7 A8 条）已登记。

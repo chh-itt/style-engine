@@ -2,7 +2,7 @@
 
 日期: 2026（P1-3 批 commit a06e1bb，8 文件，全量 506=499+7 测试；P1-0 停点归一同批前后落地，无独立 commit 号，见 IMPLEMENTATION-LOG 提交序列）
 状态: 已接受
-注记: **追溯补记（自 CHANGELOG/日志重构）**——本 ADR 与 ADR-0029 在 IMPLEMENTATION-LOG「追加批次：rem 基准修复（P0 批）+ P1-0～P1-3（ADR-0029/0030 时代，goal-e1e87e71）」中被编号引用，但 docs/adr/ 此前无对应文件；本文由 docs/CHANGELOG.md 阶段7「P1-3」「P1-0」条与 docs/IMPLEMENTATION-LOG.md 对应段落重构。
+注记: **追溯补记（自 CHANGELOG/日志重构）**——本 ADR 与 ADR-0029 在 IMPLEMENTATION-LOG「追加批次：rem 基准修复（P0 批）+ P1-0～P1-3（ADR-0029/0030 时代，goal-e1e87e71）」中被编号引用，但 docs/adr/ 此前无对应文件；本文由 CHANGELOG.md 阶段7「P1-3」「P1-0」条与 docs/IMPLEMENTATION-LOG.md 对应段落重构。
 
 ## 背景
 

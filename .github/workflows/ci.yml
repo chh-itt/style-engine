@@ -48,7 +48,7 @@ jobs:
       - name: clippy（短格式，全特性，警告即错）
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-features --message-format short -- -D warnings
-      # sink 忽略卫生门禁（块 A，docs/SINK-MATRIX.md）：soft/vello 源码
+      # sink 忽略卫生门禁（块 A，docs/SINK-MATRIX.md）：soft/vello/tiny 源码
       # 禁止静默忽略（let _ = / 假绑定 / .ok() 丢弃）——parity 无断层。
       - name: sink ignore hygiene
         if: matrix.os == 'ubuntu-latest'
@@ -57,7 +57,7 @@ jobs:
       # golden 重生成属本地 Playwright 步骤（tools/dump_rects.py），不入 CI。
       # --locked：CI 一律按入库 Cargo.lock 解析（三期 Stage 4 锁定版本策略）。
       - run: cargo test --workspace --all-features --locked
-      # 特性幂集守卫：default/no-default/layout/text 组合全编译。
+      # 特性幂集守卫：default/no-default/layout/text/serde 全组合编译。
       # --no-dev-deps 会在运行期剥离 dev-dependencies 改变依赖图，与 --locked
       # 冲突（cargo 要求重写 Cargo.lock 被拒）——此处不加 --locked；lock 完整性
       # 由 fmt/clippy/test 三步的 --locked 与 msrv/perf-gate 保证。

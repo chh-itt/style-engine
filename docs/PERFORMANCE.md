@@ -35,7 +35,7 @@ cargo run --release -p style-engine --example perf_gate
 |---|---|---|---|
 | 阶段 5 首测 | 1.068 ms | 27.684 ms | incr 场景暴露：`set_declarations` 置 dirty_style → 全树重样式 |
 | 修复 A：`restyle_node` 父样式 `.cloned()` → 借用 | ≈ −15~20% | 27.7 → 16.0~24.7 ms | 每节点一次 `ComputedStyle` 深拷贝纯属浪费 |
-| 槽位化：`ComputedStyle.values` `BTreeMap` → `Vec<Option<DeclValue>>`（`PropertyId::slot()` 索引，`SLOT_COUNT=94`，对齐锁测试 `slot_alignment`） | 1.068 → 0.460 ms | — | `compute_node_in` 16 µs/节点 → 9.9 µs/节点（−38%）：log-n 走查+逐项分配 → 下标写入+整块克隆 |
+| 槽位化：`ComputedStyle.values` `BTreeMap` → `Vec<Option<DeclValue>>`（`PropertyId::slot()` 索引，`SLOT_COUNT=94`——时值，后随属性扩展增至 183；对齐锁测试 `slot_alignment`） | 1.068 → 0.460 ms | — | `compute_node_in` 16 µs/节点 → 9.9 µs/节点（−38%）：log-n 走查+逐项分配 → 下标写入+整块克隆 |
 | 增量重样式（㉙ 升级落地） | — | 0.489 ms（**56×**） | 脏根子树重算 ~40 µs（2 叶），其余为无变更帧基线 |
 
 text_50 / scroll 随上述修复同步改善：text_50 0.798 → 0.867 ms（噪声量级，文本成本主体在 shaping）；scroll 0.170 → 0.086 ms。

@@ -39,7 +39,7 @@ vello 0.11.0 的 wgpu 依赖为 `^30`（optional feature `wgpu`）。wgpu 大版
 
 ## 版本策略
 
-- 决定性依赖（上表前 12 行）在 workspace 根 Cargo.toml 用 `[workspace.dependencies]` 统一声明，成员 crate 一律引用 workspace 版本。
+- 决定性依赖（上表全部直接依赖行；kurbo/bytemuck 仅传递）在 workspace 根 Cargo.toml 用 `[workspace.dependencies]` 统一声明，成员 crate 一律引用 workspace 版本。
 - winit beta 是唯一精确锁（`=0.31.0-beta.3`）的依赖，且只出现在 demo/harness；0.31 stable 发布后立即替换。
 - vello/parley/taffy 均 0.x：允许破坏性升级，但必须一次升级整条 linebender 链（vello+peniko+parley 同批），不允许混代。
 - MSRV 以依赖最高者为准：workspace `rust-version = 1.90`（2026-10 CI msrv 实测上调——edition 2024 起点 1.85 被依赖链抬升：ordered-float 5.5.0 需 1.90、smol_str 0.3.6 需 1.89、vello 0.11 需 1.89/parley 0.11/fontique 0.11 链需 1.88、wgpu-types/naga 30.0.1 需 1.87、winit 0.31.0-beta.3 系需 1.86；msrv job 以 `dtolnay/rust-toolchain@1.90.0` 钉定验证。依赖再抬高时以实际失败为准上调）。

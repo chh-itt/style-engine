@@ -1,15 +1,17 @@
 //! `style-engine-vello` — style-engine DisplayList 的 Vello (wgpu) 绘制后端。
 //!
-//! ADR-0002：颜色为 sRGB 直传（第五批㉕双预测探针实测：RGBA8Unorm 目标上
-//! vello 0.10 以 sRGB 编码值直接合成=G/CSS 默认，半透明叠加无色彩空间分歧；
-//! 宽色域/HDR 目标路径若引入线性合成需重测）；滚动偏移折叠为坐标平移；
-//! 裁剪走 vello 图层（Mix::Clip）。
+//! ADR-0002：颜色为 sRGB 直传（第五批㉕双预测探针实测，vello 0.10 探针
+//! 时值、0.11 复核零漂移：RGBA8Unorm 目标上 vello 以 sRGB 编码值直接合成
+//! =G/CSS 默认，半透明叠加无色彩空间分歧；宽色域/HDR 目标路径若引入线性
+//! 合成需重测）；滚动偏移折叠为坐标平移；裁剪走 vello 图层（Mix::Clip）。
 //!
 //! MVP 偏差（FEATURES.md 同步）：
-//! - Shadow 模糊非真高斯（vello 0.10 无内置模糊）——box-shadow 以多重同心
-//!   扩张环、text-shadow 以多重同心偏移环近似：环 α = 1−(1−a)^(1/N)（N 层
-//!   复合恰为总 a），text 环数随 blur 自适应（≤0 单环=锐利副本）；
-//! - Text 基元跳过（字形 run 随 T5 落地后接入 vello 的 parley 绘制）。
+//! - Shadow 模糊非真高斯（vello 无内置模糊，0.11 复核同 0.10）——box-shadow
+//!   以多重同心扩张环、text-shadow 以多重同心偏移环近似：环 α =
+//!   1−(1−a)^(1/N)（N 层复合恰为总 a），text 环数随 blur 自适应
+//!   （≤0 单环=锐利副本）；
+//! - Text 全量接入（`render_ops_with_text`，parley VelloTextSystem）；
+//!   无字体系统入参的 `render_ops`/`render` 遇 Text op 跳过（无文本变体）。
 
 use style_engine::css::property::TextDecoStyleKind;
 use style_engine::css::value::ColorValue;
@@ -1017,7 +1019,7 @@ pub fn render_offscreen(
     scale: f32,
     base_color: [f32; 4],
 ) -> Result<Option<Vec<u8>>, String> {
-    // 场景：逻辑坐标 → 设备像素。vello 0.10 Scene 无场景级变换方法，
+    // 场景：逻辑坐标 → 设备像素。vello Scene 无场景级变换方法，
     // 经 Scene::append(other, transform)（scene.rs:464）注入缩放——
     // DrawGlyphs 的 run_transform 在 append 时整体复合，文本随缩放一致。
     let mut scene = Scene::new();
@@ -1463,7 +1465,7 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             }
         }
         PaintOp::Text { .. } => {
-            // 偏差：字形 run 随 T5 落地
+            // 无字体系统通路：Text op 仅经 render_ops_with_text 绘制
         }
         PaintOp::PushClip {
             x,

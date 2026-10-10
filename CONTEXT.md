@@ -77,7 +77,7 @@ _Avoid_: render list, draw commands, scene
 _Avoid_: render output, paint result
 
 **Sink**:
-DisplayList 的执行器。vello 后端、未来的 CPU 后端、其他框架的转译器一律是 Sink。
+DisplayList 的执行器。vello（GPU）、soft（纯 std 参照）与 tiny（tiny-skia CPU）后端、其他框架的转译器一律是 Sink。
 _Avoid_: renderer, backend（renderer 仅指内置 wgpu/vello Sink 的实现细节）
 
 ### 失效与验证

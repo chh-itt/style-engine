@@ -6,7 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "../../README.md"
+readme = "README.md"
+keywords = ["css", "gui", "tiny-skia", "cpu", "rasterizer"]
+categories = ["gui", "rendering"]
 
 [dependencies]
 style-engine = { path = "../style-engine", version = "0.1.0" }

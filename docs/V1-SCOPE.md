@@ -35,12 +35,13 @@ v1.0 = **框架无关 CSS 语义层的行为可信点**：在桌面 GUI 尺度�
 - 达标证据：differential 增量≡全量逐位等价锁（含随机两表覆盖）；
   css_margin_collapse 探针锁；perf_gate 四场景余量 ≥2.7×。
 
-### L3 显示列表与双 sink
+### L3 显示列表与三 sink
 - 中立 DisplayList（20 PaintOp 变体）+ soft 真值参照 sink（纯 std、
   blend 18/18、filter 全函数、逐像素边框）+ vello GPU 投影 sink（上游
-  能力边界内的全部消费）；SINK-MATRIX 政策（parity 分级+禁静默忽略
-  门禁）。
-- 渐变：停点文法补齐（hint/any-order/css-images-4 双位置 desugar）、双
+  能力边界内的全部消费）+ tiny CPU 光栅 sink（tiny-skia，嵌入式/无 GPU
+  目标、真盒模糊、全 PaintOp 覆盖，P10）；SINK-MATRIX 政策（parity
+  分级+禁静默忽略门禁）。
+- 渐变：停点文法补齐（hint/any-order/css-images-4 双位置 desugar）、三
   sink 共享均布单源、防御分支统一。
 - 文本：parley 排版+CJK 词分段、span 富文本（色/字号/族/字重/斜体/行高/
   字距全消费）、text-transform/折行/truncation/::marker 绘制层合成。
