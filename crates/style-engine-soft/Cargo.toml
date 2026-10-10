@@ -11,7 +11,7 @@ keywords = ["css", "gui", "software-rendering", "rasterizer", "rendering"]
 categories = ["gui", "rendering"]
 
 [dependencies]
-style-engine = { path = "../style-engine", version = "0.1.0" }
+style-engine = { path = "../style-engine", version = "1.0.0" }
 
 [dev-dependencies]
 # 测试构造 PaintOp 色值所需（主代码只读 components，零运行时依赖保持）。

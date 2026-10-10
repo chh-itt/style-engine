@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+无。
+
+## [1.0.0] - 2026-10-10
+
+### 版本定版
+
+- workspace 版本 0.1.0 → **1.0.0**（2026-10-10 维护者显式定版，验收凭据见 docs/V1-SCOPE.md）：六 crate 同步升版，内部 path 依赖版本字面量同步 1.0.0；BREAKING-POLICY 的 1.0 冻结语义自本版生效（新属性槽位仅允许尾追加）。
+
 ### 1.0 发布收口批（打包修复与台账补登——发布评审后置批）
 
 - **发布打包修复（P0）**：LICENSE-MIT/LICENSE-APACHE 复制进四个发布 crate 包根（style-engine/-vello/-soft/-tiny）——此前 license 仅以表达式声明，`cargo package` 清单不含任何 LICENSE 文件（crates.io 页面将无许可证原文可示）。
@@ -1235,5 +1243,5 @@
   ParseReport 容错，宿主违约=ContractError）；conformance Numeric 16 + Pixel 6 用例
   零 xfail（Chromium 153 golden）。
 
-[Unreleased]: https://github.com/chh-itt/style-engine/compare/d955894...HEAD
-[0.1.0]: https://github.com/chh-itt/style-engine
+[Unreleased]: https://github.com/chh-itt/style-engine/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/chh-itt/style-engine/compare/d955894...v1.0.0

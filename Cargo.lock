@@ -2207,7 +2207,7 @@ checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 
 [[package]]
 name = "style-engine"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bitflags",
  "cssparser 0.37.0",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "style-engine-conformance"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "image",
  "serde",
@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "style-engine-demo"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "image",
  "pollster",
@@ -2255,7 +2255,7 @@ dependencies = [
 
 [[package]]
 name = "style-engine-soft"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "peniko",
  "style-engine",
@@ -2263,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "style-engine-tiny"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "parley",
  "skrifa",
@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "style-engine-vello"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "parley",
  "pollster",

@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 # 1.85（edition 2024 起点）→ 1.90：依赖地板上调——ordered-float 5.5.0 需
 # 1.90、smol_str 0.3.6 需 1.89、vello 0.11 链需 1.89（parley/fontique 需

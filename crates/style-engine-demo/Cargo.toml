@@ -7,8 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-style-engine = { path = "../style-engine", version = "0.1.0" }
-style-engine-vello = { path = "../style-engine-vello", version = "0.1.0" }
+style-engine = { path = "../style-engine", version = "1.0.0" }
+style-engine-vello = { path = "../style-engine-vello", version = "1.0.0" }
 vello = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }

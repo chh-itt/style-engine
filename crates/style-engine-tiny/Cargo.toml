@@ -11,10 +11,10 @@ keywords = ["css", "gui", "tiny-skia", "cpu", "rasterizer"]
 categories = ["gui", "rendering"]
 
 [dependencies]
-style-engine = { path = "../style-engine", version = "0.1.0" }
+style-engine = { path = "../style-engine", version = "1.0.0" }
 # 滤镜/盒模糊基建单一事实源（ADR-0043 D2）：soft 的 filter.rs（滤镜链、
 # effects_pad）与 blur_alpha_u8/blend_pixel 直接复用，防止双实现漂移。
-style-engine-soft = { path = "../style-engine-soft", version = "0.1.0" }
+style-engine-soft = { path = "../style-engine-soft", version = "1.0.0" }
 parley = { workspace = true }
 tiny-skia = { workspace = true }
 skrifa = { workspace = true }
