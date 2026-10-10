@@ -21,6 +21,8 @@
 | parley | 0.11.1 | L2 核心 | 文本 shaping/测量/行布局（测量内置，见 ADR-0006） | 传递引入 fontique |
 | vello | 0.11.0 | sink | GPU 绘制执行器 | 2026-10-02 发布锁 wgpu 30；**P9-8（2026-10-08）已从 0.10 升级**，见"版本配对"节 |
 | wgpu | **30.x** | sink | GPU 底座 | 30.0.1；⚠️ 见下"版本配对" |
+| tiny-skia | 0.12.0 | tiny sink | CPU 2D 光栅（路径/渐变/Pattern/混合） | P10 引入；BSD-3-Clause（deny.toml 许可白名单已覆盖）；lowp 管线不支持 Pattern（自动走 HQ） |
+| skrifa | 0.44.0 | tiny sink | 字体轮廓读取（Text 逐字形填充） | parley 0.11 传递同版本（Cargo.lock 单版本无分叉，read-fonts 0.41.0）；Apache-2.0/MIT |
 | winit | =0.31.0-beta.3 | demo/harness | 窗口（仅示例与冒烟测试） | beta，精确锁版本 |
 | image | 0.25.10 | 资源 | 图片解码（宿主喂字节，核心不做 IO） | |
 | tracing | 0.1.x | 全部 | 警告/诊断通道 | ParseReport 同时进 tracing |

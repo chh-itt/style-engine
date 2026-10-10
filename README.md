@@ -4,7 +4,7 @@
 
 - **L1 样式代数**：真实 CSS 文本解析（cssparser）+ 选择器匹配（selectors）+ 自研属性文法，产出 `ComputedStyle`（183 属性槽位 + custom properties）。
 - **L2 布局**（feature = `layout`）：taffy（flex/grid/block/absolute）+ 自研结算层（calc 17 轴结算式、表格两阶段列宽、多列二分平衡）+ 内置文本栈 parley（测量/断行/bidi）。
-- **L3 绘制**：中立 `DisplayList`（`PaintOp` 指令序列）——渲染由宿主接入任意后端；参考实现 `style-engine-vello`（GPU），确定性参照 `style-engine-soft`（零依赖纯软光栅）。
+- **L3 绘制**：中立 `DisplayList`（`PaintOp` 指令序列）——渲染由宿主接入任意后端；参考实现 `style-engine-vello`（GPU），确定性参照 `style-engine-soft`（零依赖纯软光栅），轻量 CPU 后端 `style-engine-tiny`（tiny-skia，嵌入式/无 GPU 目标）。
 
 **定位**：桌面 GUI 的 CSS 语义层（面向 egui/iced/bevy 类宿主）；以浏览器为**度量衡**而非目标——正确性由 conformance harness 对比 Chromium golden（Numeric 0.5px 容差 + Pixel 错误分类双通道，当前 35 用例零 xfail）证明。子集边界由 [docs/FEATURES.md](docs/FEATURES.md) 权威定义：每行特性要么有金标准证据，要么有显式排除理由与重估条件。
 
@@ -46,6 +46,7 @@ let scene = style_engine_vello::render(&frame.paint);
 | `style-engine` | 核心：L1/L2/L3，无 GPU 依赖 |
 | `style-engine-vello` | GPU Sink 参考实现（wgpu/vello 只在此） |
 | `style-engine-soft` | 纯软件光栅 Sink（零第三方运行时依赖，像素确定性） |
+| `style-engine-tiny` | 轻量 CPU Sink（tiny-skia/parley，嵌入式/无 GPU 目标） |
 | `style-engine-conformance` | Chromium golden 双通道对比 harness |
 | `style-engine-demo` | winit 敌意消费者演示 |
 

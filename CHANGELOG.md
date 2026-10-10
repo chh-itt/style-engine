@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### 轻量 CPU Sink style-engine-tiny 与三 sink 质检同级（P10）
+
+- **新 crate（feat）**：`style-engine-tiny`——tiny-skia 0.12 CPU 光栅 sink（嵌入式/无 GPU 目标），全 PaintOp 覆盖（FillRect/Gradient/Shadow/Image/Border/Clip/Opacity/Blend/Filter/Backdrop/Scroll/Transform/Text）；文本走 parley 排版 + skrifa 轮廓填充（YFlipPen 逐字形），font_features/font_variations/span 行高字距/装饰线（含 wavy）/文本影全支持。模糊复用 soft 的 `blur_alpha_u8`、PlusDarker 逐像素复用 `soft::blend_pixel`（ADR-0043 D2 单源，tiny-skia 缺该混合模式）。
+- **质检与 GPU sink 同级**：conformance 新增 `tests/pixel_tiny.rs` 第三像素腿（golden 同源、AA 预算放松同式、全平台必跑无 GPU 探测跳过）；`check_sink_ignores.py` 扫描面扩至三 crate（tiny 源码 0 处静默忽略）；SINK-MATRIX.md 改三 sink 矩阵并新增「tiny 合成不变量」节；tiny 内建 `tests/compositing.rs` 锁定确定性、组锚定、透明度混合、world 缩放。
+- **实现不变量（tiny-skia 0.12 实证，SINK-MATRIX 登记）**：`RasterPipelineBlitter` 要求 mask 尺寸==目标 SubPixmap 尺寸否则静默空绘（组合成改 `apply_mask` DestIn 先行）；`Pattern::new` 的 transform 语义=瓦片局部→填充坐标（identity 会把组内容位移 −(ox,oy)——组/阴影/Backdrop 合成一律 `from_translate(合成矩形左上)`）。
+- **语义修正（vs vello，在案）**：conic 渐变 `start_deg` 经 `rem_euclid(360°)` 归一 + Repeat 采样（修正 vello Pad 采样在 start>360° 的相位缺失）；径向椭圆渐变按标准 `T(c)∘S(rx/ry)∘T(−c)` 语义（vello rx/ry 交换疑似上游缺陷，待议）。
+
 ### 发布准备 — 文档核查与 crates.io 发布决策
 
 - **发布决策（docs）**：废止早期「不发布 crates.io」约定（契约 C4/C7）——README/BREAKING-POLICY/CHANGELOG 头注同步改写；本 crate 即将发布 crates.io（版本号维持 0.1.0，0.x 语义不变）。
