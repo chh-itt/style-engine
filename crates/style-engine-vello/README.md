@@ -1,5 +1,7 @@
 # style-engine-vello
 
+[![crates.io](https://img.shields.io/crates/v/style-engine-vello.svg)](https://crates.io/crates/style-engine-vello)
+
 A Vello (wgpu) **GPU paint sink** for the [`style-engine`](https://crates.io/crates/style-engine) DisplayList.
 
 ## When to choose it
@@ -25,7 +27,7 @@ Incremental path: `render_ops` / `render_ops_with_text` (the latter lands glyphs
 
 ## Capability boundaries (recorded as Tier B)
 
-Tier grading and the three-sink comparison live in the deviation matrix of [`docs/SINK-MATRIX.md`](../../docs/SINK-MATRIX.md):
+Tier grading and the three-sink comparison live in the deviation matrix of [`docs/SINK-MATRIX.md`](https://github.com/chh-itt/style-engine/blob/main/docs/SINK-MATRIX.md):
 
 - Non-opacity filter chains / `BackdropFilter`: warn-once degradation (upstream vello filter proper / backdrop primitive not yet landed);
 - `PlusLighter` / `PlusDarker`: fall back to `Mix::Normal` (upstream peniko Mix lacks the two modes);

@@ -1,6 +1,6 @@
 # ADR-0026: border-image 全集与字体深化（F3d）
 
-- 状态：Accepted（实施中）
+- 状态：Accepted（已实施——F3d 落地记录见文末）
 - 日期：批次 F3d 开工
 - 关联：ADR-0024（background 全集——值族与 9-slice 相邻语义）、ADR-0025
   （clip-path）、第五批⑨（背景图宿主像素契约）、第五批⑯（@font-face 静默

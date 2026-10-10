@@ -1,5 +1,7 @@
 # style-engine-tiny
 
+[![crates.io](https://img.shields.io/crates/v/style-engine-tiny.svg)](https://crates.io/crates/style-engine-tiny)
+
 A tiny-skia **pure-CPU paint sink** (the third sink, P10, ADR-0043) for the [`style-engine`](https://crates.io/crates/style-engine) DisplayList.
 
 ## When to choose it
@@ -16,4 +18,4 @@ A tiny-skia **pure-CPU paint sink** (the third sink, P10, ADR-0043) for the [`st
 
 ## Compositing invariants
 
-tiny-skia 0.12 constraints (group mask size == SubPixmap, `Pattern` tile-local anchoring, integer y-boundary rows getting zero AA coverage) are recorded in the "tiny compositing invariants" section of [`docs/SINK-MATRIX.md`](../../docs/SINK-MATRIX.md) and locked by the built-in `tests/compositing.rs`. Capability boundaries and the three-sink deviation comparison live in the deviation matrix of the same file.
+tiny-skia 0.12 constraints (group mask size == SubPixmap, `Pattern` tile-local anchoring, integer y-boundary rows getting zero AA coverage) are recorded in the "tiny compositing invariants" section of [`docs/SINK-MATRIX.md`](https://github.com/chh-itt/style-engine/blob/main/docs/SINK-MATRIX.md) and locked by the built-in `tests/compositing.rs`. Capability boundaries and the three-sink deviation comparison live in the deviation matrix of the same file.

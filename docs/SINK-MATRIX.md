@@ -29,12 +29,12 @@
 | 渐变停点均布 | 核心 `distribute_stop_positions`（P9-1a 共享单源） | 同（P9-1a 起删本地实现） | 同 | 一致；旧 soft 前向填充塌缩（中段无位停点并到前停位）已修 |
 | 渐变色彩提示 | `apply_gradient_hints` 展开（Px/% 提示；em/rem/cq 丢弃） | 同 | 同 | 一致（P9-1a）；无上下文单位提示丢弃=B·豁免（与 em 停点同约定） |
 | 渐变停点非 Absolute 色防御分支 | 不透明黑 | 不透明黑 | 不透明黑 | 一致（P9-1a 统一；旧 soft=透明黑、vello=不透明黑相反——引擎契约下不可达路径） |
-| box-shadow blur | 真 3× 可分离盒模糊（σ=blur/2） | 多重同心圆环近似 | 真 3× 可分离盒模糊（复用 soft `blur_alpha_u8`，σ=blur·scale/2；ADR-0043 D2 单源） | soft/tiny A 级同源；vello 圆环近似 B（FEATURES「阴影」条） |
+| box-shadow blur | 真 3× 可分离盒模糊（σ=blur/2；旋转/缩放矩阵下回退平移矩形近似——B·豁免） | 多重同心圆环近似 | 真 3× 可分离盒模糊（复用 soft `blur_alpha_u8`，σ=blur·scale/2；ADR-0043 D2 单源） | soft/tiny A 级同源；vello 圆环近似 B（FEATURES「阴影」条） |
 | 组滤镜链（PushFilter 非 opacity 函数） | 原生逐像素全函数管线（`filter::apply_effects`） | warn-once 恒等层降级（push/pop 栈平衡保持） | 同 soft（D2 复用 `apply_effects`） | vello B（上游 vello filter 本体未落地；FEATURES「filter」条） |
 | BackdropFilter | 区域替换合成 | warn-once 整条忽略（无 backdrop 原语） | 同 soft（D2 复用同源基建） | vello B（上游 backdrop 原语；FEATURES T2 滤镜条） |
 | PlusLighter / PlusDarker | 原生逐像素（`blend_pixel`） | 退 `Mix::Normal`（peniko Mix 缺两模式） | PlusLighter=tiny-skia `BlendMode::Plus`；PlusDarker=逐像素复用 `soft::blend_pixel` | vello B（上游 peniko Mix；FEATURES「混合」条）；tiny 18/18 全覆盖 |
 | text-shadow | 真 3× 盒模糊（真形状遮罩） | 平移重发 + 多重同心偏移环近似（环数随 blur 自适应，α=1−(1−a)^(1/N) 守恒） | 真 3× 盒模糊（复用 `blur_alpha_u8`） | soft/tiny A 级同源；vello 环近似 B（FEATURES「text-shadow」条） |
-| Border dashed/dotted | 按边拆 FillRect 序列（P4 D1） | 同 soft（PaintOp 层已拆） | 同 | 一致；不等宽圆角弧起点 B |
+| Border dashed/dotted | P8 逐像素重建（paint 层发单 `PaintOp::Border`，四边+style 逐边消费；本行旧文「按边拆 FillRect 序列」口径作废） | kurbo stroke 重建（同一单 Border op） | 同 soft（D2 复用蓝图） | 一致（paint 层单 op、sink 各自重建）；不等宽圆角弧起点 B |
 | Text 对齐/spans | P7 收口：逐字符 span 归属 | parley VelloTextSystem（font_features/variations 直推） | parley 排版 + skrifa 轮廓填充（YFlipPen 逐字形；font_features/variations/装饰线（含 wavy）/文本影） | 一致；font_features/variations/装饰线/文本影 vello 与 tiny 全支持；装饰线基样式单行近似 B |
 | Text 折行 | 复用引擎测量（同源） | 复用引擎测量（同源） | 复用引擎测量（同源，parley） | 一致（折行在 L2，sink 零折行） |
 | Image repeat/size | F3b 平铺 + space/round 精确化 | 同 | 同 | 一致（paint 层语义，sink 零分叉） |
@@ -43,6 +43,7 @@
 | 混合层（isolation/mix-blend） | 合成期混合 | vello push_layer 混合 | 组缓冲混合；PlusDarker 逐像素复用 `soft::blend_pixel`（tiny-skia 缺该模式） | 一致（P1-2） |
 | conic 渐变起点采样 | start_deg 归一 | vello Pad 采样在 start>360° 时相位缺失 | `rem_euclid(360°)` 归一 + Repeat 采样 | tiny 修正 vello 缺陷；vello 端升级待议（上游 vello gradient 采样语义） |
 | 径向椭圆渐变 | 标准椭圆语义（rx/ry 正向） | rx/ry 交换疑似上游缺陷 | `T(c)∘S(rx/ry)∘T(−c)` 标准语义 | tiny/soft 一致；vello 端待议（带 golden 证据后与上游对质） |
+| 字体格式覆盖（sfnt） | 仅 TrueType glyf（`SoftFont::parse` 拒 CFF/OTTO→无字形） | 经 fontique/skrifa，支持面远宽于 soft（含 CFF/OTTO） | 同 vello | soft B·豁免（参照 sink 缺口；conformance 资产全 TTF 掩盖；重估条件：soft 补 CFF/OTTO 解析或加载即告警） |
 
 ## tiny 合成不变量（P10 实证，tiny-skia 0.12 约束）
 

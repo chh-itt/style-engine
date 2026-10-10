@@ -21,7 +21,7 @@
 //! - Conic gradient start-angle normalization (`rem_euclid` + `Extend::Repeat`
 //!   sampling of the fract) — the same mod semantics as Chrome/soft (vello's
 //!   Pad passthrough renders the top-right quadrant wrong when from≠90°;
-//!   this sink fixes that and ports the fix back to vello);
+//!   SINK-MATRIX tracks the vello-side upgrade as pending);
 //! - Radial gradient ellipse correction: placement =
 //!   translate(c)∘scale(rx,ry)∘translate(−c) with a unit-radius brush and
 //!   sampling through the inverse — the math direction is opposite to

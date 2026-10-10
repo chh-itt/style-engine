@@ -38,7 +38,7 @@
 ## 已验证可复用的骨架
 
 - 事件循环收尾：`let mut app = DemoApp::default(); let event_loop = EventLoop::builder().build()?; event_loop.run_app(&mut app)?;`（app 先声明，避免 E0597）。
-- 引擎侧：`engine.frame((w,h), scale, now)` → `style_engine_vello::render(&frame.paint)` → `Scene`；字体经 `engine.add_font(bytes)` 注入（仓库不携带字体资产，文本叶宽高 0 可接受）。
+- 引擎侧：`engine.frame((w,h), scale, now)` → `style_engine_vello::render(&frame.paint)` → `Scene`；字体经 `engine.add_font(bytes)` 注入（core crate 不携带字体资产，demo/assets/fonts/ 另有三套测试字体供 demo 使用；未注入字体时文本叶宽高 0 可接受）。
 
 ## T5b 关键测绘（parley 0.11 → vello 0.11 字形通路）
 

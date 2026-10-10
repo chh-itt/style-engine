@@ -4843,8 +4843,9 @@ impl<K: Copy + Eq + Hash + 'static> StyleEngine<K> {
     /// unbreakable-tall child); re-balances with final heights on a second
     /// call after text re-layout. Steady state (n/colw/assignment all equal)
     /// = zero extra layout passes. v1 boundaries: break margin-top not
-    /// truncated, column-span/rule not implemented, the containing block of
-    /// absolute children remains the container.
+    /// truncated, column-rule strips settle via `settle_column_rules` and
+    /// column-span:all cuts the column flow (三期⑤b), the containing block
+    /// of absolute children remains the container.
     fn settle_columns(&mut self, viewport: (f32, f32)) {
         if self.multicols.is_empty() {
             return;

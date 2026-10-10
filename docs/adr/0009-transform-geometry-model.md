@@ -1,10 +1,10 @@
 # transform 几何模型：绘制期仿射 + 双时机包含块
 
-日期：2026-09。状态：Accepted（实现排期见 FEATURES/backlog；本 ADR 定契约）。
+日期：2026-09。状态：Accepted（已落地——实现注记见文末；本 ADR 定契约）。
 
 ## Context
 
-transform 是 ADR-0008 触发条件全集的第一个未实现项，但它横跨三层语义，必须先分清各自的层级与时机再动手：
+transform 是 ADR-0008 触发条件全集的第一个未实现项（2026-09 时点，现已落地），但它横跨三层语义，必须先分清各自的层级与时机再动手：
 
 1. **几何变换本身**——元素视觉上被平移/旋转/缩放/错切；
 2. **containing block 副作用**——transform ≠ none 的元素成为 absolute/fixed 后代的包含块（CSS Transforms §3）；
@@ -64,4 +64,4 @@ transform 是 ADR-0008 触发条件全集的第一个未实现项，但它横跨
 - **vello 0.10 Scene 无变换栈 API**（push_transform/pop_transform 不存在，变换是 fill/stroke/push_layer 的 per-call 参数）：sink 自维护 `xforms` 栈——PushTransform 时栈顶合成 `top * new`（kurbo A·B 中 B 先行，外层在外），PopTransform 弹出；所有绘制点的 per-call 变换取栈顶。
 - **偏移共轭**：sink 的形状坐标在构造期已手动叠加偏移平移（滚动折叠），故形状类 per-call 变换取偏移共轭 `eff(v) = offset + T·(v − offset)`；字形是局部簇坐标，走独立合成 `run = translate(offset + T·原点) ∘ T`。恒等栈顶时两者逐位退化回原行为（零漂移，由既有全量快照回归背书）。
 - **已知近似**：同一节点上 transform × 自身滚动（CSS 语义：滚动发生在变换内）由偏移共轭近似为滚动在变换外；transformed-inside-scrolled（常见情形）语义正确。记录于 FEATURES，验收不覆盖。
-- **落地面**：L1 解析（transform 属性、5 函数族、3D 拒绝 warn）；L2 谓词（avail-width 夹紧红转绿 360→200 + 数值哨兵 transform-cb 进 Numeric Channel，恒等变换零投影噪声）；L3 层对 + Pos 带键 0（层序测试：transform 触发者覆盖树序控制组）+ 快照目验（rotate×translate×opacity×内嵌文字随转）。transform-origin v0 不解析（固定 50% 50%）。
+- **落地面**：L1 解析（transform 属性、5 函数族、3D 拒绝 warn）；L2 谓词（avail-width 夹紧红转绿 360→200 + 数值哨兵 transform-cb 进 Numeric Channel，恒等变换零投影噪声）；L3 层对 + Pos 带键 0（层序测试：transform 触发者覆盖树序控制组）+ 快照目验（rotate×translate×opacity×内嵌文字随转）。transform-origin v0 不解析（固定 50% 50%）——已过时：v1 已解析 transform-origin（绘制期消费），见 FEATURES「transform」条。

@@ -1,5 +1,7 @@
 # style-engine-soft
 
+[![crates.io](https://img.shields.io/crates/v/style-engine-soft.svg)](https://crates.io/crates/style-engine-soft)
+
 A pure-software paint sink (the second sink) for the [`style-engine`](https://crates.io/crates/style-engine) DisplayList — **zero GPU, zero third-party dependencies** (pure Rust standard-library rasterization).
 
 ## When to choose it
@@ -16,4 +18,4 @@ A pure-software paint sink (the second sink) for the [`style-engine`](https://cr
 
 ## Positioning
 
-This crate is a contract-validation and ground-truth reference implementation, not an end-user-facing paint library. Publication positioning: [`docs/BREAKING-POLICY.md`](../../docs/BREAKING-POLICY.md); capability matrix: [`docs/SINK-MATRIX.md`](../../docs/SINK-MATRIX.md). For API details, rely on the crate documentation (`cargo doc`).
+This crate is a contract-validation and ground-truth reference implementation, not an end-user-facing paint library. Publication positioning: [`docs/BREAKING-POLICY.md`](https://github.com/chh-itt/style-engine/blob/main/docs/BREAKING-POLICY.md); capability matrix: [`docs/SINK-MATRIX.md`](https://github.com/chh-itt/style-engine/blob/main/docs/SINK-MATRIX.md). For API details, rely on the crate documentation (`cargo doc`).

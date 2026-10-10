@@ -1,7 +1,7 @@
 # 结算管线契约（frame() 调用序列）
 
 > 状态：Accepted（2026-10）。DAG 化（F1）基线——第一步不是重写，是把每处读什么、
-> 写什么、依赖什么写清楚。行号以 engine.rs（8547 行，阶段 7 rem 接线后）为准，
+> 写什么、依赖什么写清楚。行号以 engine.rs（11515 行，2026-10-10 口径）为准，
 > 重构后由 ADR-0012 更新——行号随批次漂移，引用时以符号名（frame/restyle/…）锚定。
 
 ## 调用序列（engine.rs frame() :762）
@@ -32,7 +32,7 @@ frame(viewport, scale, now)
 
 | 挂点 | 读 | 写 | 依赖 | 收敛语义 |
 |---|---|---|---|---|
-| ① restyle | 镜像树、Stylesheet(Epoch)、Environment、StateFlags、容器快照 | styles、min_measures | — | 全量或脏根子树（有容器规则退全量） |
+| ① restyle | 镜像树、Stylesheet(Epoch)、Environment、StateFlags、容器快照 | styles、min_measures | — | 全量或脏根子树（有容器规则且快照表非空退全量——P9-4 收窄） |
 | ② apply_animations | @keyframes、now、底层值 | ComputedStyle 覆写 | ① | 单 pass（now 的纯函数） |
 | ③ anchors | positioned/has_transform 谓词、taffy 结构 | set_children 跨父重挂、taffy_parent | ②（动画可翻转 has_transform） | 单 pass（期望子表 diff） |
 | ⑤ settle_calc | calc_deferred、父内容盒 | taffy set_style 固定值 | ④ | 上限 3 遍（DAG 逐遍稳一层） |

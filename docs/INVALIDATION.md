@@ -11,7 +11,7 @@
 | `set_environment` | `media` 变更才 `dirty_style` | restyle() 全量 |
 | `insert` / `remove` / `set_children` | `dirty_struct`（remove 另清全部派生缓存） | rebuild_taffy() → 新树重贴样式（rebuild 内置 `dirty_style`） |
 | `set_classes` / `set_state` / `set_text` / `set_leaf_measure` / `add_font` | `dirty_style`（add_font 另 `dirty_struct` + TextSystem 探针缓存清空） | restyle() 全量 |
-| `set_declarations`（内联声明） | **只** `style_dirty_roots.push(id)`（阶段5 增量） | 无容器规则 → restyle_subtrees(roots)；有 → restyle() 全量 |
+| `set_declarations`（内联声明） | **只** `style_dirty_roots.push(id)`（阶段5 增量） | 无容器规则或容器快照表空（P9-4 收窄）→ restyle_subtrees(roots)；有容器规则且快照非空 → restyle() 全量（`:has` 另有独立门 `has_invalidation_needs_full`） |
 | `set_leaf_intrinsic` / `add_image` / `set_scroll_offset` | 无失效标 | intrinsic → 布局消费；image/scroll → 仅 paint（DisplayList 每帧重建） |
 
 ## 2. 派生缓存与其失效域

@@ -1,12 +1,14 @@
 # style-engine
 
+[![crates.io](https://img.shields.io/crates/v/style-engine.svg)](https://crates.io/crates/style-engine) [![docs.rs](https://img.shields.io/docsrs/style-engine)](https://docs.rs/style-engine)
+
 **A framework-agnostic CSS semantic layer for native Rust GUIs**: it owns the full chain from style declarations → cascade → layout → paint commands, and leaves every side effect (windows, events, clocks, resources) to the host.
 
 - **L1 Style algebra**: real CSS text parsing (cssparser) + selector matching (selectors) + an in-house property grammar, producing `ComputedStyle` (183 property slots + custom properties).
 - **L2 Layout** (feature = `layout`): taffy (flex/grid/block/absolute) + an in-house resolution layer (calc across 17 axes as settled expressions, two-phase table column sizing, multi-column bisection balancing) + the built-in text stack parley (measurement / line breaking / bidi).
 - **L3 Paint**: a neutral `DisplayList` (a sequence of `PaintOp` commands) — rendering is up to whichever backend the host plugs in; reference GPU sink `style-engine-vello`, deterministic ground-truth sink `style-engine-soft` (zero-dependency pure software rasterizer), lightweight CPU backend `style-engine-tiny` (tiny-skia, for embedded / no-GPU targets).
 
-**Positioning**: a CSS semantic layer for desktop GUIs (aimed at egui/iced/bevy-style hosts); the browser is the **yardstick**, not the target — correctness is proven by the conformance harness against Chromium goldens (dual channel: Numeric with 0.5px tolerance + Pixel with error classification; currently 35 cases, zero xfail). The subset boundary is defined authoritatively by [docs/FEATURES.md](docs/FEATURES.md): every feature line either carries golden evidence or an explicit exclusion reason with a revisit condition.
+**Positioning**: a CSS semantic layer for desktop GUIs (aimed at egui/iced/bevy-style hosts); the browser is the **yardstick**, not the target — correctness is proven by the conformance harness against Chromium goldens (dual channel: Numeric with 0.5px tolerance + Pixel with error classification; currently 35 cases, zero xfail). The subset boundary is defined authoritatively by [docs/FEATURES.md](https://github.com/chh-itt/style-engine/blob/main/docs/FEATURES.md): every feature line either carries golden evidence or an explicit exclusion reason with a revisit condition.
 
 ## Quick start
 
@@ -61,13 +63,13 @@ Side-effect-free contract: font/image bytes are pushed in by the host (`add_font
 
 The referenced documents are maintained in Chinese:
 
-- [CONTEXT.md](CONTEXT.md) — domain language (glossary)
-- [docs/V1-SCOPE.md](docs/V1-SCOPE.md) — v1.0 behavioral acceptance baseline (promises / deviations / exclusions)
-- [docs/adr/](docs/adr/) — architecture decision records (DisplayList neutral contract, rendering stack, conformance, push-based sync, scrolling, layering, transform, …)
-- [docs/FEATURES.md](docs/FEATURES.md) — feature registry (authoritative subset boundary + A/B/C deviation tiers)
-- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — performance budgets and gate derivations
-- [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — dependency policy and version-floor chain
-- [CHANGELOG.md](CHANGELOG.md) — phase-by-phase history
+- [CONTEXT.md](https://github.com/chh-itt/style-engine/blob/main/CONTEXT.md) — domain language (glossary)
+- [docs/V1-SCOPE.md](https://github.com/chh-itt/style-engine/blob/main/docs/V1-SCOPE.md) — v1.0 behavioral acceptance baseline (promises / deviations / exclusions)
+- [docs/adr/](https://github.com/chh-itt/style-engine/blob/main/docs/adr/) — architecture decision records (DisplayList neutral contract, rendering stack, conformance, push-based sync, scrolling, layering, transform, …)
+- [docs/FEATURES.md](https://github.com/chh-itt/style-engine/blob/main/docs/FEATURES.md) — feature registry (authoritative subset boundary + A/B/C deviation tiers)
+- [docs/PERFORMANCE.md](https://github.com/chh-itt/style-engine/blob/main/docs/PERFORMANCE.md) — performance budgets and gate derivations
+- [docs/DEPENDENCIES.md](https://github.com/chh-itt/style-engine/blob/main/docs/DEPENDENCIES.md) — dependency policy and version-floor chain
+- [CHANGELOG.md](https://github.com/chh-itt/style-engine/blob/main/CHANGELOG.md) — phase-by-phase history
 
 ## Local development
 

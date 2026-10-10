@@ -10,7 +10,7 @@
 | cssparser-sel（package=cssparser） | 0.37.0 | L1 选择器 | selectors 0.40 的配对解析器；0.38 起解析器改单生命周期，二者类型不兼容，重命名依赖隔离于 src/selector.rs 内部（选择器预lude 以源文本形式跨界）。**与 Cargo.toml/Cargo.lock 对齐核实（第五批①）：lock 中 cssparser 0.37.0 与 0.38.0 双版本共存为重命名依赖的预期形态，其余决定性依赖版本均与上表一致** | MPL-2.0 |
 | precomputed-hash | 0.1.1 | L1 选择器 | selectors 0.40 要求的选择器词哈希；SelString 包装实现（FNV-1a） | Apache-2.0/MIT |
 | selectors | 0.40.0 | L1 | 选择器解析/匹配/specificity | 需实现 SelectorImpl，MPL-2.0 |
-| color | 0.3.3 | L1 | CSS Color 4 颜色模型（oklch/color-mix）| linebender 出品 |
+| color | 0.3.3 | L1 | CSS Color 4 颜色模型（oklch/color-mix）| linebender 出品；仅经 peniko 传递（无 crate 直写） |
 | taffy | 0.14.0 | L2 | 布局引擎 | 2026-08-24 发布；calc 集成面 = 类型擦除指针 + 宿主回调（`CompactLength::calc(*const ())` / `traits.rs calc(val, basis)`，block.rs 处以 parent_size 为基调用）——接入路径存在（`resolve_calc_value` 公开 trait 方法，见下节复评修正），维持引擎侧结算式直通为工程性选择，记 B 级重估 |
 | slotmap | 1.1.1 | 核心 | StyleTree 与 secondary map 存储 | |
 | bitflags | 2.13.2 | 核心 | StateFlags | |
@@ -39,7 +39,7 @@ vello 0.11.0 的 wgpu 依赖为 `^30`（optional feature `wgpu`）。wgpu 大版
 
 ## 版本策略
 
-- 决定性依赖（上表全部直接依赖行；kurbo/bytemuck 仅传递）在 workspace 根 Cargo.toml 用 `[workspace.dependencies]` 统一声明，成员 crate 一律引用 workspace 版本。
+- 决定性依赖（上表全部直接依赖行）在 workspace 根 Cargo.toml 用 `[workspace.dependencies]` 统一声明，成员 crate 一律引用 workspace 版本；kurbo/bytemuck/color 仅经 peniko 传递、非任何 crate 直写。唯一直写例外：`unicode-segmentation` 声明在 crates/style-engine/Cargo.toml（仅核心一 crate 使用，无跨 crate 共享需求）。
 - winit beta 是唯一精确锁（`=0.31.0-beta.3`）的依赖，且只出现在 demo/harness；0.31 stable 发布后立即替换。
 - vello/parley/taffy 均 0.x：允许破坏性升级，但必须一次升级整条 linebender 链（vello+peniko+parley 同批），不允许混代。
 - MSRV 以依赖最高者为准：workspace `rust-version = 1.90`（2026-10 CI msrv 实测上调——edition 2024 起点 1.85 被依赖链抬升：ordered-float 5.5.0 需 1.90、smol_str 0.3.6 需 1.89、vello 0.11 需 1.89/parley 0.11/fontique 0.11 链需 1.88、wgpu-types/naga 30.0.1 需 1.87、winit 0.31.0-beta.3 系需 1.86；msrv job 以 `dtolnay/rust-toolchain@1.90.0` 钉定验证。依赖再抬高时以实际失败为准上调）。
@@ -51,7 +51,7 @@ vello 0.11.0 的 wgpu 依赖为 `^30`（optional feature `wgpu`）。wgpu 大版
 
 **落地设计（二期①）**：引擎侧「结算式直通」，零 unsafe、零上游票——
 
-- 映射期：含百分比 calc（`LengthPercentage::Calc` + `CalcNode::has_percent`）捕获为延迟条目（layout.rs `DeferredRaw`，thread_local 收集，`map_style` 每次调用即清空；px 部分照旧折叠供首遍布局）；v1 结算槽位 = width/height（flex-basis/min/max/margin/padding 维持 0 折算，记录偏差）。
+- 映射期：含百分比 calc（`LengthPercentage::Calc` + `CalcNode::has_percent`）捕获为延迟条目（layout.rs `DeferredRaw`，thread_local 收集，`map_style` 每次调用即清空；px 部分照旧折叠供首遍布局）；v1 结算槽位 = CalcAxis 17 轴全覆盖（width/height/min/max、flex-basis、margin/padding 全族、column/row gap——layout.rs `CalcAxis`；早期「仅 width/height」口径作废）。
 - 布局期：每帧首遍布局后 `settle_calc`（engine.rs）以父节点内容盒（Layout.size − border − padding；taffy `content_size` 字段在 content_size 特性门下、workspace 未启用）为基准解析百分比，回写固定值并重算；循环至无变更，上限 3 遍——百分比基准恒为祖先派生 DAG，逐遍稳定一层，3 层内链路与浏览器单遍语义一致，更深链路记偏差待重估。
 - 语义验证：conformance calc-width xfail 转正（.b = 780×50%+10 = 400px 与 Chromium 153 一致，0.5px 容差）；引擎锁定测试两级链收敛（110 → 65）。
 

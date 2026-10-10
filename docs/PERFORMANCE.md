@@ -42,10 +42,10 @@ text_50 / scroll 随上述修复同步改善：text_50 0.798 → 0.867 ms（噪�
 
 ## 增量重样式设计（engine.rs）
 
-**正确性域论证**：节点样式求值只依赖 ①自身/祖先树数据（兄弟声明互不影响，`:nth-child` 按树位）②继承父样式（子树重算即重取）③祖先容器快照（有容器规则在场时退全量）→ `set_declarations` 的失效可收敛到「自身+后代」子树。
+**正确性域论证**：节点样式求值只依赖 ①自身/祖先树数据（兄弟声明互不影响，`:nth-child` 按树位）②继承父样式（子树重算即重取）③祖先容器快照（有容器规则且快照表非空时退全量——P9-4 收窄；`:has` 另有独立全量门）→ `set_declarations` 的失效可收敛到「自身+后代」子树。
 
 - `set_declarations` 将目标节点推入 `style_dirty_roots`（不再整树 dirty_style）。
-- `frame()` 择路：`dirty_style` → 全量 `restyle()`；否则脏根非空 → 有容器规则（`sheet.has_container_rules`）退全量（容器快照可能被子树新样式反向影响），无容器规则 → `restyle_subtrees(roots)`。
+- `frame()` 择路：`dirty_style` → 全量 `restyle()`；否则脏根非空 → **有容器规则且快照表非空**（`any_container_rules() && !container_sizes.is_empty()`，P9-4 收窄：上帧无 `container-type` 元素时容器规则不可能命中，仍走增量；新容器经 record_container_sizes→changed→全量 pass 收敛）退全量（容器快照可能被子树新样式反向影响），否则 → `restyle_subtrees(roots)`；`:has` 失效另有独立门 `has_invalidation_needs_full()`，命中即全量。
 - `restyle_subtrees`：过滤已移除根 → 子树任一节点属表格（`tables`）或多列（`multicols`）登记 → 保守退全量（两阶段结算的全等缓存依赖全树登记，未改登记无双重登记风险）→ text 特性下逐节点清 `min_measures` → 逐根沿祖先链重建容器栈后 `restyle_node`。
 - `RestyleGuard`（`done: SecondaryMap<NodeId,u32>` + pass 计数）：同一 restyle 调用内脏根互为祖先/后代时去重，避免重复求值；全量路径传空守卫，语义不变。
 - **仍未增量**：布局（taffy 全树）与 DisplayList 重建每帧全量——余量实测充足（见上表），且二者增量化的正确性风险（taffy 缓存语义 × 脏区跟踪）远大于当前收益。

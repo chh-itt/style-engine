@@ -103,6 +103,31 @@ jobs:
           key: perf
       - run: cargo run --release --locked -p style-engine --example perf_gate
 
+  package:
+    # 打包门禁（1.0 发布收口批）：四个发布 crate 必须 cargo package 干净
+    # 通过，且打包清单含 LICENSE-MIT/LICENSE-APACHE——防「文件漏提交/路径
+    # 漂移」导致发布缺件（crates.io 页面无许可证原文）。--no-verify 避免
+    # 与 gate job 重复跑测试；demo/conformance publish=false 不在清单。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pkg
+      - name: Package dry-run (4 publishable crates, LICENSE in manifest)
+        run: |
+          set -euo pipefail
+          for c in style-engine style-engine-vello style-engine-soft style-engine-tiny; do
+            cargo package --locked --no-verify -p "$c"
+            for lic in LICENSE-MIT LICENSE-APACHE; do
+              if ! cargo package --list --allow-dirty -p "$c" | grep -q "^${lic}$"; then
+                echo "::error::$c package manifest is missing ${lic}"
+                exit 1
+              fi
+            done
+          done
+
   golden-drift:
     # 黄金标准漂移门禁（块 A）：CI 里以钉死版本的 Playwright Chromium 重放
     # 重生成全部 golden，git diff 判漂移——防「本地重生成、仓库滞旧」静默

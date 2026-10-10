@@ -1457,9 +1457,10 @@ fn apply_op(op: &PaintOp, scene: &mut Scene, state: &mut RenderState) {
             src_h,
             pixels,
         } => {
-            // 第五批⑨背景图：拉伸至盒（MVP 语义，无 repeat/size）；圆角
-            // 非零时先推裁剪层。vello 以 peniko::Image（Rgba8）直绘，
-            // 仿射=平移到盒原点后按盒/源比例缩放。
+            // 第五批⑨背景图：repeat/size 平铺语义在 paint 层单源结算
+            // （paint.rs `tile_axis_positions`，P4 D2），本臂收到的即单个
+            // 平铺块；圆角非零时先推裁剪层。vello 以 peniko::Image（Rgba8）
+            // 直绘，仿射=平移到盒原点后按盒/源比例缩放。
             // F3d 9-slice（ADR-0026）：src_* 源子域 ≠ 全图时，仿射改为
             // 「dest 盒原点 ↔ (src_x,src_y)」对齐 + 盒/子域比例缩放，子域外
             // 的残图以盒矩形裁剪层兜裁（仿射子域+裁剪）。
