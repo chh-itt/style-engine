@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Sink 忽略卫生门禁（块 A：soft/vello parity）。
+"""Sink 忽略卫生门禁（块 A：soft/vello/tiny 三 sink parity）。
 
-扫描 style-engine-soft / style-engine-vello 源码中的「静默忽略」形态：
+扫描 style-engine-soft / style-engine-vello / style-engine-tiny 源码中的
+「静默忽略」形态：
   let _ = expr;        # 显式丢弃
   let _name = expr;    # 下划线前缀假绑定
   expr.ok();           # Result 丢弃（.ok() 返回值未消费）
@@ -22,6 +23,7 @@ TOOLS = Path(__file__).resolve().parent
 SCAN_ROOTS = [
     TOOLS.parent.parent / "style-engine-soft" / "src",
     TOOLS.parent.parent / "style-engine-vello" / "src",
+    TOOLS.parent.parent / "style-engine-tiny" / "src",
 ]
 
 # (文件路径子串, 片段子串)——两段都命中才视为白名单匹配。
@@ -88,7 +90,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"sink 忽略卫生通过：soft/vello 源码 0 处静默忽略（白名单 {len(ALLOWLIST)} 条）")
+    print(
+        f"sink 忽略卫生通过：soft/vello/tiny 源码 0 处静默忽略（白名单 {len(ALLOWLIST)} 条）"
+    )
     return 0
 
 
